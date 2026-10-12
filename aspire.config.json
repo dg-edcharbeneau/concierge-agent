@@ -1,0 +1,5 @@
+{
+  "appHost": {
+    "path": "src/Concierge.AppHost/Concierge.AppHost.csproj"
+  }
+}

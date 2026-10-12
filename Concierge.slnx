@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Concierge.AppHost/Concierge.AppHost.csproj" />
+    <Project Path="src/Concierge.Contracts/Concierge.Contracts.csproj" />
+    <Project Path="src/Concierge.ServiceDefaults/Concierge.ServiceDefaults.csproj" />
+    <Project Path="src/Concierge.Web/Concierge.Web.csproj" />
+    <Project Path="src/Concierge.WorkflowServer/Concierge.WorkflowServer.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Concierge.Core.Tests/Concierge.Core.Tests.csproj" />
+  </Folder>
+</Solution>

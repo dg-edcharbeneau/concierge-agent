@@ -1,0 +1,51 @@
+<Project>
+  <Sdk Name="Microsoft.NET.Sdk.Web" />
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- OllamaSharp's optional NativeAOT JSON source generator targets a newer compiler than
+         the pinned SDK. The runtime MEAI adapters do not depend on that generator. -->
+    <NoWarn>$(NoWarn);CS9057</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Pinned here, in exactly one place, so bumping the analyzer package is a one-line change,
+         independent of this template package's own MinVer-derived version. -->
+    <TemporalCommunityAnalyzersVersion>0.5.0</TemporalCommunityAnalyzersVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
+    <PackageReference Include="Azure.Identity" Version="1.21.0" />
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.3" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.8.3" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="OllamaSharp" Version="5.4.30" ExcludeAssets="analyzers" />
+    <PackageReference Include="Temporalio" Version="1.20.0" />
+    <PackageReference Include="Temporalio.Extensions.Hosting" Version="1.20.0" />
+    <PackageReference Include="TemporalCommunity.Extensions.AI" Version="0.14.2" />
+    <PackageReference Include="TemporalCommunity.Extensions.Analyzers" Version="$(TemporalCommunityAnalyzersVersion)" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Concierge.ServiceDefaults\Concierge.ServiceDefaults.csproj" />
+    <ProjectReference Include="..\Concierge.Contracts\Concierge.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Evaluation-only: the Hotel ZGY retrieval evaluation runner reads the single
+         lexical and vector arms. This is not a product surface. -->
+    <InternalsVisibleTo Include="Concierge.Evaluation.Runner" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Data\schema.sql" />
+    <Content Include="..\..\knowledge\hotel-zgy\*.md"
+             Link="knowledge\hotel-zgy\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

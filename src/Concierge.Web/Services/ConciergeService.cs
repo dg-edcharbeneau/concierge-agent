@@ -1,0 +1,320 @@
+using System.Buffers.Text;
+using System.Security.Cryptography;
+using Concierge.Contracts;
+using Microsoft.Extensions.Options;
+using Temporalio.Api.Enums.V1;
+using Temporalio.Client;
+using Temporalio.Common;
+using Temporalio.Exceptions;
+
+namespace Concierge.Web.Services;
+
+/// <summary>Authorizes guest sessions and delegates conversation operations to Temporal.</summary>
+public sealed class ConciergeService(
+    ITemporalClient temporalClient,
+    IOptions<ConciergePersistenceOptions> persistenceOptions,
+    ILogger<ConciergeService> logger) : IConciergeService
+{
+    /// <inheritdoc/>
+    public async Task<ConciergeSessionResponse> VerifyAsync(
+        ConciergeVerificationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request is null
+            || string.IsNullOrWhiteSpace(request.LastName)
+            || request.LastName.Trim().Length > 100
+            || !RoomNumberFormat.IsValid(request.RoomNumber))
+        {
+            throw InvalidRequest();
+        }
+
+        var bearerBytes = RandomNumberGenerator.GetBytes(32);
+        var credential = Base64Url.EncodeToString(bearerBytes);
+        var credentialSha256 = SHA256.HashData(bearerBytes);
+        var sessionId = Guid.NewGuid();
+        var verified = await ExecuteSessionActivityAsync<ConciergeSessionContext?>(
+            ConciergeActivityNames.VerifySession,
+            SessionOperation.Verify,
+            sessionId,
+            new VerifyConciergeSessionActivityRequest(
+                sessionId,
+                credentialSha256,
+                request.LastName,
+                request.RoomNumber),
+            cancellationToken);
+        if (verified is null)
+        {
+            throw new ConciergeApiException(
+                "guest_not_found",
+                "Guest not found",
+                StatusCodes.Status404NotFound);
+        }
+
+        return new ConciergeSessionResponse(
+            credential, verified.EligibilityDeadlineUtc, verified.StayId);
+    }
+
+    /// <inheritdoc/>
+    public async Task<ConciergeTurnResult> SubmitTurnAsync(
+        string? bearerCredential,
+        ConciergeTurnRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request is null
+            || string.IsNullOrWhiteSpace(request.TurnId)
+            || request.TurnId.Length > ConciergeTurnLimits.MaxTurnIdLength
+            || string.IsNullOrWhiteSpace(request.UserMessage)
+            || !ConciergeTurnLimits.IsUserMessageWithinLimit(request.UserMessage)
+            || !ConciergeTurnLimits.IsChannel(request.Channel))
+        {
+            throw InvalidRequest();
+        }
+
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        try
+        {
+            var workflow = await GetStayWorkflowAsync(session, cancellationToken);
+            return await workflow.ExecuteUpdateAsync<ConciergeTurnResult>(
+                ConciergeWorkflowNames.SubmitTurnUpdate,
+                [new ConciergeTurnSubmission(request.TurnId, request.UserMessage, request.Channel)],
+                UpdateOptions(cancellationToken));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            throw MapTemporalFailure(exception, nameof(SubmitTurnAsync));
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<ConciergeHistoryResult> ReadHistoryAsync(
+        string? bearerCredential,
+        CancellationToken cancellationToken = default)
+    {
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        try
+        {
+            var workflow = await GetStayWorkflowAsync(session, cancellationToken);
+            return await workflow.ExecuteUpdateAsync<ConciergeHistoryResult>(
+                ConciergeWorkflowNames.HistoryUpdate,
+                [],
+                UpdateOptions(cancellationToken));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            throw MapTemporalFailure(exception, nameof(ReadHistoryAsync));
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task EndAsync(
+        string? bearerCredential,
+        CancellationToken cancellationToken = default)
+    {
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        try
+        {
+            var workflow = await GetStayWorkflowAsync(session, cancellationToken);
+            await workflow.ExecuteUpdateAsync(
+                ConciergeWorkflowNames.EndInteractionUpdate,
+                [],
+                UpdateOptions(cancellationToken));
+
+            // The update is idempotent, so a retry after an ambiguous response is safe.
+            await ExecuteSessionActivityAsync(
+                ConciergeActivityNames.InvalidateSession,
+                SessionOperation.Invalidate,
+                session.SessionId,
+                new InvalidateConciergeSessionActivityRequest(session.SessionId, session.StayId),
+                cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not ConciergeApiException)
+        {
+            throw MapTemporalFailure(exception, nameof(EndAsync));
+        }
+    }
+
+    private async Task<ConciergeSessionContext> AuthenticateAsync(
+        string? bearerCredential,
+        CancellationToken cancellationToken)
+    {
+        if (!TryHashCredential(bearerCredential, out var credentialSha256))
+        {
+            throw Unauthorized();
+        }
+
+        // The ID only correlates this request; the credential digest selects the session.
+        var requestId = Guid.NewGuid();
+        return await ExecuteSessionActivityAsync<ConciergeSessionContext?>(
+                ConciergeActivityNames.AuthenticateSession,
+                SessionOperation.Authenticate,
+                requestId,
+                new AuthenticateConciergeSessionActivityRequest(credentialSha256),
+                cancellationToken)
+            ?? throw Unauthorized();
+    }
+
+    /// <summary>Runs a session activity that returns <typeparamref name="TResult"/>.</summary>
+    private Task<TResult> ExecuteSessionActivityAsync<TResult>(
+        string activityName,
+        SessionOperation operation,
+        Guid sessionId,
+        object request,
+        CancellationToken cancellationToken) =>
+        RunSessionActivityAsync(
+            activityName,
+            operation,
+            sessionId,
+            request,
+            (handle, rpcOptions) => handle.GetResultAsync<TResult>(rpcOptions),
+            cancellationToken);
+
+    /// <summary>Runs a session activity that has no result.</summary>
+    private Task ExecuteSessionActivityAsync(
+        string activityName,
+        SessionOperation operation,
+        Guid sessionId,
+        object request,
+        CancellationToken cancellationToken) =>
+        RunSessionActivityAsync(
+            activityName,
+            operation,
+            sessionId,
+            request,
+            async (handle, rpcOptions) =>
+            {
+                await handle.GetResultAsync(rpcOptions);
+                return true;
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Runs one session operation as a Temporal Standalone Activity and waits for its result.
+    /// Every call gets a unique activity ID, so the default ID reuse/conflict policies never attach
+    /// one request to another request's execution.
+    /// </summary>
+    private async Task<TResult> RunSessionActivityAsync<TResult>(
+        string activityName,
+        SessionOperation operation,
+        Guid sessionId,
+        object request,
+        Func<ActivityHandle, RpcOptions, Task<TResult>> getResultAsync,
+        CancellationToken cancellationToken)
+    {
+        var operationName = operation.ToString();
+        var activityId =
+            $"concierge-session-{sessionId:N}-{operationName.ToLowerInvariant()}-{Guid.NewGuid():N}";
+        try
+        {
+            var handle = await temporalClient.StartActivityAsync(
+                activityName,
+                [request],
+                new StartActivityOptions(activityId, TemporalWorkerConnection.TaskQueue)
+                {
+                    StartToCloseTimeout = TimeSpan.FromSeconds(20),
+                    RetryPolicy = new RetryPolicy
+                    {
+                        InitialInterval = TimeSpan.FromMilliseconds(500),
+                        MaximumInterval = TimeSpan.FromSeconds(2),
+                        MaximumAttempts = 3,
+                    },
+                    Rpc = new RpcOptions { CancellationToken = cancellationToken },
+                });
+
+            return await getResultAsync(handle, new RpcOptions { CancellationToken = cancellationToken });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            throw MapTemporalFailure(exception, operationName);
+        }
+    }
+
+    private async Task<WorkflowHandle> GetStayWorkflowAsync(
+        ConciergeSessionContext session,
+        CancellationToken cancellationToken)
+    {
+        var workflowId = $"concierge-stay-{session.StayId:N}";
+        return await temporalClient.StartWorkflowAsync(
+            ConciergeWorkflowNames.StayWorkflow,
+            [
+                new ConciergeStayWorkflowInput(
+                    session.StayId,
+                    session.EligibilityDeadlineUtc,
+                    persistenceOptions.Value.FlushIntervalSeconds),
+            ],
+            new WorkflowOptions(workflowId, TemporalWorkerConnection.TaskQueue)
+            {
+                IdReusePolicy = WorkflowIdReusePolicy.AllowDuplicate,
+                IdConflictPolicy = WorkflowIdConflictPolicy.UseExisting,
+                Rpc = new RpcOptions { CancellationToken = cancellationToken },
+            });
+    }
+
+    private static WorkflowUpdateOptions UpdateOptions(CancellationToken cancellationToken) =>
+        new() { Rpc = new RpcOptions { CancellationToken = cancellationToken } };
+
+    private static bool TryHashCredential(string? credential, out byte[] hash)
+    {
+        hash = [];
+        if (string.IsNullOrWhiteSpace(credential) || credential.Length > 128)
+        {
+            return false;
+        }
+
+        try
+        {
+            var bytes = Base64Url.DecodeFromChars(credential);
+            if (bytes.Length != 32)
+            {
+                return false;
+            }
+
+            hash = SHA256.HashData(bytes);
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
+    private ConciergeApiException MapTemporalFailure(Exception exception, string operation)
+    {
+        // Answer "which operation failed?" and "what exception types caused it?"
+        // without logging exception messages, stacks, payloads, or guest/session identifiers.
+        logger.LogWarning(
+            "Concierge Temporal operation {Operation} failed. Cause types: {CauseTypes}.",
+            operation,
+            ConciergeDiagnostics.ExceptionTypeChain(exception));
+
+        return (exception as WorkflowUpdateFailedException)?.InnerException is ApplicationFailureException failure
+            ? failure.ErrorType switch
+            {
+                ConciergeWorkflowNames.TurnConflictErrorType => new ConciergeApiException(
+                    "turn_conflict",
+                    "The turn identifier was already used.",
+                    StatusCodes.Status409Conflict),
+                ConciergeWorkflowNames.StayExpiredErrorType => Unauthorized(),
+                _ => Unavailable(),
+            }
+            : Unavailable();
+    }
+
+    private enum SessionOperation
+    {
+        Verify,
+        Authenticate,
+        Invalidate,
+    }
+
+    private static ConciergeApiException InvalidRequest() =>
+        new("invalid_request", "Check the request details.", StatusCodes.Status400BadRequest);
+
+    private static ConciergeApiException Unauthorized() =>
+        new("unauthorized", "Authenticate again to continue.", StatusCodes.Status401Unauthorized);
+
+    private static ConciergeApiException Unavailable() =>
+        new(
+            "unavailable",
+            "The concierge is temporarily unavailable. Please try again.",
+            StatusCodes.Status503ServiceUnavailable);
+}
