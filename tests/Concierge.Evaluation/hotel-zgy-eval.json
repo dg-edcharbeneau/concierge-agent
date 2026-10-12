@@ -1,0 +1,470 @@
+{
+  "$schema": "./hotel-zgy-eval.schema.json",
+  "packageId": "hotel-zgy-retrieval-eval",
+  "createdOn": "2026-10-08",
+  "scope": {
+    "property": "Hotel ZGY",
+    "purpose": "Initial retrieval and grounded-answer acceptance gates for the Hotel ZGY demo.",
+    "providerImplementationBlocking": false,
+    "retrievalAcceptanceBlocking": true,
+    "guestAnswersRequireSourceTitles": false,
+    "gatedRetrievalArm": "Only the combined (production RetrieveAsync) retrieval arm is gated. Lexical-only and vector-only Recall@5 are reported as comparison numbers, not pass/fail."
+  },
+  "retrievalPolicy": {
+    "finalK": 5,
+    "rrfRankBase": 1,
+    "rrfK": 60,
+    "recallAggregation": "micro_expected_evidence_keys",
+    "retrievedUnit": "deduplicated_source_section_evidence_key",
+    "exactLookupProvenanceRule": "An exact-fact hit carries its sourceId and sectionId and may be rank 1 in the final evidence list."
+  },
+  "initialGates": {
+    "label": "initial_demo_gates_not_universal_benchmarks",
+    "recallAtK": {
+      "k": 5,
+      "threshold": 0.9,
+      "plannedDenominator": 14,
+      "minimumPassingCount": 13
+    },
+    "answerSupport": {
+      "threshold": 1.0,
+      "plannedDenominator": 12,
+      "minimumPassingCount": 12
+    },
+    "noEvidenceBehavior": {
+      "threshold": 1.0,
+      "plannedDenominator": 3,
+      "minimumPassingCount": 3
+    }
+  },
+  "answerSupportRules": {
+    "supported": "Pass only when the response answers every part of the question and covers the case's expected claims (a multi-part answer that omits any part fails even if Recall@5 passes); every hotel fact it states is entailed by a passage that was actually retrieved for that case (any retrieved passage, not only the expected evidence keys); and it adds no invented hotel fact and nothing that contradicts the hotel information. Expected evidence keys measure retrieval (Recall@5) only.",
+    "staff_fallback": "Pass only when the response gives no unsupported answer and does not guess, clearly says the hotel information does not establish the answer, and directly advises the guest to contact hotel staff. The retrieval result does not have to be empty: a related passage does not count as sufficient evidence (for example, phone-charger availability in guest rooms and conference rooms does not establish front-desk charger lending)."
+  },
+  "sourceIdConvention": {
+    "sourceIdPattern": "^zgy-[a-z0-9]+(?:-[a-z0-9]+)*$",
+    "sectionIdPattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    "evidenceKeyFormat": "<sourceId>#<sectionId>",
+    "identityRule": "IDs describe stable document and semantic-section identities, not file paths or titles.",
+    "editRule": "Content edits keep their IDs; renaming or repurposing an ID requires updating every case, planned source, and corpusSnapshot entry that uses it."
+  },
+  "humanReview": {
+    "status": "approved",
+    "reviewedBy": "Cecil Phillip",
+    "reviewedOn": "2026-10-09",
+    "reviewChecklist": [
+      "Questions sound like realistic guest questions.",
+      "Expected evidence is necessary and sufficient.",
+      "Step 4 fictional facts are approved before dependent cases activate.",
+      "No-evidence requests are intentionally absent from the seed corpus.",
+      "Initial gates and scoring math are accepted."
+    ]
+  },
+  "provenance": [
+    {
+      "id": "architecture-brief",
+      "path": "../../.artifacts/hotel-concierge-demo.md",
+      "role": "Accepted Hotel ZGY scope, known geographic anchor, grounding, retrieval, and fallback rules."
+    },
+    {
+      "id": "adr-0007",
+      "path": "../../.artifacts/adr/0007-hotel-qa-phase-one-implementation-plan.md",
+      "role": "Step 3 evaluation requirement and step 4/5 sequencing."
+    },
+    {
+      "id": "hybrid-search-research",
+      "path": "../../.artifacts/hybrid-search-rrf-research.md",
+      "role": "Stable chunk IDs, fixed evaluation set, multi-stage comparison, and RRF research."
+    }
+  ],
+  "plannedSources": [
+    {
+      "sourceId": "zgy-property-overview",
+      "step4SuggestedPath": "knowledge/hotel-zgy/property-overview.md",
+      "requiredSections": [
+        "location"
+      ],
+      "contentStatus": "approved",
+      "trace": "../../.artifacts/hotel-concierge-demo.md#product-and-scope",
+      "notes": "The location section in knowledge/hotel-zgy/property-overview.md records the fictional geographic anchor 2217 NW Miami Court, Miami, FL 33127 and the no-affiliation disclaimer. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+    },
+    {
+      "sourceId": "zgy-amenities",
+      "step4SuggestedPath": "knowledge/hotel-zgy/amenities.md",
+      "requiredSections": [
+        "gym-location",
+        "pool",
+        "phone-chargers"
+      ],
+      "contentStatus": "approved",
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "notes": "knowledge/hotel-zgy/amenities.md records the fourth-floor gym location by the east elevators, pool availability, and phone chargers in guest rooms and conference rooms. No pool hours or location and no front-desk charger lending are stated. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+    },
+    {
+      "sourceId": "zgy-amenity-hours",
+      "step4SuggestedPath": "knowledge/hotel-zgy/amenity-hours.md",
+      "requiredSections": [
+        "gym-hours"
+      ],
+      "contentStatus": "approved",
+      "trace": "../../.artifacts/hotel-concierge-demo.md#real-services-and-demo-fakes",
+      "notes": "The gym-hours section in knowledge/hotel-zgy/amenity-hours.md states the fitness room is open 24 hours daily. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+    },
+    {
+      "sourceId": "zgy-policies",
+      "step4SuggestedPath": "knowledge/hotel-zgy/policies.md",
+      "requiredSections": [
+        "checkout",
+        "late-checkout"
+      ],
+      "contentStatus": "approved",
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "notes": "knowledge/hotel-zgy/policies.md records 11:00 a.m. Eastern Time checkout and the late-checkout policy, including the concierge limitation. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+    },
+    {
+      "sourceId": "zgy-services",
+      "step4SuggestedPath": "knowledge/hotel-zgy/services.md",
+      "requiredSections": [
+        "room-service",
+        "luggage-storage",
+        "hotel-shuttle"
+      ],
+      "contentStatus": "approved",
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "notes": "knowledge/hotel-zgy/services.md records room service from 6:00 a.m. to 10:00 a.m. and 7:00 p.m. to 1:00 a.m. Eastern Time (concierge cannot order), tagged-luggage holding until 8:00 p.m. on checkout day (not overnight), and shuttle availability with no approved schedule or pickup location. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+    },
+    {
+      "sourceId": "zgy-connectivity",
+      "step4SuggestedPath": "knowledge/hotel-zgy/connectivity.md",
+      "requiredSections": [
+        "guest-wi-fi"
+      ],
+      "contentStatus": "approved",
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "notes": "The guest-wi-fi section in knowledge/hotel-zgy/connectivity.md states guests use their room number to access guest Wi-Fi. It does not call the room number a password and names no network. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+    },
+    {
+      "sourceId": "zgy-parking",
+      "step4SuggestedPath": "knowledge/hotel-zgy/parking.md",
+      "requiredSections": [
+        "ev-charging"
+      ],
+      "contentStatus": "approved",
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "notes": "The ev-charging section in knowledge/hotel-zgy/parking.md states EV charging is available at the north end of the building. It makes no garage or parking-price claim. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+    }
+  ],
+  "corpusSnapshot": {
+    "root": "knowledge/hotel-zgy",
+    "repositoryRootFromPackage": "../..",
+    "includePattern": "**/*.md",
+    "hashAlgorithm": "sha256",
+    "capturedOn": "2026-10-09",
+    "rule": "Every Markdown file under the root is listed with its repository-relative path, front-matter sourceId, SHA-256 of the exact file bytes, and byte length. Captured after the 2026-10-09 approved corpus updates and before any comparison run.",
+    "files": [
+      {
+        "path": "knowledge/hotel-zgy/amenities.md",
+        "sourceId": "zgy-amenities",
+        "sha256": "923f1df1e4258034312aa16ec5f20e0bbf1707a2679d5aa5efb4c0c53d8e2335",
+        "byteLength": 389
+      },
+      {
+        "path": "knowledge/hotel-zgy/amenity-hours.md",
+        "sourceId": "zgy-amenity-hours",
+        "sha256": "ccb7dcab88041162223ec74ef9856222ae62d31371b7a16508d4ed7d5d2bbd65",
+        "byteLength": 230
+      },
+      {
+        "path": "knowledge/hotel-zgy/connectivity.md",
+        "sourceId": "zgy-connectivity",
+        "sha256": "c8816230b0328063dc81fc96bc4afbee1d0e3af6d125e08e652e25187f64f74a",
+        "byteLength": 244
+      },
+      {
+        "path": "knowledge/hotel-zgy/parking.md",
+        "sourceId": "zgy-parking",
+        "sha256": "0bad9f1b48beda2f8c30ecd04aecdf2d5e903fac9673a6c3d3b6adf89536d14b",
+        "byteLength": 251
+      },
+      {
+        "path": "knowledge/hotel-zgy/policies.md",
+        "sourceId": "zgy-policies",
+        "sha256": "7a028d3b7eea34057fba7ee0120a505f08c1f57a0904f96ba6ef92719866e54a",
+        "byteLength": 427
+      },
+      {
+        "path": "knowledge/hotel-zgy/property-overview.md",
+        "sourceId": "zgy-property-overview",
+        "sha256": "15b4ce88cc164475d28c7220eb6c6e53d619c56559357c3ba75bc097c683e3c7",
+        "byteLength": 369
+      },
+      {
+        "path": "knowledge/hotel-zgy/services.md",
+        "sourceId": "zgy-services",
+        "sha256": "e00dbb57ec1561838b1de05499f89a47e3d8bec4ef92f15de3513be2e4e7d7f0",
+        "byteLength": 859
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "ZGY-EXACT-001",
+      "category": "exact_term",
+      "status": "active",
+      "question": "What is Hotel ZGY's street address?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-property-overview",
+          "sectionId": "location"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Hotel ZGY's address is 2217 NW Miami Court, Miami, FL 33127."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#product-and-scope",
+      "seedAuthoringNotes": "The location answer is authored in zgy-property-overview#location, including the fictional-anchor and no-affiliation context. Approved and active as of 2026-10-09. The fictional framing is communicated through the README or a live demo, not by the concierge, per Cecil on 2026-10-10."
+    },
+    {
+      "id": "ZGY-EXACT-002",
+      "category": "exact_term",
+      "status": "active",
+      "question": "Where is the gym?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-amenities",
+          "sectionId": "gym-location"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "The Hotel ZGY fitness room is on the fourth floor, next to the east elevators."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "The gym location is authored in zgy-amenities#gym-location. Approved and active as of 2026-10-09."
+    },
+    {
+      "id": "ZGY-EXACT-003",
+      "category": "exact_term",
+      "status": "active",
+      "question": "What time is checkout?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-policies",
+          "sectionId": "checkout"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Hotel ZGY checkout time is 11:00 a.m. Eastern Time."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "The checkout time is authored in zgy-policies#checkout. Approved and active as of 2026-10-09."
+    },
+    {
+      "id": "ZGY-EXACT-004",
+      "category": "exact_term",
+      "status": "active",
+      "question": "How do I access guest Wi-Fi?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-connectivity",
+          "sectionId": "guest-wi-fi"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Guests use their room number to access the Hotel ZGY guest Wi-Fi."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Answered by zgy-connectivity#guest-wi-fi. A supported answer must not call the room number a password or name a network. Added 2026-10-09 per user handoff; approved and active."
+    },
+    {
+      "id": "ZGY-EXACT-005",
+      "category": "exact_term",
+      "status": "active",
+      "question": "Is EV charging available at Hotel ZGY, and where?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-parking",
+          "sectionId": "ev-charging"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "EV charging is available at the north end of the Hotel ZGY building."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Both parts (availability and location) are answered by zgy-parking#ev-charging. A supported answer must not claim a garage or free parking. Added 2026-10-09 per user handoff; approved and active."
+    },
+    {
+      "id": "ZGY-EXACT-006",
+      "category": "exact_term",
+      "status": "active",
+      "question": "Does Hotel ZGY have a pool?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-amenities",
+          "sectionId": "pool"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Hotel ZGY has a pool."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Answered by zgy-amenities#pool. No pool hours or location are approved; a supported answer must not invent them. Added 2026-10-09 per user handoff; approved and active."
+    },
+    {
+      "id": "ZGY-EXACT-007",
+      "category": "exact_term",
+      "status": "active",
+      "question": "Is a hotel shuttle available?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-services",
+          "sectionId": "hotel-shuttle"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Hotel ZGY has a hotel shuttle."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Answered by zgy-services#hotel-shuttle. No schedule, pickup location, cost, or eligibility is approved; a supported answer must not invent them. Added 2026-10-09 per user handoff; approved and active."
+    },
+    {
+      "id": "ZGY-PARA-001",
+      "category": "paraphrase",
+      "status": "active",
+      "question": "When do I need to leave my room on departure day?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-policies",
+          "sectionId": "checkout"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Hotel ZGY checkout time is 11:00 a.m. Eastern Time."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "The checkout fact is authored in zgy-policies#checkout and this case tests paraphrase retrieval. Approved and active as of 2026-10-09."
+    },
+    {
+      "id": "ZGY-PARA-002",
+      "category": "paraphrase",
+      "status": "active",
+      "question": "Can I keep my room a little longer on the day I leave?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-policies",
+          "sectionId": "late-checkout"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Late checkout is subject to availability and must be requested with the front desk; the concierge can explain the policy but cannot change a checkout time or confirm an extension."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "The late-checkout process is authored in zgy-policies#late-checkout, including the concierge limitation. Approved and active as of 2026-10-09."
+    },
+    {
+      "id": "ZGY-PARA-003",
+      "category": "paraphrase",
+      "status": "active",
+      "question": "Can the hotel bring food up to my room?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-services",
+          "sectionId": "room-service"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Hotel ZGY room service is available from 6:00 a.m. to 10:00 a.m. and from 7:00 p.m. to 1:00 a.m. Eastern Time; the concierge cannot place an order."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Room-service availability and the concierge limitation are authored in zgy-services#room-service. Approved and active as of 2026-10-09. The room-service claim was updated to the approved hours; the evening period ends at 1:00 a.m. the following morning."
+    },
+    {
+      "id": "ZGY-MULTI-001",
+      "category": "multi_source",
+      "status": "active",
+      "question": "Where is the gym, and when can I use it?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-amenities",
+          "sectionId": "gym-location"
+        },
+        {
+          "sourceId": "zgy-amenity-hours",
+          "sectionId": "gym-hours"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "The Hotel ZGY fitness room is on the fourth floor, next to the east elevators.",
+        "The Hotel ZGY fitness room is open 24 hours daily."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#evaluation-and-success-criteria",
+      "seedAuthoringNotes": "The gym location and hours are authored separately in zgy-amenities#gym-location and zgy-amenity-hours#gym-hours. Approved and active as of 2026-10-09. The gym-hours claim was updated to the approved 24-hours-daily fact."
+    },
+    {
+      "id": "ZGY-MULTI-002",
+      "category": "multi_source",
+      "status": "active",
+      "question": "When is checkout, and can the hotel hold my bags after I check out?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-policies",
+          "sectionId": "checkout"
+        },
+        {
+          "sourceId": "zgy-services",
+          "sectionId": "luggage-storage"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Hotel ZGY checkout time is 11:00 a.m. Eastern Time.",
+        "After checkout, guests may leave tagged luggage with the front desk until 8:00 p.m. the same day; overnight luggage storage is not available."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#evaluation-and-success-criteria",
+      "seedAuthoringNotes": "Checkout and luggage storage are authored in zgy-policies#checkout and zgy-services#luggage-storage. Approved and active as of 2026-10-09."
+    },
+    {
+      "id": "ZGY-NONE-003",
+      "category": "no_evidence",
+      "status": "active",
+      "question": "Can I borrow a phone charger from the front desk?",
+      "expectedEvidence": [],
+      "answerSupportLabel": "staff_fallback",
+      "expectedClaims": [],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#first-slice-web-chat",
+      "seedAuthoringNotes": "No corpus section establishes front-desk charger lending. zgy-amenities#phone-chargers (chargers available in guest rooms and conference rooms) is a related but insufficient passage and must not be treated as evidence that the front desk lends chargers. Corpus absence confirmed on 2026-10-09 by inspecting the full recorded corpus snapshot; the retrieval result does not have to be empty, and the expected behavior is no guess, a statement that the hotel information does not establish the answer, and direction to hotel staff."
+    },
+    {
+      "id": "ZGY-NONE-004",
+      "category": "no_evidence",
+      "status": "active",
+      "question": "Is parking free for non-hotel guests?",
+      "expectedEvidence": [],
+      "answerSupportLabel": "staff_fallback",
+      "expectedClaims": [],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#first-slice-web-chat",
+      "seedAuthoringNotes": "No corpus section states parking prices, free parking, or non-guest parking terms. zgy-parking#ev-charging (EV charging at the north end of the building) is a related but insufficient passage. Added 2026-10-09 per user handoff. Corpus absence confirmed on 2026-10-09 by inspecting the full recorded corpus snapshot; the retrieval result does not have to be empty, and the expected behavior is no guess, a statement that the hotel information does not establish the answer, and direction to hotel staff."
+    },
+    {
+      "id": "ZGY-NONE-005",
+      "category": "no_evidence",
+      "status": "active",
+      "question": "Are pets allowed in guest rooms?",
+      "expectedEvidence": [],
+      "answerSupportLabel": "staff_fallback",
+      "expectedClaims": [],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#first-slice-web-chat",
+      "seedAuthoringNotes": "No corpus section states a pet policy. Added 2026-10-09 per user handoff. Corpus absence confirmed on 2026-10-09 by inspecting the full recorded corpus snapshot; the retrieval result does not have to be empty, and the expected behavior is no guess, a statement that the hotel information does not establish the answer, and direction to hotel staff."
+    }
+  ]
+}

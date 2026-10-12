@@ -1,0 +1,580 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/hotel-zgy/evaluation/schema",
+  "title": "Hotel ZGY retrieval evaluation package",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "packageId",
+    "createdOn",
+    "scope",
+    "retrievalPolicy",
+    "initialGates",
+    "answerSupportRules",
+    "sourceIdConvention",
+    "humanReview",
+    "provenance",
+    "plannedSources",
+    "corpusSnapshot",
+    "cases"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "packageId": {
+      "const": "hotel-zgy-retrieval-eval"
+    },
+    "createdOn": {
+      "type": "string",
+      "format": "date"
+    },
+    "scope": {
+      "type": "object"
+    },
+    "retrievalPolicy": {
+      "type": "object",
+      "required": [
+        "finalK",
+        "rrfRankBase",
+        "rrfK",
+        "recallAggregation",
+        "retrievedUnit",
+        "exactLookupProvenanceRule"
+      ],
+      "properties": {
+        "finalK": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rrfRankBase": {
+          "const": 1
+        },
+        "rrfK": {
+          "const": 60
+        },
+        "recallAggregation": {
+          "const": "micro_expected_evidence_keys"
+        },
+        "retrievedUnit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exactLookupProvenanceRule": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "initialGates": {
+      "$ref": "#/$defs/gates"
+    },
+    "answerSupportRules": {
+      "type": "object",
+      "required": [
+        "supported",
+        "staff_fallback"
+      ],
+      "properties": {
+        "supported": {
+          "type": "string",
+          "minLength": 1
+        },
+        "staff_fallback": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceIdConvention": {
+      "type": "object"
+    },
+    "humanReview": {
+      "type": "object",
+      "required": [
+        "status",
+        "reviewedBy",
+        "reviewedOn",
+        "reviewChecklist"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "approved",
+            "changes_requested"
+          ]
+        },
+        "reviewedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewedOn": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "reviewChecklist": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reviewedBy": {
+                "type": "null"
+              },
+              "reviewedOn": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reviewedBy": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reviewedOn": {
+                "type": "string",
+                "format": "date"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "provenance": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "path",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "plannedSources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/source"
+      }
+    },
+    "corpusSnapshot": {
+      "$ref": "#/$defs/corpusSnapshot"
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "humanReview": {
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "humanReview"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cases": {
+            "not": {
+              "contains": {
+                "properties": {
+                  "status": {
+                    "const": "active"
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "answerSupportGate": {
+      "type": "object",
+      "required": [
+        "threshold",
+        "plannedDenominator",
+        "minimumPassingCount"
+      ],
+      "properties": {
+        "threshold": {
+          "const": 1.0
+        },
+        "plannedDenominator": {
+          "const": 12
+        },
+        "minimumPassingCount": {
+          "const": 12
+        }
+      },
+      "additionalProperties": false
+    },
+    "noEvidenceGate": {
+      "type": "object",
+      "required": [
+        "threshold",
+        "plannedDenominator",
+        "minimumPassingCount"
+      ],
+      "properties": {
+        "threshold": {
+          "const": 1.0
+        },
+        "plannedDenominator": {
+          "const": 3
+        },
+        "minimumPassingCount": {
+          "const": 3
+        }
+      },
+      "additionalProperties": false
+    },
+    "gates": {
+      "type": "object",
+      "required": [
+        "label",
+        "recallAtK",
+        "answerSupport",
+        "noEvidenceBehavior"
+      ],
+      "properties": {
+        "label": {
+          "const": "initial_demo_gates_not_universal_benchmarks"
+        },
+        "recallAtK": {
+          "$ref": "#/$defs/recallGate"
+        },
+        "answerSupport": {
+          "$ref": "#/$defs/answerSupportGate"
+        },
+        "noEvidenceBehavior": {
+          "$ref": "#/$defs/noEvidenceGate"
+        }
+      },
+      "additionalProperties": false
+    },
+    "recallGate": {
+      "type": "object",
+      "required": [
+        "k",
+        "threshold",
+        "plannedDenominator",
+        "minimumPassingCount"
+      ],
+      "properties": {
+        "k": {
+          "const": 5
+        },
+        "threshold": {
+          "const": 0.9
+        },
+        "plannedDenominator": {
+          "const": 14
+        },
+        "minimumPassingCount": {
+          "const": 13
+        }
+      },
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceId",
+        "step4SuggestedPath",
+        "requiredSections",
+        "contentStatus",
+        "trace",
+        "notes"
+      ],
+      "properties": {
+        "sourceId": {
+          "type": "string",
+          "pattern": "^zgy-[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "step4SuggestedPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requiredSections": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          }
+        },
+        "contentStatus": {
+          "enum": [
+            "authored_unreviewed",
+            "approved"
+          ]
+        },
+        "trace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceId",
+        "sectionId"
+      ],
+      "properties": {
+        "sourceId": {
+          "type": "string"
+        },
+        "sectionId": {
+          "type": "string"
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "category",
+        "status",
+        "question",
+        "expectedEvidence",
+        "answerSupportLabel",
+        "expectedClaims",
+        "trace",
+        "seedAuthoringNotes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^ZGY-(EXACT|PARA|MULTI|NONE)-[0-9]{3}$"
+        },
+        "category": {
+          "enum": [
+            "exact_term",
+            "paraphrase",
+            "multi_source",
+            "no_evidence"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending_human_review",
+            "pending_corpus_confirmation",
+            "active",
+            "retired"
+          ]
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedEvidence": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "answerSupportLabel": {
+          "enum": [
+            "supported",
+            "staff_fallback"
+          ]
+        },
+        "expectedClaims": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "trace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seedAuthoringNotes": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "no_evidence"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "pending_corpus_confirmation",
+                  "active",
+                  "retired"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "pending_human_review",
+                  "active",
+                  "retired"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "corpusSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "repositoryRootFromPackage",
+        "includePattern",
+        "hashAlgorithm",
+        "capturedOn",
+        "rule",
+        "files"
+      ],
+      "properties": {
+        "root": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+        },
+        "repositoryRootFromPackage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "includePattern": {
+          "const": "**/*.md"
+        },
+        "hashAlgorithm": {
+          "const": "sha256"
+        },
+        "capturedOn": {
+          "type": "string",
+          "format": "date"
+        },
+        "rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/snapshotFile"
+          }
+        }
+      }
+    },
+    "snapshotFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sourceId",
+        "sha256",
+        "byteLength"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\\.md$"
+        },
+        "sourceId": {
+          "type": "string",
+          "pattern": "^zgy-[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}
