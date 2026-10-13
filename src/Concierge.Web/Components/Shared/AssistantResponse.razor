@@ -1,0 +1,26 @@
+@* Assistant replies only: guest text must stay encoded plain Razor text. *@
+@if (html is null)
+{
+    @Text
+}
+else
+{
+    <div class="assistant-response">@((MarkupString)html)</div>
+}
+
+@code {
+    private string? renderedText;
+    private string? html;
+
+    /// <summary>The stored assistant reply; it is displayed but never modified.</summary>
+    [Parameter, EditorRequired]
+    public string Text { get; set; } = string.Empty;
+
+    /// <summary>Renders only when the reply text changes.</summary>
+    protected override void OnParametersSet()
+    {
+        if (renderedText is not null && string.Equals(renderedText, Text, StringComparison.Ordinal)) return;
+        renderedText = Text;
+        html = AssistantResponseMarkdown.Render(Text);
+    }
+}

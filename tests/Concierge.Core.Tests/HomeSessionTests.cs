@@ -266,6 +266,27 @@ public sealed class HomeSessionTests
         Assert.Equal(pending.TurnId, Assert.Single(harness.Get<List<ConciergeTranscriptTurn>>("turns")).TurnId);
     }
 
+    /// <summary>Renders assistant Markdown while guest and pending guest text stay literal.</summary>
+    [Fact]
+    public async Task OnlyAssistantRepliesRenderMarkdown()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        harness.Set("turns", new List<ConciergeTranscriptTurn>
+        {
+            new("turn-1", 1, "web", "**x** <b>y</b>", "**Gym** <b>z</b>", DateTimeOffset.UtcNow)
+        });
+        harness.Set("pending", new PendingTurnState("turn-2", "**p** <i>q</i>", "web", DateTimeOffset.UtcNow));
+
+        await harness.Call("StateHasChanged");
+        var (text, markup) = harness.RenderedContent();
+
+        Assert.Contains("**x** <b>y</b>", text);
+        Assert.Contains("**p** <i>q</i>", text);
+        Assert.Contains("<p><strong>Gym</strong> &lt;b&gt;z&lt;/b&gt;</p>", markup);
+        Assert.DoesNotContain(markup, content => content.Contains("<b>", StringComparison.Ordinal) || content.Contains("**x**", StringComparison.Ordinal) || content.Contains("**p**", StringComparison.Ordinal));
+    }
+
     private static ConciergeSessionResponse SessionResponse(string credential, Guid stay)
         => new(credential, DateTimeOffset.UtcNow.AddHours(1), stay);
 
@@ -277,6 +298,7 @@ public sealed class HomeSessionTests
     {
         private readonly Home home = new();
         private readonly TestRenderer renderer = new();
+        private readonly int componentId;
         public FakeService Service { get; } = new();
         public FakeJavaScript JavaScript { get; } = new();
 
@@ -286,7 +308,16 @@ public sealed class HomeSessionTests
             Set("Concierge", Service);
             Set("JavaScript", JavaScript);
             Set("ready", true);
-            renderer.Attach(home);
+            componentId = renderer.Attach(home);
+        }
+
+        /// <summary>Reads encoded text and raw markup from Home's current render tree, including child components.</summary>
+        public (List<string> Text, List<string> Markup) RenderedContent()
+        {
+            var frames = renderer.Frames(componentId);
+            return (
+                frames.Where(frame => frame.FrameType == RenderTreeFrameType.Text).Select(frame => frame.TextContent).ToList(),
+                frames.Where(frame => frame.FrameType == RenderTreeFrameType.Markup).Select(frame => frame.MarkupContent).ToList());
         }
 
         /// <summary>Seeds a verified session for the test.</summary>
@@ -313,6 +344,7 @@ public sealed class HomeSessionTests
                     "session" => ("Restore", new[] { value, (object)DateTimeOffset.UtcNow }),
                     "pending" => ("StartTurn", new[] { value, (object)false }),
                     "draft" => ("SetDraft", new[] { value }),
+                    "turns" => ("ReconcileHistory", new[] { value }),
                     _ => throw new InvalidOperationException($"No state transition is available for '{name}'.")
                 };
                 var modelField = typeof(Home).GetField("model", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -352,7 +384,20 @@ public sealed class HomeSessionTests
     {
         public override Dispatcher Dispatcher { get; } = Dispatcher.CreateDefault();
         /// <summary>Attaches the component without an initial render.</summary>
-        public void Attach(IComponent component) => AssignRootComponentId(component);
+        public int Attach(IComponent component) => AssignRootComponentId(component);
+        /// <summary>Flattens a component's current frames and its descendants' frames.</summary>
+        public List<RenderTreeFrame> Frames(int componentId)
+        {
+            var current = GetCurrentRenderTreeFrames(componentId);
+            var frames = new List<RenderTreeFrame>();
+            for (var index = 0; index < current.Count; index++)
+            {
+                var frame = current.Array[index];
+                frames.Add(frame);
+                if (frame.FrameType == RenderTreeFrameType.Component) frames.AddRange(Frames(frame.ComponentId));
+            }
+            return frames;
+        }
         protected override void HandleException(Exception exception) => throw exception;
         protected override Task UpdateDisplayAsync(in RenderBatch renderBatch) => Task.FromCanceled(new CancellationToken(true));
     }

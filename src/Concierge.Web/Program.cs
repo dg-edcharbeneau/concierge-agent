@@ -16,7 +16,12 @@ builder.Services.AddTemporalClient(options =>
 });
 builder.Services.AddOptions<ConciergePersistenceOptions>()
     .Bind(builder.Configuration.GetSection(ConciergePersistenceOptions.SectionName))
-    .Validate(options => options.FlushIntervalSeconds is >= 1 and <= 600)
+    .Validate(
+        options => options.FlushIntervalSeconds is >= 1 and <= 600,
+        $"{ConciergePersistenceOptions.SectionName}:FlushIntervalSeconds must be between 1 and 600.")
+    .Validate(
+        options => options.FlushBatchSize is >= 1 and <= ConciergePersistenceOptions.MaxFlushBatchSize,
+        $"{ConciergePersistenceOptions.SectionName}:FlushBatchSize must be between 1 and {ConciergePersistenceOptions.MaxFlushBatchSize}.")
     .ValidateOnStart();
 builder.Services.AddScoped<IConciergeService, ConciergeService>();
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);

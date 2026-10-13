@@ -16,9 +16,13 @@ var temporal = builder.AddTemporalDevContainer("temporal", options =>
 })
 .WithDataVolume("temporal-data");
 
-var foundryChatApiKey = builder.AddParameter("foundry-chat-api-key", secret: true, value: "");
-var foundryEmbeddingsApiKey = builder.AddParameter("foundry-embeddings-api-key", secret: true, value: "");
-var deepgramApiKey = builder.AddParameter("deepgram-api-key", secret: true);
+// The string-value overload bypasses configuration, so preserve user-secrets explicitly.
+var foundryChatApiKey = builder.AddParameter(
+    "foundry-chat-api-key", secret: true, value: builder.Configuration["Parameters:foundry-chat-api-key"] ?? "");
+var foundryEmbeddingsApiKey = builder.AddParameter(
+    "foundry-embeddings-api-key", secret: true, value: builder.Configuration["Parameters:foundry-embeddings-api-key"] ?? "");
+var deepgramApiKey = builder.AddParameter(
+    "deepgram-api-key", secret: true, value: builder.Configuration["Parameters:deepgram-api-key"] ?? "");
 
 var workflowServer = builder.AddProject<Projects.Concierge_WorkflowServer>("workflow-server")
     .WithReference(temporal)

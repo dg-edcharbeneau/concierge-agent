@@ -29,6 +29,18 @@ From the repository root:
 just run      # or: aspire run
 ```
 
+The AppHost creates a Dev Tunnel for the Web app. Before starting Aspire the
+first time on a machine, sign in once with the Dev Tunnels CLI:
+
+```bash
+devtunnel user login --github
+```
+
+Alternatively, run `devtunnel user login` to use a Microsoft account. This
+authenticates the tunnel host; the tunnel itself allows anonymous visitors.
+If the Aspire dashboard shows “Dev tunnels requires authentication to
+continue”, complete this sign-in and retry.
+
 
 Verify a demo stay with a last name and room number:
 
@@ -79,11 +91,14 @@ Keys under `AI:Chat:*` and `AI:Embeddings:*`:
 Ollama does not use `ApiKey` or Azure credentials; only Foundry uses the
 optional `ApiKey` / `DefaultAzureCredential` selection described above.
 
-The Deepgram credential belongs to Web:
+The Deepgram credential belongs to Web. It is optional for the current text-only
+app and defaults to empty so startup does not prompt for it. Browser voice is not
+implemented yet; set the key when that integration is implemented. A configured
+AppHost user-secret overrides the empty default.
 
 | AppHost user-secrets key | Target | Notes |
 | --- | --- | --- |
-| `Parameters:deepgram-api-key` | `Deepgram:ApiKey` in `Concierge.Web` | Required secret parameter for the Web voice integration. |
+| `Parameters:deepgram-api-key` | `Deepgram:ApiKey` in `Concierge.Web` | Optional for text-only use; required when browser voice is implemented. |
 
 `appsettings.json` leaves `Endpoint` and `Model` empty and sets `Dimensions` to
 `0`. Outside `Development`, you must set them. Settings are validated at
@@ -99,6 +114,7 @@ Other settings:
 | Key | Owner | Default | Notes |
 | --- | --- | --- | --- |
 | `Concierge:Persistence:FlushIntervalSeconds` | `Concierge.Web` | `30` | How often transcript turns are written to PostgreSQL. 1–600. It applies to stays started after the change. |
+| `Concierge:Persistence:FlushBatchSize` | `Concierge.Web` | `5` | Completed turns that trigger an early transcript write; whichever of batch size or interval comes first wins. 1–100. It applies to stays started after the change. |
 | `Setup:KnowledgeDirectory` | `Concierge.WorkflowServer` | `knowledge/hotel-zgy` | Markdown folder to ingest at startup. |
 | `Setup:OverwriteExistingSeedRecords` | `Concierge.WorkflowServer` | `false` | Updates existing demo guest and stay records on startup. |
 

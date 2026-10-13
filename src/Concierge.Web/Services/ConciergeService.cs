@@ -20,12 +20,19 @@ public sealed class ConciergeService(
         ConciergeVerificationRequest request,
         CancellationToken cancellationToken = default)
     {
-        if (request is null
-            || string.IsNullOrWhiteSpace(request.LastName)
-            || request.LastName.Trim().Length > 100
-            || !RoomNumberFormat.IsValid(request.RoomNumber))
+        if (request is null)
         {
-            throw InvalidRequest();
+            throw InvalidRequest("Provide a verification request with LastName and RoomNumber.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.LastName) || request.LastName.Trim().Length > 100)
+        {
+            throw InvalidRequest("Enter LastName (up to 100 characters).");
+        }
+
+        if (!RoomNumberFormat.IsValid(request.RoomNumber))
+        {
+            throw InvalidRequest("Enter RoomNumber as 1–4 ASCII digits with no leading zero.");
         }
 
         var bearerBytes = RandomNumberGenerator.GetBytes(32);
@@ -60,14 +67,28 @@ public sealed class ConciergeService(
         ConciergeTurnRequest request,
         CancellationToken cancellationToken = default)
     {
-        if (request is null
-            || string.IsNullOrWhiteSpace(request.TurnId)
-            || request.TurnId.Length > ConciergeTurnLimits.MaxTurnIdLength
-            || string.IsNullOrWhiteSpace(request.UserMessage)
-            || !ConciergeTurnLimits.IsUserMessageWithinLimit(request.UserMessage)
-            || !ConciergeTurnLimits.IsChannel(request.Channel))
+        if (request is null)
         {
-            throw InvalidRequest();
+            throw InvalidRequest("Provide a turn request with TurnId, UserMessage, and Channel.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.TurnId)
+            || request.TurnId.Length > ConciergeTurnLimits.MaxTurnIdLength)
+        {
+            throw InvalidRequest(
+                $"Provide a nonblank TurnId of at most {ConciergeTurnLimits.MaxTurnIdLength} characters.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.UserMessage)
+            || !ConciergeTurnLimits.IsUserMessageWithinLimit(request.UserMessage))
+        {
+            throw InvalidRequest(
+                $"Enter a nonblank UserMessage of at most {ConciergeTurnLimits.MaxUserMessageUtf8Bytes} UTF-8 bytes.");
+        }
+
+        if (!ConciergeTurnLimits.IsChannel(request.Channel))
+        {
+            throw InvalidRequest("Set Channel to 'web' or 'voice' (case-sensitive).");
         }
 
         var session = await AuthenticateAsync(bearerCredential, cancellationToken);
@@ -239,7 +260,8 @@ public sealed class ConciergeService(
                 new ConciergeStayWorkflowInput(
                     session.StayId,
                     session.EligibilityDeadlineUtc,
-                    persistenceOptions.Value.FlushIntervalSeconds),
+                    persistenceOptions.Value.FlushIntervalSeconds,
+                    TranscriptFlushBatchSize: persistenceOptions.Value.FlushBatchSize),
             ],
             new WorkflowOptions(workflowId, TemporalWorkerConnection.TaskQueue)
             {
@@ -306,8 +328,8 @@ public sealed class ConciergeService(
         Invalidate,
     }
 
-    private static ConciergeApiException InvalidRequest() =>
-        new("invalid_request", "Check the request details.", StatusCodes.Status400BadRequest);
+    private static ConciergeApiException InvalidRequest(string message) =>
+        new("invalid_request", message, StatusCodes.Status400BadRequest);
 
     private static ConciergeApiException Unauthorized() =>
         new("unauthorized", "Authenticate again to continue.", StatusCodes.Status401Unauthorized);

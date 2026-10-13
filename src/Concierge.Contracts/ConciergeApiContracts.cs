@@ -82,5 +82,10 @@ public sealed class ConciergePersistenceOptions
 {
     public const string SectionName = "Concierge:Persistence";
 
+    public const int DefaultFlushBatchSize = 5;
+    public const int MaxFlushBatchSize = 100;
+
     public int FlushIntervalSeconds { get; set; } = 30;
+
+    public int FlushBatchSize { get; set; } = DefaultFlushBatchSize;
 }

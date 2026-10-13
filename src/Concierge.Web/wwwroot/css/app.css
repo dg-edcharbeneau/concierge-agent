@@ -492,6 +492,89 @@ a:focus-visible {
     border-bottom-left-radius: 3px;
 }
 
+/* Sanitized assistant Markdown; guest and fallback text keep the bubble's pre-wrap. */
+.concierge-bubble {
+    min-width: 0;
+}
+
+.assistant-response {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.assistant-response :is(p, ul, ol, blockquote, pre, table) {
+    margin: 0 0 .75em;
+}
+
+.assistant-response > :first-child {
+    margin-top: 0;
+}
+
+.assistant-response > :last-child,
+.assistant-response li > :last-child {
+    margin-bottom: 0;
+}
+
+.assistant-response :is(ul, ol) {
+    padding-left: 1.4em;
+}
+
+.assistant-response li + li {
+    margin-top: .25em;
+}
+
+.assistant-response blockquote {
+    padding-left: .85em;
+    color: var(--text-secondary);
+    border-left: 2px solid var(--border-color);
+}
+
+.assistant-response code {
+    padding: .1em .3em;
+    background: var(--transcript-background);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: .9em;
+}
+
+.assistant-response pre {
+    max-width: 100%;
+    padding: 10px 12px;
+    overflow-x: auto;
+    background: var(--transcript-background);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    white-space: pre;
+    overflow-wrap: normal;
+}
+
+.assistant-response pre code {
+    padding: 0;
+    background: none;
+    border: 0;
+}
+
+.assistant-response table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    overflow-wrap: normal;
+}
+
+.assistant-response :is(th, td) {
+    padding: 5px 9px;
+    border: 1px solid var(--border-color);
+    text-align: left;
+}
+
+.assistant-response a {
+    color: var(--accent-color);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
 .reply-pending {
     display: flex;
     align-items: center;

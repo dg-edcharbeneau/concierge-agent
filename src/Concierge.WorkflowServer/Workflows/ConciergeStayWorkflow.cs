@@ -16,8 +16,9 @@ namespace Concierge.WorkflowServer.Workflows;
 /// <summary>
 /// One durable workflow per eligible stay. Text and voice sessions for the stay share this
 /// context; turns run one at a time in arrival order. Model, retrieval, and database work
-/// run in activities. Completed turns are buffered here and flushed to PostgreSQL on the
-/// configured interval, at interaction end, before Continue-As-New, and at stay expiry.
+/// run in activities. Completed turns are buffered here and flushed to PostgreSQL when the
+/// configured batch size is reached or the configured interval expires, whichever comes first,
+/// and also at interaction end, before Continue-As-New, and at stay expiry.
 /// </summary>
 [Workflow(ConciergeWorkflowNames.StayWorkflow)]
 public sealed class ConciergeStayWorkflow
@@ -34,6 +35,8 @@ public sealed class ConciergeStayWorkflow
 
     /// <summary>Provider-enforced output cap for each guest answer.</summary>
     public const int AnswerMaxOutputTokens = 1024;
+
+    private const string TranscriptBatchSizePatch = "transcript-flush-batch-size";
 
     /// <summary>
     /// Allowance for the fixed instructions, prompt labels, evidence separators, and
@@ -100,6 +103,7 @@ public sealed class ConciergeStayWorkflow
     private readonly Guid stayId;
     private readonly DateTimeOffset eligibilityDeadlineUtc;
     private readonly TimeSpan flushInterval;
+    private readonly int flushBatchSize;
     private readonly bool hasEarlierRuns;
     private string? continuitySummary;
     private long nextSequence;
@@ -114,6 +118,8 @@ public sealed class ConciergeStayWorkflow
         stayId = input.StayId;
         eligibilityDeadlineUtc = input.EligibilityDeadlineUtc;
         flushInterval = TimeSpan.FromSeconds(Math.Max(1, input.TranscriptFlushIntervalSeconds));
+        flushBatchSize = Math.Clamp(
+            input.TranscriptFlushBatchSize, 1, ConciergePersistenceOptions.MaxFlushBatchSize);
         nextSequence = input.NextSequence;
         hasEarlierRuns = input.NextSequence > 0;
         continuitySummary = input.ContinuitySummary;
@@ -142,13 +148,20 @@ public sealed class ConciergeStayWorkflow
 
             if (pendingPersistence.Count > 0)
             {
-                // Persist a partial batch at most one interval after it starts waiting;
-                // flush early when Continue-As-New is suggested.
+                // Persist a partial batch at most one interval after it starts waiting; flush early
+                // when the batch-size threshold is reached or Continue-As-New is suggested.
+                // The patch keeps replay of histories recorded before the batch-size trigger.
+                var batchSizeApplies = Workflow.Patched(TranscriptBatchSizePatch);
+                bool FlushDue() =>
+                    Workflow.ContinueAsNewSuggested
+                    || (batchSizeApplies && pendingPersistence.Count >= flushBatchSize);
+
                 await Workflow.WaitConditionAsync(
-                    () => Workflow.ContinueAsNewSuggested,
+                    FlushDue,
                     Min(flushInterval, RemainingUntilDeadline()));
 
-                if (!await FlushPendingAsync() && Workflow.ContinueAsNewSuggested)
+                // After a failed flush, back off for an interval instead of retrying immediately.
+                if (!await FlushPendingAsync() && FlushDue())
                 {
                     await Workflow.DelayAsync(flushInterval);
                 }
@@ -168,7 +181,8 @@ public sealed class ConciergeStayWorkflow
                                 (int)flushInterval.TotalSeconds,
                                 nextSequence,
                                 continuitySummary,
-                                recentTurns.ToArray())));
+                                recentTurns.ToArray(),
+                                flushBatchSize)));
                 }
             }
         }

@@ -1,5 +1,6 @@
 ﻿@page "/"
 @rendermode InteractiveServer
+@using Concierge.Web.Components.Shared
 
 <PageTitle>Hotel ZGY Concierge</PageTitle>
 
@@ -188,7 +189,14 @@
                                             </time>
                                         </div>
                                         <div class="message-bubble @(message.IsGuest ? "guest-bubble" : "concierge-bubble")">
-                                            @message.Text
+                                            @if (message.IsGuest)
+                                            {
+                                                @message.Text
+                                            }
+                                            else
+                                            {
+                                                <AssistantResponse Text="@message.Text" />
+                                            }
                                         </div>
                                     </div>
                                 </div>

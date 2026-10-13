@@ -207,7 +207,7 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
     }
 
     [Fact]
-    public async Task MessageOverTheUtf8ByteLimitGetsGenericBadRequest()
+    public async Task MessageOverTheUtf8ByteLimitGetsActionableBadRequest()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
         var today = ConciergeTestHost.HotelToday;
@@ -224,7 +224,7 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
 
         await AssertErrorAsync(response, HttpStatusCode.BadRequest, "invalid_request");
         var body = await response.Content.ReadAsStringAsync();
-        Assert.DoesNotContain("2000", body, StringComparison.Ordinal);
+        Assert.Contains("2000 UTF-8 bytes", body, StringComparison.Ordinal);
         Assert.DoesNotContain("Exception", body, StringComparison.Ordinal);
         Assert.Empty(host.ChatClient.Requests);
     }

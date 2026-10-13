@@ -172,6 +172,44 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         Assert.Equal(["timed-1"], await host.ReadPersistedTurnIdsAsync(stayId));
     }
 
+    [Fact]
+    public async Task CompletedTurnsFlushWhenBatchSizeIsReachedBeforeInterval()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(
+            postgreSql, flushIntervalSeconds: 600, flushBatchSize: 2);
+        var (stayId, handle) = await StartStayAsync(host);
+
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            new ConciergeTurnSubmission("batch-1", "Where is the pool?", "web")));
+        // Below the threshold the batch waits for the 600-second interval.
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        Assert.Empty(await host.ReadPersistedTurnIdsAsync(stayId));
+
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            new ConciergeTurnSubmission("batch-2", "Where is breakfast?", "voice")));
+        await WaitUntilAsync(
+            async () => (await host.ReadPersistedTurnIdsAsync(stayId)).Length == 2,
+            TimeSpan.FromSeconds(15));
+        Assert.Equal(["batch-1", "batch-2"], await host.ReadPersistedTurnIdsAsync(stayId));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(ConciergePersistenceOptions.MaxFlushBatchSize, true)]
+    [InlineData(ConciergePersistenceOptions.MaxFlushBatchSize + 1, false)]
+    public void FlushBatchSizeIsValidatedWithinBounds(int batchSize, bool valid)
+    {
+        var result = new Concierge.WorkflowServer.Setup.ConciergePersistenceOptionsValidator().Validate(
+            null, new ConciergePersistenceOptions { FlushIntervalSeconds = 30, FlushBatchSize = batchSize });
+
+        Assert.Equal(valid, result.Succeeded);
+        if (!valid)
+        {
+            Assert.Contains("FlushBatchSize must be between 1 and 100", result.FailureMessage);
+        }
+    }
+
     /// <summary>End waits for already-admitted turns, persists their replies, and remains safe to repeat.</summary>
     [Fact]
     public async Task EndWaitsForAdmittedTurnsBeforeFlushing()
@@ -287,7 +325,8 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
             [
                 "--dynamic-config-value",
                 "limit.historyCount.suggestContinueAsNew=30",
-            ]);
+            ],
+            flushBatchSize: 7);
         var (stayId, handle) = await StartStayAsync(host);
         var deadline = (await ReadRunInputAsync(host, handle)).EligibilityDeadlineUtc;
         var firstRunId = (await handle.DescribeAsync()).RunId;
@@ -308,6 +347,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         Assert.Equal(deadline, continued.EligibilityDeadlineUtc);
         Assert.Equal(stayId, continued.StayId);
         Assert.Equal(submitted.Count, continued.NextSequence);
+        Assert.Equal(7, continued.TranscriptFlushBatchSize);
 
         // Every earlier-run turn was flushed before Continue-As-New.
         var expectedIds = submitted.Select(turn => turn.TurnId).ToArray();

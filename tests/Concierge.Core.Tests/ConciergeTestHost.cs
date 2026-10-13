@@ -40,7 +40,8 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         WorkflowEnvironment environment,
         WebApplication app,
         ScriptedChatClient chatClient,
-        int flushIntervalSeconds)
+        int flushIntervalSeconds,
+        int flushBatchSize)
     {
         this.database = database;
         DataSource = dataSource;
@@ -48,6 +49,7 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         App = app;
         ChatClient = chatClient;
         FlushIntervalSeconds = flushIntervalSeconds;
+        FlushBatchSize = flushBatchSize;
         Http = new HttpClient { BaseAddress = new Uri(app.Urls.First()) };
     }
 
@@ -62,6 +64,8 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
     public HttpClient Http { get; }
 
     public int FlushIntervalSeconds { get; }
+
+    public int FlushBatchSize { get; }
 
     public static DateOnly HotelToday =>
         DateOnly.FromDateTime(
@@ -83,6 +87,7 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         PostgreSqlFixture postgreSql,
         int flushIntervalSeconds = 30,
         IReadOnlyList<string>? devServerArgs = null,
+        int flushBatchSize = ConciergePersistenceOptions.DefaultFlushBatchSize,
         ILoggerProvider? logProvider = null)
     {
         var database = await postgreSql.CreateDatabaseAsync();
@@ -108,7 +113,11 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         builder.Services.AddSingleton(dataSource);
         builder.Services.AddSingleton<ConciergeSessionService>();
         builder.Services.Configure<ConciergePersistenceOptions>(
-            options => options.FlushIntervalSeconds = flushIntervalSeconds);
+            options =>
+            {
+                options.FlushIntervalSeconds = flushIntervalSeconds;
+                options.FlushBatchSize = flushBatchSize;
+            });
         builder.Services.AddScoped<IConciergeService, ConciergeService>();
         builder.Services.AddSingleton<IChatClient>(chatClient);
         builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
@@ -138,7 +147,8 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
             environment,
             app,
             chatClient,
-            flushIntervalSeconds);
+            flushIntervalSeconds,
+            flushBatchSize);
     }
 
     public async Task<Guid> SeedStayAsync(
@@ -178,7 +188,8 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         var workflowId = $"concierge-stay-{stayId:N}";
         await Environment.Client.StartWorkflowAsync(
             (ConciergeStayWorkflow workflow) => workflow.RunAsync(
-                new ConciergeStayWorkflowInput(stayId, deadline, FlushIntervalSeconds)),
+                new ConciergeStayWorkflowInput(
+                    stayId, deadline, FlushIntervalSeconds, 0, null, null, FlushBatchSize)),
             new WorkflowOptions(workflowId, TemporalWorkerConnection.TaskQueue)
             {
                 IdConflictPolicy = WorkflowIdConflictPolicy.UseExisting,

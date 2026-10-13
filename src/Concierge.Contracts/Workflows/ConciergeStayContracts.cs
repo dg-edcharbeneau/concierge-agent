@@ -10,7 +10,8 @@ public sealed record ConciergeStayWorkflowInput(
     int TranscriptFlushIntervalSeconds,
     long NextSequence = 0,
     string? ContinuitySummary = null,
-    IReadOnlyList<ConciergeTranscriptTurn>? RecentTurns = null);
+    IReadOnlyList<ConciergeTranscriptTurn>? RecentTurns = null,
+    int TranscriptFlushBatchSize = ConciergePersistenceOptions.DefaultFlushBatchSize);
 
 public sealed record ConciergeTurnSubmission(string TurnId, string UserMessage, string Channel);
 
