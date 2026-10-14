@@ -24,6 +24,12 @@ public sealed class SetupOptions
             GivenName = "Taylor",
             FamilyName = "Morgan",
         },
+        new()
+        {
+            GuestId = "9f7dbf12-c5f3-5970-bfbd-002d7056ab3b",
+            GivenName = "Cecil",
+            FamilyName = "Phillip",
+        },
     ];
 
     public List<StaySeedOptions> Stays { get; set; } =
@@ -41,6 +47,13 @@ public sealed class SetupOptions
             ExternalStayKey = "zgy-demo-rm-0812",
             GuestId = "e9f93b63-8607-58f7-8c5a-296bcbe7ea38",
             RoomNumber = "812",
+        },
+        new()
+        {
+            StayId = "10e544bb-deb3-53d4-9295-f90b1787c7b3",
+            ExternalStayKey = "zgy-demo-rm-112",
+            GuestId = "9f7dbf12-c5f3-5970-bfbd-002d7056ab3b",
+            RoomNumber = "112",
         },
     ];
 }

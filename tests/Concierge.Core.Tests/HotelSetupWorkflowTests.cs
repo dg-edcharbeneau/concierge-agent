@@ -53,6 +53,28 @@ public sealed class HotelSetupWorkflowTests(PostgreSqlFixture postgres)
         Assert.Equal(3, fixture.EmbeddingGenerator.CallCount);
         Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM knowledge_chunks;"));
         Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM hotel_facts;"));
+        Assert.Equal(3, await fixture.ScalarAsync<long>("SELECT count(*) FROM guests;"));
+        Assert.Equal(3, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
+        Assert.Equal(
+            "Cecil",
+            await fixture.ScalarAsync<string>(
+                "SELECT given_name FROM guests WHERE guest_id = $1;",
+                Guid.Parse("9f7dbf12-c5f3-5970-bfbd-002d7056ab3b")));
+        Assert.Equal(
+            "Phillip",
+            await fixture.ScalarAsync<string>(
+                "SELECT family_name FROM guests WHERE guest_id = $1;",
+                Guid.Parse("9f7dbf12-c5f3-5970-bfbd-002d7056ab3b")));
+        Assert.Equal(
+            "112",
+            await fixture.ScalarAsync<string>(
+                """
+                SELECT room_number FROM stays
+                WHERE stay_id = $1
+                  AND external_stay_key = 'zgy-demo-rm-112'
+                  AND guest_id = '9f7dbf12-c5f3-5970-bfbd-002d7056ab3b';
+                """,
+                Guid.Parse("10e544bb-deb3-53d4-9295-f90b1787c7b3")));
 
         var firstCheckoutHash = await fixture.SectionHashAsync("checkout");
         var firstLateCheckoutHash = await fixture.SectionHashAsync("late-checkout");
@@ -63,8 +85,8 @@ public sealed class HotelSetupWorkflowTests(PostgreSqlFixture postgres)
 
         await fixture.RunSetupAsync(OverwriteExistingSeedRecords: false);
         Assert.Equal(3, fixture.EmbeddingGenerator.CallCount);
-        Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM guests;"));
-        Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
+        Assert.Equal(3, await fixture.ScalarAsync<long>("SELECT count(*) FROM guests;"));
+        Assert.Equal(3, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
         Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM knowledge_chunks;"));
         Assert.Equal(oldGivenName, await fixture.ScalarAsync<string>(
             "SELECT given_name FROM guests WHERE guest_id = $1;",
@@ -95,8 +117,8 @@ public sealed class HotelSetupWorkflowTests(PostgreSqlFixture postgres)
         Assert.NotEqual(firstLateCheckoutHash, await fixture.SectionHashAsync("late-checkout"));
         Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM ingestion_versions;"));
         Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM knowledge_chunks;"));
-        Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM guests;"));
-        Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
+        Assert.Equal(3, await fixture.ScalarAsync<long>("SELECT count(*) FROM guests;"));
+        Assert.Equal(3, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
         Assert.Equal(1, changed.EmbeddedSectionCount);
         Assert.Equal("Casey", await fixture.ScalarAsync<string>(
             "SELECT given_name FROM guests WHERE guest_id = $1;",
@@ -288,7 +310,7 @@ public sealed class HotelSetupWorkflowTests(PostgreSqlFixture postgres)
         Assert.Contains(externalKey, mismatch.Message, StringComparison.Ordinal);
         Assert.Contains(changedStayId.ToString(), mismatch.Message, StringComparison.Ordinal);
         Assert.Contains(originalStayId.ToString(), mismatch.Message, StringComparison.Ordinal);
-        Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
+        Assert.Equal(3, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
         Assert.Equal(originalStayId, await fixture.ScalarAsync<Guid>(
             "SELECT stay_id FROM stays WHERE external_stay_key = $1;",
             externalKey));
@@ -315,7 +337,7 @@ public sealed class HotelSetupWorkflowTests(PostgreSqlFixture postgres)
         Assert.Contains(changedKey, mismatch.Message, StringComparison.Ordinal);
         Assert.Contains(originalKey, mismatch.Message, StringComparison.Ordinal);
         Assert.Contains(stayId.ToString(), mismatch.Message, StringComparison.Ordinal);
-        Assert.Equal(2, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
+        Assert.Equal(3, await fixture.ScalarAsync<long>("SELECT count(*) FROM stays;"));
         Assert.Equal(originalKey, await fixture.ScalarAsync<string>(
             "SELECT external_stay_key FROM stays WHERE stay_id = $1;",
             stayId));
