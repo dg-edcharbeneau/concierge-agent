@@ -29,11 +29,25 @@ From the repository root:
 just run      # or: aspire run
 ```
 
-The AppHost creates a Dev Tunnel for the Web app. Before starting Aspire the
-first time on a machine, sign in once with the Dev Tunnels CLI:
+The AppHost creates an anonymous Dev Tunnel for Web's dedicated Think endpoint
+(`POST /v1/chat/completions`); the normal Web endpoint and UI are not exposed by
+that tunnel. The dedicated Think listener and tunnel's local forwarding use
+HTTPS with the existing ASP.NET Core development certificate; all Web listeners
+are HTTPS-only. A terminal `MapWhen` branch isolates Think from Razor, UI error
+and status pages, HSTS, and antiforgery. The exact, case-insensitive
+`POST /v1/chat/completions` (no trailing slash) returns **501 JSON** with an
+OpenAI-shaped `error` indicating that the Think handler is not implemented.
+Other Think paths/methods, and that exact path on normal listeners, return empty
+**404** responses. A bounded live test on 2026-10-13 verified identical
+local/public 501 bodies, empty 404s, and preserved UI/API/health behavior with
+normal certificate validation and no redirects. This verifies HTTPS forwarding
+and pending-handler isolation, not the Think protocol or Deepgram integration.
+Aspire injects the assigned public Think URL into Web as
+`THINK_PUBLIC_URL`; no tunnel URL argument is needed. Before starting Aspire
+the first time on a machine, sign in once with the Dev Tunnels CLI:
 
 ```bash
-devtunnel user login --github
+devtunnel user login
 ```
 
 Alternatively, run `devtunnel user login` to use a Microsoft account. This
@@ -63,33 +77,55 @@ Docker must be running for the integration tests.
 
 ## Configuration
 
-AI provider and setup options belong to `Concierge.WorkflowServer`. The
-transcript persistence interval is configured on `Concierge.Web`. App secrets
-are stored in the AppHost user-secrets store and passed only to the service
-that needs them.
+The AppHost owns all AI configuration defaults, separately for chat and
+embeddings, and passes configured values to `Concierge.WorkflowServer`. There
+are no AI defaults in the workflow server's appsettings files. The workflow
+server owns setup options. The transcript persistence interval is
+configured on `Concierge.Web`. App secrets are stored in the AppHost
+user-secrets store and passed only to the service that needs them.
 
 ```bash
-dotnet user-secrets --project src/Concierge.AppHost set "Parameters:foundry-chat-api-key" "<key>"
-dotnet user-secrets --project src/Concierge.AppHost set "Parameters:foundry-embeddings-api-key" "<key>"
-dotnet user-secrets --project src/Concierge.AppHost set "Parameters:deepgram-api-key" "<key>"
+aspire secret set "Parameters:foundry-chat-api-key" "<key>" --apphost src/Concierge.AppHost
+aspire secret set "Parameters:foundry-embeddings-api-key" "<key>" --apphost src/Concierge.AppHost
+aspire secret set "Parameters:deepgram-api-key" "<key>" --apphost src/Concierge.AppHost
+aspire secret list --apphost src/Concierge.AppHost
 ```
+
+`aspire secret` writes to the same store as `dotnet user-secrets --project
+src/Concierge.AppHost`; either works.
 
 Keys under `AI:Chat:*` and `AI:Embeddings:*`:
 
 | Key | Configuration owner | Development value | Notes |
 | --- | --- | --- | --- |
-| `Provider` | `Concierge.WorkflowServer` | `Ollama` | `Ollama` or `Foundry` (Azure AI Foundry / Azure OpenAI). |
-| `Endpoint` | `Concierge.WorkflowServer` | `http://127.0.0.1:11434` | Foundry requires HTTPS. |
-| `Model` | `Concierge.WorkflowServer` | `qwen3.8:27b-mlx` / `embeddinggemma-2:740m` | For Foundry, use the deployment name. |
-| `AI:Chat:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | empty | Set `Parameters:foundry-chat-api-key` only when using a Foundry chat deployment. If unset, Foundry uses `DefaultAzureCredential`; Ollama starts without prompting and ignores this setting. |
-| `AI:Embeddings:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | empty | Set `Parameters:foundry-embeddings-api-key` only when using Foundry embeddings. If unset, Foundry uses `DefaultAzureCredential`; Ollama starts without prompting and ignores this setting. |
-| `RequestTimeoutSeconds` | `Concierge.WorkflowServer` | `180` | Must be positive. Default `60`. |
-| `MaxConcurrentRequests` | `Concierge.WorkflowServer` | `2` | Must be positive. Default `4`. |
-| `AI:Chat:ContextWindowTokens` | `Concierge.WorkflowServer` | `32768` (default) | Sent to Ollama as `num_ctx`. |
-| `AI:Embeddings:Dimensions` | `Concierge.WorkflowServer` | `768` | Must be `768`. The schema uses `vector(768)`. |
+| `Provider` | AppHost → `Concierge.WorkflowServer` | `Ollama` | `Ollama` or `Foundry` (Azure AI Foundry / Azure OpenAI), case-insensitive. The AppHost stops with an error for any other value. |
+| `Endpoint` | AppHost → `Concierge.WorkflowServer` | `http://127.0.0.1:11434` | Foundry requires HTTPS. |
+| `Model` | AppHost → `Concierge.WorkflowServer` | `qwen3.8:27b-mlx` / `embeddinggemma-2:740m` | For Foundry, use the deployment name. |
+| `AI:Chat:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | not created | Created only when `AI:Chat:Provider` is `Foundry`, from `Parameters:foundry-chat-api-key`. If unset, Foundry uses `DefaultAzureCredential`; Aspire does not prompt. |
+| `AI:Embeddings:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | not created | Created only when `AI:Embeddings:Provider` is `Foundry`, from `Parameters:foundry-embeddings-api-key`. If unset, Foundry uses `DefaultAzureCredential`; Aspire does not prompt. |
+| `RequestTimeoutSeconds` | AppHost → `Concierge.WorkflowServer` | `180` | Must be positive. Options default `60`. |
+| `MaxConcurrentRequests` | AppHost → `Concierge.WorkflowServer` | `2` | Must be positive. Options default `4`. |
+| `AI:Chat:ContextWindowTokens` | AppHost → `Concierge.WorkflowServer` | `32768` | Sent to Ollama as `num_ctx`. |
+| `AI:Embeddings:Dimensions` | AppHost → `Concierge.WorkflowServer` | `768` | Must be `768`. The schema uses `vector(768)`. |
 
-Ollama does not use `ApiKey` or Azure credentials; only Foundry uses the
-optional `ApiKey` / `DefaultAzureCredential` selection described above.
+The AppHost's Ollama defaults are in `src/Concierge.AppHost/appsettings.Development.json`.
+To use Foundry for a capability, override its keys in the AppHost
+user-secrets store. For example, for chat:
+
+```bash
+aspire secret set "AI:Chat:Provider" "Foundry" --apphost src/Concierge.AppHost
+aspire secret set "AI:Chat:Endpoint" "https://<resource>.openai.azure.com/" --apphost src/Concierge.AppHost
+aspire secret set "AI:Chat:Model" "<deployment>" --apphost src/Concierge.AppHost
+```
+
+With Ollama, the AppHost creates no Foundry parameters, so none appear on the
+dashboard. Ollama does not use `ApiKey` or Azure credentials.
+
+Under Aspire, all configured AI settings reach the workflow server as
+environment variables. Change defaults only in the AppHost settings files;
+AppHost user-secrets and environment variables can override them. The
+[retrieval evaluation runner](tests/Concierge.Evaluation/README.md#run-the-comparison)
+loads those same central Development defaults, with environment overrides.
 
 The Deepgram credential belongs to Web. It is optional for the current text-only
 app and defaults to empty so startup does not prompt for it. Browser voice is not
@@ -100,14 +136,34 @@ AppHost user-secret overrides the empty default.
 | --- | --- | --- |
 | `Parameters:deepgram-api-key` | `Deepgram:ApiKey` in `Concierge.Web` | Optional for text-only use; required when browser voice is implemented. |
 
-`appsettings.json` leaves `Endpoint` and `Model` empty and sets `Dimensions` to
-`0`. Outside `Development`, you must set them. Settings are validated at
-startup.
+The AppHost's base `appsettings.json` selects Foundry, uses `768` embedding
+dimensions, a `32768` chat context window, `60`-second timeouts, and concurrency
+`4`. Its endpoints and models are deliberately empty: outside `Development`,
+configure `AI:Chat:Endpoint`, `AI:Chat:Model`, `AI:Embeddings:Endpoint`, and
+`AI:Embeddings:Model`. "Missing endpoint or model" means the service URL or
+deployment name has not been supplied, not that the deployed model is missing.
+AppHost stops with an error naming the required key and central settings file;
+it never silently falls back to Ollama. Switching a Development capability to
+Foundry also requires overriding both its endpoint and model. The worker's
+existing validators enforce HTTPS for Foundry, dimensions, and request limits.
 
-Under Aspire, the WorkflowServer launch profile sets `Development`, which loads
-`appsettings.Development.json` (the Ollama defaults). Secrets are loaded by the
-AppHost and injected into the relevant service; WorkflowServer does not have a
-separate user-secrets store.
+### Standalone WorkflowServer
+
+Without Aspire, supply AI settings explicitly through environment variables
+(`AI__Chat__Endpoint`, etc.), command-line configuration, or local configuration.
+The worker does not automatically load AppHost files or AppHost user-secrets.
+For Foundry, set each capability's `Endpoint` and `Model`, plus
+`AI__Embeddings__Dimensions=768`; `Provider` defaults to `Foundry`. Set
+`AI__Chat__ApiKey` / `AI__Embeddings__ApiKey` only for API-key authentication;
+omitting them uses `DefaultAzureCredential`.
+
+For Ollama, also set both `Provider` values to `Ollama`, with the local service
+URL and model names from the table above. Timeout, concurrency, and context
+window are optional: the options defaults are `60`, `4`, and `32768`.
+To reproduce Aspire Development's request limits, explicitly set each
+capability's `RequestTimeoutSeconds=180` and `MaxConcurrentRequests=2`.
+Standalone execution also requires the normal database and Temporal connection
+configuration. WorkflowServer has no separate user-secrets store.
 
 Other settings:
 

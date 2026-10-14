@@ -14,6 +14,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Concierge.AppHost;
+using Concierge.Evaluation;
 using Concierge.WorkflowServer.Activities;
 using Concierge.WorkflowServer.AI;
 using Concierge.WorkflowServer.Data;
@@ -116,7 +117,7 @@ await container.StartAsync();
 await using var dataSource = NpgsqlDataSource.Create(container.GetConnectionString());
 await new DatabaseMigrator(dataSource, NullLogger<DatabaseMigrator>.Instance).MigrateAsync();
 
-// 3. Product AI provider registration with the product Development (Ollama) configuration.
+// 3. Product AI provider registration with the central AppHost Development defaults.
 await using var temporal = await WorkflowEnvironment.StartLocalAsync();
 var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
 {
@@ -124,9 +125,7 @@ var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
     EnvironmentName = "Development",
 });
 builder.Configuration.Sources.Clear();
-builder.Configuration
-    .AddJsonFile(Path.Combine(repoRoot, "src/Concierge.WorkflowServer/appsettings.json"))
-    .AddJsonFile(Path.Combine(repoRoot, "src/Concierge.WorkflowServer/appsettings.Development.json"));
+builder.Configuration.AddEvaluationDefaults(repoRoot);
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.Services.AddConciergeAIProviders(builder.Configuration);
 builder.Services.Configure<SetupOptions>(builder.Configuration.GetSection(SetupOptions.SectionName));
@@ -150,9 +149,31 @@ var embeddingIdentity = new EmbeddingModelIdentity(
     embeddingOptions.Value.Provider,
     embeddingOptions.Value.Model,
     embeddingOptions.Value.Dimensions);
-var modelIdentities = await ReadOllamaIdentitiesAsync(
-    chatOptions.Endpoint,
-    [chatOptions.Model, embeddingOptions.Value.Model]);
+// Only Ollama exposes these provenance APIs; never send them to Foundry.
+JsonNode modelIdentities;
+if (string.Equals(chatOptions.Provider, AIProviderNames.Ollama, StringComparison.OrdinalIgnoreCase)
+    && string.Equals(embeddingOptions.Value.Provider, AIProviderNames.Ollama, StringComparison.OrdinalIgnoreCase)
+    && chatOptions.Endpoint == embeddingOptions.Value.Endpoint)
+{
+    // Keep the existing provenance shape for the default single Ollama service.
+    modelIdentities = await ReadOllamaIdentitiesAsync(
+        chatOptions.Endpoint, [chatOptions.Model, embeddingOptions.Value.Model]);
+}
+else
+{
+    var identities = new JsonObject();
+    foreach (var (capability, options) in new (string, AIProviderOptions)[]
+    {
+        ("chat", chatOptions), ("embeddings", embeddingOptions.Value),
+    })
+    {
+        if (string.Equals(options.Provider, AIProviderNames.Ollama, StringComparison.OrdinalIgnoreCase))
+        {
+            identities[capability] = await ReadOllamaIdentitiesAsync(options.Endpoint, [options.Model]);
+        }
+    }
+    modelIdentities = identities;
+}
 
 // 4. Ingest with the product setup workflow and activities.
 var ingestionTimer = Stopwatch.StartNew();

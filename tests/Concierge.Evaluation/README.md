@@ -100,6 +100,32 @@ On 2026-10-09 the validator passed and all 24 negative-test cases passed.
 These checks verify only the package shape, consistency, and corpus snapshot.
 They do not produce retrieval or answer-quality results.
 
+## Run the comparison
+
+From the repository root, with Docker running and the configured model services
+available:
+
+```bash
+dotnet run --project tests/Concierge.Evaluation/runner -- --run-id central-config
+```
+
+The runner reads setup defaults from WorkflowServer's settings files and AI
+defaults from `src/Concierge.AppHost/appsettings.json` followed by
+`appsettings.Development.json`. Models, embedding dimensions, request limits,
+and chat context window therefore match Aspire Development without a second
+copy of the defaults. Environment variables are loaded last and override them,
+for example `AI__Chat__Model` or `AI__Embeddings__Endpoint`. The existing
+`--run-id` argument labels output; it is not a configuration override.
+
+The runner does not load AppHost user-secrets or resolve Aspire parameters.
+For Foundry, override that capability's `Provider`, HTTPS `Endpoint`, and
+`Model` (deployment name) through environment variables. Supply
+`AI__Chat__ApiKey` / `AI__Embeddings__ApiKey` only for API-key authentication;
+otherwise Foundry uses `DefaultAzureCredential`. Dimensions remain `768` for
+the current schema. Ollama provenance is collected separately for each
+Ollama capability at its configured endpoint; Foundry receives no Ollama API
+requests. API keys are not recorded in results.
+
 ## Contract summary
 
 - The package evaluates retrieval evidence and grounded-answer behavior. It

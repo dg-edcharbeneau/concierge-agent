@@ -25,11 +25,15 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Concierge.WorkflowServer\Concierge.WorkflowServer.csproj" />
     <ProjectReference Include="..\..\src\Concierge.Web\Concierge.Web.csproj" />
+    <ProjectReference Include="..\..\src\Concierge.AppHost\Concierge.AppHost.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\..\src\Concierge.AppHost\PostgreSqlContainerImage.cs"
              Link="Shared\PostgreSqlContainerImage.cs" />
+    <Compile Include="..\Concierge.Evaluation\runner\EvaluationConfiguration.cs"
+             Link="Shared\EvaluationConfiguration.cs" />
   </ItemGroup>
 
   <ItemGroup>
