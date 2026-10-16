@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using Google.Protobuf;
+using Temporalio.Api.Enums.V1;
 using Concierge.Contracts;
 using Concierge.Web.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -272,6 +273,60 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
         var history = await workflow.FetchHistoryAsync();
         Assert.Single(history.Events, historyEvent =>
             historyEvent.WorkflowExecutionUpdateAcceptedEventAttributes?.AcceptedRequest.Meta.UpdateId == turnId);
+    }
+
+    /// <summary>
+    /// Regression: after the stay workflow continues as new, the current run's first-execution run ID
+    /// is the chain's original run, so Web updates must not pin the handle returned by
+    /// StartWorkflowAsync(UseExisting) or the server rejects them as "workflow execution not found".
+    /// </summary>
+    [Fact]
+    public async Task WebCallsSucceedAfterStayWorkflowContinuesAsNew()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(
+            postgreSql,
+            devServerArgs:
+            [
+                "--dynamic-config-value",
+                "limit.historyCount.suggestContinueAsNew=160",
+            ]);
+        var today = ConciergeTestHost.HotelToday;
+        var stayId = await host.SeedStayAsync("Rivera", "412", today, today.AddDays(2));
+        var credential = await VerifiedCredentialAsync(host, "Rivera", "412");
+        var workflow = host.Environment.Client.GetWorkflowHandle($"concierge-stay-{stayId:N}");
+
+        var submitted = new List<string> { (await SubmitAsync(host, credential, Turn("can-0", "Hello", "web"))).TurnId };
+        var firstRunId = (await workflow.DescribeAsync()).RunId;
+        for (var index = 1; index < 20 && (await workflow.DescribeAsync()).RunId == firstRunId; index++)
+        {
+            // The first submissions run while the original run is still current.
+            submitted.Add((await SubmitAsync(host, credential, Turn($"can-{index}", $"Question {index}", "web"))).TurnId);
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(2);
+            while ((await workflow.DescribeAsync()).RunId == firstRunId && DateTimeOffset.UtcNow < deadline)
+            {
+                await Task.Delay(100);
+            }
+        }
+
+        var current = await workflow.DescribeAsync();
+        Assert.NotEqual(firstRunId, current.RunId);
+        Assert.Equal(WorkflowExecutionStatus.Running, current.Status);
+
+        // Every Web operation that targets the stay workflow still reaches the continued run.
+        var after = await SubmitAsync(host, credential, Turn("after-can", "Anything else?", "web"));
+        Assert.Equal(submitted.Count, after.Sequence);
+        submitted.Add(after.TurnId);
+        Assert.Equal(submitted, await HistoryTurnIdsAsync(host, credential));
+
+        await using var scope = host.App.Services.CreateAsyncScope();
+        var service = scope.ServiceProvider.GetRequiredService<IConciergeService>();
+        var voice = await service.AuthorizeVoiceAsync(credential);
+        Assert.Equal(stayId, voice.Session.StayId);
+        Assert.True(voice.HasTurns);
+
+        var ended = await Send(host, HttpMethod.Post, "/api/concierge/end", credential);
+        Assert.Equal(HttpStatusCode.NoContent, ended.StatusCode);
+        Assert.Equal(submitted, await host.ReadPersistedTurnIdsAsync(stayId));
     }
 
     private static async Task<string> VerifiedCredentialAsync(

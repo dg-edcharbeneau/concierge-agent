@@ -332,7 +332,11 @@ public sealed class ConciergeService(
         CancellationToken cancellationToken)
     {
         var workflowId = $"concierge-stay-{session.StayId:N}";
-        return await temporalClient.StartWorkflowAsync(
+        // Start (or join, via UseExisting) only to guarantee the stay workflow exists. Do not use the
+        // returned handle: it pins FirstExecutionRunId to the *current* run ID, and after Continue-As-New
+        // the current run's first-execution run ID is the chain's original run, so updates sent through
+        // that handle fail with "workflow execution not found". An unpinned handle targets the latest run.
+        await temporalClient.StartWorkflowAsync(
             ConciergeWorkflowNames.StayWorkflow,
             [
                 new ConciergeStayWorkflowInput(
@@ -348,6 +352,7 @@ public sealed class ConciergeService(
                 IdConflictPolicy = WorkflowIdConflictPolicy.UseExisting,
                 Rpc = new RpcOptions { CancellationToken = cancellationToken },
             });
+        return temporalClient.GetWorkflowHandle(workflowId);
     }
 
     private static WorkflowUpdateOptions UpdateOptions(CancellationToken cancellationToken) =>
