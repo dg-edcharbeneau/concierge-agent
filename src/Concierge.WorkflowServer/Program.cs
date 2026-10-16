@@ -9,6 +9,8 @@ using Concierge.Contracts;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 using TemporalCommunity.Extensions.AI;
 using Temporalio.Extensions.Hosting;
 
@@ -44,7 +46,20 @@ var connectOptions = TemporalWorkerConnection.Resolve();
 builder.Services.AddTemporalClient(options =>
 {
     TemporalWorkerConnection.ApplyTo(connectOptions, options);
+    // The worker below uses this client, so it inherits the tracing interceptor.
+    TemporalTelemetry.ApplyTo(options);
 });
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddSource([.. TemporalTelemetry.ActivitySourceNames])
+        .AddSource(DurableChatTelemetry.ActivitySourceName)
+        .AddSource(ConciergeAITelemetry.MeaiSourceName)
+        .AddSource("Npgsql"))
+    .WithMetrics(metrics => metrics
+        .AddMeter(TemporalTelemetry.MeterName)
+        .AddMeter(DurableChatTelemetry.MeterName)
+        .AddMeter(ConciergeAITelemetry.MeaiSourceName)
+        .AddMeter("Npgsql"));
 
 builder.Services.AddHostedTemporalWorker(TemporalWorkerConnection.TaskQueue)
     .AddDurableAI(options => options.RegisterDefaultWorkflow = false)
@@ -56,6 +71,8 @@ builder.Services.AddHostedTemporalWorker(TemporalWorkerConnection.TaskQueue)
     .AddScopedActivities<ConciergeSessionActivities>()
     .AddScopedActivities<SetupActivities>();
 builder.Services.AddHostedService<SetupWorkflowStarter>();
+// Ollama only (no-op for Foundry): load the embedding model before the first guest question.
+builder.Services.AddHostedService<OllamaEmbeddingWarmup>();
 
 builder.Services.AddSingleton<IPostgreSqlReadinessProbe, PostgreSqlReadinessProbe>();
 builder.Services.AddSingleton<ITemporalReadinessProbe, TemporalReadinessProbe>();

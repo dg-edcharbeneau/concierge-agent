@@ -16,6 +16,7 @@ built with .NET 10, Temporal, and .NET Aspire.
   ```bash
   ollama pull qwen3.8:27b-mlx
   ollama pull embeddinggemma-2:740m
+  ollama create concierge-chat -f models/ollama/Modelfile.concierge-chat
   ```
 
 To use Azure AI Foundry / Azure OpenAI instead of Ollama, see
@@ -35,13 +36,15 @@ that tunnel. The dedicated Think listener and tunnel's local forwarding use
 HTTPS with the existing ASP.NET Core development certificate; all Web listeners
 are HTTPS-only. A terminal `MapWhen` branch isolates Think from Razor, UI error
 and status pages, HSTS, and antiforgery. The exact, case-insensitive
-`POST /v1/chat/completions` (no trailing slash) returns **501 JSON** with an
-OpenAI-shaped `error` indicating that the Think handler is not implemented.
+`POST /v1/chat/completions` (no trailing slash) requires a short-lived,
+stay-bound voice bearer and returns a completed Temporal answer as SSE
+(assistant role, content, stop, `[DONE]`). Deepgram's supplied history is
+ignored; the stay workflow owns shared text/voice context.
 Other Think paths/methods, and that exact path on normal listeners, return empty
 **404** responses. A bounded live test on 2026-10-13 verified identical
 local/public 501 bodies, empty 404s, and preserved UI/API/health behavior with
-normal certificate validation and no redirects. This verifies HTTPS forwarding
-and pending-handler isolation, not the Think protocol or Deepgram integration.
+normal certificate validation and no redirects. That historical probe verified
+the then-pending handler's isolation, not the subsequently implemented voice protocol.
 Aspire injects the assigned public Think URL into Web as
 `THINK_PUBLIC_URL`; no tunnel URL argument is needed. Before starting Aspire
 the first time on a machine, sign in once with the Dev Tunnels CLI:
@@ -64,6 +67,60 @@ Verify a demo stay with a last name and room number:
 | Morgan | 812 |
 
 Room numbers are 1–4 digits and can't start with `0`.
+
+### Stay memory and answer context
+
+A turn makes no summary model call. Each answer gets an estimated 8,000-token
+working context: instructions, verified guest answer context, current hotel
+evidence, a bounded stay memory, and the newest complete recent turns that fit.
+
+Sign-in and subsequent authentication forward the database guest's given name,
+family name and room number, bound to the authorized stay. Web and browser voice
+send that profile with each admitted turn, including turns on already-running
+stay workflows. It is a separate answer-context message, not hotel evidence or
+guest-reported memory; the main concierge instructions are unchanged. This
+deliberately sends the verified name and room to the configured model provider.
+Client-supplied last names and conversation claims cannot replace this identity.
+
+The server computes the room floor from the authoritative room number: `112`
+is floor 1, `412` floor 4, `812` floor 8, and `1212` floor 12. One- and two-digit
+rooms remain valid but have no inferred floor. The complete JSON-escaped profile
+and its message overhead count against the working budget, rather than being
+hidden in the fixed instruction allowance. If the required context cannot fit,
+the turn fails safely instead of truncating identity or exceeding the budget.
+Raw profile strings are data, not instructions. No extra guest lookup Activity,
+tool, or model call is added to an answer.
+
+Stay memory is extracted deterministically, without a model, from explicit
+guest statements: allergies, preferences, decisions, and requests. It is scoped
+to one stay, and a later statement on the same subject supersedes the earlier
+one. Questions are not promoted. Guest statements are continuity, not hotel
+authority. Memory, recent turns, and verified guest context carry across
+Continue-As-New. Every new web or voice turn requires the verified guest: the
+Web returns `401 unauthorized` (sign in again) for a session without a profile,
+and the stay workflow's update validator rejects a guestless turn before it
+enters history. The profile fields stay nullable only so older workflow
+histories and session payloads still replay; they never invent a name or room.
+
+The full transcript is persisted in PostgreSQL. Older turns outside the working
+window are not recalled into the prompt; older-turn recall is deferred. The
+legacy summary path remains only to replay workflow histories from before the
+`stay-memory-v1-*` patch.
+
+Voice turn IDs include a hash of the exact message, so resumed or changed
+speech is a distinct turn.
+
+### Voice latency and interruption measurements
+
+The relay logs receipt-to-worklet-silence-acknowledgment time. A browser-rendered
+barge-in requires nonzero audio in the playback worklet's last rendered block
+before the flush. Queued-only audio, drained playback, and normal speech while
+idle are not barge-in acceptance samples; filter on `BargeIn = true`.
+The timing includes acknowledgment return transit, excludes Deepgram detection
+before relay receipt, and is **not** a hardware/audible-silence measurement.
+Chrome real-microphone/speaker acceptance still requires a new live run.
+
+Run playback-boundary tests with `node --test tests/voice-play-worklet.test.mjs`.
 
 
 
@@ -100,15 +157,27 @@ Keys under `AI:Chat:*` and `AI:Embeddings:*`:
 | --- | --- | --- | --- |
 | `Provider` | AppHost → `Concierge.WorkflowServer` | `Ollama` | `Ollama` or `Foundry` (Azure AI Foundry / Azure OpenAI), case-insensitive. The AppHost stops with an error for any other value. |
 | `Endpoint` | AppHost → `Concierge.WorkflowServer` | `http://127.0.0.1:11434` | Foundry requires HTTPS. |
-| `Model` | AppHost → `Concierge.WorkflowServer` | `qwen3.8:27b-mlx` / `embeddinggemma-2:740m` | For Foundry, use the deployment name. |
+| `Model` | AppHost → `Concierge.WorkflowServer` | `concierge-chat` / `embeddinggemma-2:740m` | The Ollama chat model is created from the checked-in Modelfile below. For Foundry, use the deployment name. |
 | `AI:Chat:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | not created | Created only when `AI:Chat:Provider` is `Foundry`, from `Parameters:foundry-chat-api-key`. If unset, Foundry uses `DefaultAzureCredential`; Aspire does not prompt. |
 | `AI:Embeddings:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | not created | Created only when `AI:Embeddings:Provider` is `Foundry`, from `Parameters:foundry-embeddings-api-key`. If unset, Foundry uses `DefaultAzureCredential`; Aspire does not prompt. |
 | `RequestTimeoutSeconds` | AppHost → `Concierge.WorkflowServer` | `180` | Must be positive. Options default `60`. |
 | `MaxConcurrentRequests` | AppHost → `Concierge.WorkflowServer` | `2` | Must be positive. Options default `4`. |
-| `AI:Chat:ContextWindowTokens` | AppHost → `Concierge.WorkflowServer` | `32768` | Sent to Ollama as `num_ctx`. |
+| `AI:Chat:ContextWindowTokens` | AppHost → `Concierge.WorkflowServer` | `32768` | Validates that the configured chat context covers the worst-case prompt budget. Ollama's actual `num_ctx` is set by the derived model's Modelfile. |
+| `AI:Chat:ReasoningEffort` | AppHost → `Concierge.WorkflowServer` | `low` | Responses API effort; accepts `low` or `none`. Both Ollama and Foundry use `low` by default; `none` may be selected explicitly for supported models. |
 | `AI:Embeddings:Dimensions` | AppHost → `Concierge.WorkflowServer` | `768` | Must be `768`. The schema uses `vector(768)`. |
 
 The AppHost's Ollama defaults are in `src/Concierge.AppHost/appsettings.Development.json`.
+The Ollama chat model is a derived model so its context window does not depend on
+per-request options sent through the shared Responses API client. Create it after
+pulling the base model:
+
+```bash
+ollama create concierge-chat -f models/ollama/Modelfile.concierge-chat
+```
+
+The checked-in Modelfile starts from `qwen3.8:27b-mlx` and fixes
+`PARAMETER num_ctx 32768`. Re-run the command if the Modelfile changes. Starting
+the application does not create or modify models in the local Ollama installation.
 To use Foundry for a capability, override its keys in the AppHost
 user-secrets store. For example, for chat:
 
@@ -158,8 +227,9 @@ For Foundry, set each capability's `Endpoint` and `Model`, plus
 omitting them uses `DefaultAzureCredential`.
 
 For Ollama, also set both `Provider` values to `Ollama`, with the local service
-URL and model names from the table above. Timeout, concurrency, and context
-window are optional: the options defaults are `60`, `4`, and `32768`.
+URL and model names from the table above. Create `concierge-chat` using the
+command above before running the chat workflow. Timeout, concurrency, and
+context window are optional: the options defaults are `60`, `4`, and `32768`.
 To reproduce Aspire Development's request limits, explicitly set each
 capability's `RequestTimeoutSeconds=180` and `MaxConcurrentRequests=2`.
 Standalone execution also requires the normal database and Temporal connection

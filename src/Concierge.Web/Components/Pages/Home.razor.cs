@@ -60,6 +60,11 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private string? wiredCredential;
     private int wiredVersion = -1;
     private bool disposed;
+    private bool voiceMode;
+    private string voiceState = "disconnected";
+    private string? voiceMessage;
+    private string? voiceSessionId;
+    private DotNetObjectReference<Home>? voiceReference;
 
     private bool IsCurrentSession(int version) => !disposed && model.IsCurrent(version);
 
@@ -434,6 +439,15 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private void MarkExpired()
     {
+        if (voiceMode)
+        {
+            // An expired credential must not leave the microphone open; the server revokes the bearer on close.
+            _ = JavaScript.InvokeVoidAsync("conciergeVoice.stop").AsTask().ContinueWith(
+                static task => _ = task.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        }
+
+        voiceMode = false;
+        voiceSessionId = null;
         model = model.MarkExpired();
         isWorking = false;
         isVerifying = false;
@@ -479,6 +493,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private async Task EndChatAsync()
     {
+        // The guest is leaving the conversation; voice must not keep listening behind the dialog.
+        await StopVoiceAsync("Voice stopped.");
         if (!model.HasEndContent)
         {
             await EndInteractionAsync();
@@ -500,6 +516,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             return;
         }
 
+        await StopVoiceAsync("Voice stopped.");
         model = model.BeginEnd();
         var currentVersion = sessionVersion;
         var credential = session.Credential;
@@ -542,6 +559,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private async Task CompleteEndAsync()
     {
+        voiceMode = false;
+        voiceSessionId = null;
         model = model.CompleteEnd();
         verificationError = null;
         suggestionsExpanded = false;
@@ -550,6 +569,99 @@ public partial class Home : ComponentBase, IAsyncDisposable
         isWorking = false;
         await JavaScript.InvokeVoidAsync("conciergeChat.clearSession");
     }
+
+    private bool CanStartVoice => CanSend && !voiceMode;
+
+    private bool VoiceActive => voiceState is not ("disconnected" or "paused");
+
+    private string VoiceStateLabel => voiceState switch
+    {
+        "connecting" => "Connecting…",
+        "listening" => "Listening",
+        "thinking" => "Thinking…",
+        "speaking" => "Speaking",
+        "paused" => "Paused",
+        _ => "Disconnected",
+    };
+
+    private async Task StartVoiceAsync()
+    {
+        if (!CanStartVoice)
+        {
+            return;
+        }
+
+        voiceMode = true;
+        voiceSessionId = null;
+        await ConnectVoiceAsync();
+    }
+
+    /// <summary>Opens a new Deepgram connection; reuses the voice session so turn IDs stay unique.</summary>
+    private async Task ConnectVoiceAsync()
+    {
+        if (session?.Credential is null || hasExpired)
+        {
+            return;
+        }
+
+        voiceReference ??= DotNetObjectReference.Create(this);
+        voiceState = "connecting";
+        voiceMessage = null;
+        await JavaScript.InvokeVoidAsync("conciergeVoice.start", session.Credential, voiceSessionId, voiceReference);
+    }
+
+    private Task ResumeVoiceAsync() => JavaScript.InvokeVoidAsync("conciergeVoice.resume").AsTask();
+
+    private async Task UseTextChatAsync()
+    {
+        await StopVoiceAsync(null);
+        voiceMode = false;
+        await LoadHistoryAndReconcileAsync(replayPending: false);
+    }
+
+    private async Task StopVoiceAsync(string? message)
+    {
+        if (!voiceMode)
+        {
+            return;
+        }
+
+        await JavaScript.InvokeVoidAsync("conciergeVoice.stop");
+        voiceState = "disconnected";
+        voiceMessage = message;
+    }
+
+    /// <summary>Called from <c>voice.js</c> with the server's voice session ID, which Reconnect reuses.</summary>
+    [JSInvokable]
+    public Task OnVoiceSession(string id) =>
+        InvokeAsync(() => voiceSessionId = voiceMode ? id : null);
+
+    /// <summary>Called from <c>voice.js</c> when the relay changes state or closes.</summary>
+    [JSInvokable]
+    public Task OnVoiceState(string state, string? message, int closeCode) =>
+        InvokeAsync(async () =>
+        {
+            if (!voiceMode)
+            {
+                return;
+            }
+
+            voiceState = state;
+            voiceMessage = message;
+            if (state == "disconnected" && closeCode == (int)Voice.VoiceCloseCodes.Unauthorized)
+            {
+                MarkExpired();
+                return;
+            }
+
+            // Voice turns are ordinary stay turns; show them as they complete.
+            if (state is "speaking" or "disconnected")
+            {
+                await LoadHistoryAndReconcileAsync(replayPending: false);
+            }
+
+            StateHasChanged();
+        });
 
     private void ToggleSuggestions() => suggestionsExpanded = !suggestionsExpanded;
 
@@ -577,6 +689,20 @@ public partial class Home : ComponentBase, IAsyncDisposable
     {
         disposed = true;
         model = model.InvalidateOutstandingWork();
+        if (voiceReference is not null)
+        {
+            try
+            {
+                await JavaScript.InvokeVoidAsync("conciergeVoice.stop");
+            }
+            catch (JSDisconnectedException)
+            {
+                // The browser closed the page; pagehide already closed the voice socket.
+            }
+
+            voiceReference.Dispose();
+        }
+
         // Prerendered instances never wired a listener and cannot call JavaScript.
         if (scrollReference is null)
         {

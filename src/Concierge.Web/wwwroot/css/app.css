@@ -186,6 +186,7 @@ a:focus-visible {
     min-width: 88px;
 }
 
+.start-voice-button,
 .end-chat-button,
 .secondary-button {
     min-height: 42px;
@@ -198,6 +199,7 @@ a:focus-visible {
     font-weight: 550;
 }
 
+.start-voice-button:hover,
 .end-chat-button:hover,
 .secondary-button:hover {
     background: var(--transcript-background);
@@ -359,6 +361,7 @@ a:focus-visible {
 .suggestion-send:disabled,
 .primary-button:disabled,
 .secondary-button:disabled,
+.start-voice-button:disabled,
 .end-chat-button:disabled {
     cursor: not-allowed;
     opacity: .55;
@@ -1314,4 +1317,70 @@ a:focus-visible {
         animation-iteration-count: 1 !important;
         transition-duration: .01ms !important;
     }
+}
+
+.voice-panel {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 18px;
+    background: var(--composer-background);
+    border-top: 1px solid var(--border-color);
+}
+
+.voice-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-primary);
+}
+
+.voice-message {
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.voice-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.voice-actions .primary-button {
+    min-height: 42px;
+    padding: 0 22px;
+}
+
+.voice-indicator {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+.voice-listening .voice-indicator,
+.voice-speaking .voice-indicator,
+.voice-thinking .voice-indicator,
+.voice-connecting .voice-indicator {
+    background: var(--accent-color);
+    animation: voice-pulse 1.2s ease-in-out infinite;
+}
+
+.voice-speaking .voice-indicator {
+    animation-duration: 0.6s;
+}
+
+.voice-disconnected .voice-indicator {
+    background: var(--error-text);
+}
+
+@keyframes voice-pulse {
+    50% { opacity: 0.35; transform: scale(0.8); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .voice-indicator { animation: none !important; }
 }

@@ -446,5 +446,11 @@ public sealed class HomeSessionTests
         }
         /// <summary>Completes the interaction without external services.</summary>
         public Task EndAsync(string? bearerCredential, CancellationToken cancellationToken = default) => End(bearerCredential);
+        /// <summary>Voice is outside these component tests.</summary>
+        public Task<ConciergeVoiceAuthorization> AuthorizeVoiceAsync(string? bearerCredential, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        /// <summary>Voice is outside these component tests.</summary>
+        public Task<ConciergeTurnResult> SubmitVoiceTurnAsync(ConciergeSessionContext session, string turnId, string userMessage, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 }

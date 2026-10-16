@@ -1,8 +1,11 @@
 using Concierge.Web.Components;
 using Concierge.Web.Endpoints;
 using Concierge.Web.Services;
+using Concierge.Web.Voice;
 using Concierge.Contracts;
 using TemporalCommunity.Extensions.AI;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -35,7 +38,11 @@ builder.Services.AddTemporalClient(options =>
 {
     TemporalWorkerConnection.ApplyTo(temporalOptions, options);
     options.DataConverter = DurableAIDataConverter.Instance;
+    TemporalTelemetry.ApplyTo(options);
 });
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddSource([.. TemporalTelemetry.ActivitySourceNames]))
+    .WithMetrics(metrics => metrics.AddMeter(TemporalTelemetry.MeterName));
 
 builder.Services.AddOptions<ConciergePersistenceOptions>()
     .Bind(builder.Configuration.GetSection(ConciergePersistenceOptions.SectionName))
@@ -47,6 +54,10 @@ builder.Services.AddOptions<ConciergePersistenceOptions>()
         $"{ConciergePersistenceOptions.SectionName}:FlushBatchSize must be between 1 and {ConciergePersistenceOptions.MaxFlushBatchSize}.")
     .ValidateOnStart();
 
+builder.Services.AddOptions<DeepgramVoiceOptions>()
+    .Bind(builder.Configuration.GetSection(DeepgramVoiceOptions.SectionName));
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<VoiceSessionRegistry>();
 builder.Services.AddScoped<IConciergeService, ConciergeService>();
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
 builder.Services.AddRazorComponents()
@@ -67,17 +78,7 @@ app.MapWhen(
         }
 
         // Run is terminal even when WebApplication's implicit routing already selected Razor.
-        context.Response.StatusCode = StatusCodes.Status501NotImplemented;
-        await context.Response.WriteAsJsonAsync(new
-        {
-            error = new
-            {
-                message = "The Think handler is not implemented.",
-                type = "server_error",
-                param = (string?)null,
-                code = "not_implemented",
-            },
-        }, context.RequestAborted);
+        await ThinkEndpoint.HandleAsync(context);
     }));
 
 app.Use(async (context, next) =>
@@ -102,12 +103,14 @@ if (!app.Environment.IsDevelopment())
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
 
 app.UseAntiforgery();
+app.UseWebSockets();
 
 app.MapStaticAssets();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
 app.MapConciergeApi();
+app.Map(VoiceRelayEndpoint.Path, VoiceRelayEndpoint.HandleAsync);
 app.MapDefaultEndpoints();
 
 app.Run();

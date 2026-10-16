@@ -19,7 +19,7 @@ public sealed class ThinkPortIsolationTests
     [InlineData("Development", true)]
     [InlineData("Production", false)]
     [InlineData("Production", true)]
-    public async Task AllowedPostReturnsPendingHandlerJsonWithoutDispatchingSelectedEndpoint(
+    public async Task AllowedPostReachesThinkHandlerWithoutDispatchingSelectedEndpoint(
         string environment, bool selectEndpoint)
     {
         using var factory = CreateFactory(environment, ThinkPort, selectEndpoint);
@@ -30,13 +30,13 @@ public sealed class ThinkPortIsolationTests
                 """{"model":"concierge","messages":[{"role":"user","content":"Hello"}]}""",
                 Encoding.UTF8, "application/json"));
 
-            Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+            // No voice bearer: the real handler answers with its OpenAI-shaped 401.
+            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
             Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
             using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             var error = json.RootElement.GetProperty("error");
-            Assert.Equal("The Think handler is not implemented.", error.GetProperty("message").GetString());
-            Assert.Equal("server_error", error.GetProperty("type").GetString());
-            Assert.Equal("not_implemented", error.GetProperty("code").GetString());
+            Assert.Equal("invalid_request_error", error.GetProperty("type").GetString());
+            Assert.Equal("invalid_api_key", error.GetProperty("code").GetString());
             Assert.Equal(JsonValueKind.Null, error.GetProperty("param").ValueKind);
             Assert.False(response.Headers.Contains("Strict-Transport-Security"));
             Assert.False(response.Headers.Contains("Location"));

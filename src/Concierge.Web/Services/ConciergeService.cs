@@ -1,6 +1,7 @@
 using System.Buffers.Text;
 using System.Security.Cryptography;
 using Concierge.Contracts;
+using Concierge.Web.Voice;
 using Microsoft.Extensions.Options;
 using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
@@ -13,6 +14,7 @@ namespace Concierge.Web.Services;
 public sealed class ConciergeService(
     ITemporalClient temporalClient,
     IOptions<ConciergePersistenceOptions> persistenceOptions,
+    VoiceSessionRegistry voiceSessions,
     ILogger<ConciergeService> logger) : IConciergeService
 {
     /// <inheritdoc/>
@@ -67,6 +69,94 @@ public sealed class ConciergeService(
         ConciergeTurnRequest request,
         CancellationToken cancellationToken = default)
     {
+        ValidateTurn(request);
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        return await ExecuteTurnAsync(session, request, updateId: null, cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public async Task<ConciergeVoiceAuthorization> AuthorizeVoiceAsync(
+        string? bearerCredential,
+        CancellationToken cancellationToken = default)
+    {
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        // Every voice connection only submits turns, so refuse it before it starts the stay workflow.
+        RequireVerifiedGuest(session);
+        try
+        {
+            var workflow = await GetStayWorkflowAsync(session, cancellationToken);
+            var history = await workflow.ExecuteUpdateAsync<ConciergeHistoryResult>(
+                ConciergeWorkflowNames.HistoryUpdate,
+                [],
+                UpdateOptions(cancellationToken));
+            return new ConciergeVoiceAuthorization(session, history.Turns.Count > 0);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            throw MapTemporalFailure(exception, nameof(AuthorizeVoiceAsync));
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<ConciergeTurnResult> SubmitVoiceTurnAsync(
+        ConciergeSessionContext session,
+        string turnId,
+        string userMessage,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        var request = new ConciergeTurnRequest(turnId, userMessage, "voice");
+        ValidateTurn(request);
+        // Deepgram retries reuse the payload, so the TurnId is also the Temporal update ID: a retry
+        // after a lost response attaches to the admitted update, even while it is still running.
+        return await ExecuteTurnAsync(session, request, updateId: turnId, cancellationToken);
+    }
+
+    private async Task<ConciergeTurnResult> ExecuteTurnAsync(
+        ConciergeSessionContext session,
+        ConciergeTurnRequest request,
+        string? updateId,
+        CancellationToken cancellationToken)
+    {
+        // Outside the try below, which would map this rejection to 503.
+        RequireVerifiedGuest(session);
+        try
+        {
+            var workflow = await GetStayWorkflowAsync(session, cancellationToken);
+            var options = UpdateOptions(cancellationToken);
+            options.Id = updateId;
+            // Text turns keep a generated update ID so a reused TurnId with different text still
+            // reaches the workflow's fingerprint check and is rejected as turn_conflict.
+            return await workflow.ExecuteUpdateAsync<ConciergeTurnResult>(
+                ConciergeWorkflowNames.SubmitTurnUpdate,
+                [new ConciergeTurnSubmission(
+                    request.TurnId, request.UserMessage, request.Channel, session.VerifiedGuest)],
+                options);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            throw MapTemporalFailure(exception, nameof(SubmitTurnAsync));
+        }
+    }
+
+    /// <summary>
+    /// Every turn is answered for the verified guest. A session without the guest profile (for
+    /// example, one authenticated by an older WorkflowServer) must sign in again; it is never
+    /// answered anonymously.
+    /// </summary>
+    private static void RequireVerifiedGuest(ConciergeSessionContext session)
+    {
+        if (session.VerifiedGuest is null)
+        {
+            throw new ConciergeApiException(
+                "unauthorized",
+                "Your guest profile is missing from this session. Sign in again with your last name and room number to continue.",
+                StatusCodes.Status401Unauthorized);
+        }
+    }
+
+    private static void ValidateTurn(ConciergeTurnRequest? request)
+    {
         if (request is null)
         {
             throw InvalidRequest("Provide a turn request with TurnId, UserMessage, and Channel.");
@@ -89,20 +179,6 @@ public sealed class ConciergeService(
         if (!ConciergeTurnLimits.IsChannel(request.Channel))
         {
             throw InvalidRequest("Set Channel to 'web' or 'voice' (case-sensitive).");
-        }
-
-        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
-        try
-        {
-            var workflow = await GetStayWorkflowAsync(session, cancellationToken);
-            return await workflow.ExecuteUpdateAsync<ConciergeTurnResult>(
-                ConciergeWorkflowNames.SubmitTurnUpdate,
-                [new ConciergeTurnSubmission(request.TurnId, request.UserMessage, request.Channel)],
-                UpdateOptions(cancellationToken));
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            throw MapTemporalFailure(exception, nameof(SubmitTurnAsync));
         }
     }
 
@@ -132,6 +208,8 @@ public sealed class ConciergeService(
         CancellationToken cancellationToken = default)
     {
         var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        // Voice stops admitting new turns as soon as End starts, even if the flush below fails.
+        voiceSessions.EndSession(session.SessionId);
         try
         {
             var workflow = await GetStayWorkflowAsync(session, cancellationToken);
@@ -261,7 +339,8 @@ public sealed class ConciergeService(
                     session.StayId,
                     session.EligibilityDeadlineUtc,
                     persistenceOptions.Value.FlushIntervalSeconds,
-                    TranscriptFlushBatchSize: persistenceOptions.Value.FlushBatchSize),
+                    TranscriptFlushBatchSize: persistenceOptions.Value.FlushBatchSize,
+                    VerifiedGuest: session.VerifiedGuest),
             ],
             new WorkflowOptions(workflowId, TemporalWorkerConnection.TaskQueue)
             {

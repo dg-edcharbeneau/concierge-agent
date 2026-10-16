@@ -29,10 +29,15 @@ public sealed class ChatProviderOptions : AIProviderOptions
     public const string SectionName = "AI:Chat";
 
     /// <summary>
-    /// Model context window in tokens. Sent to Ollama as <c>num_ctx</c>; for Foundry it
-    /// documents the deployment's window. Must cover the worst-case prompt budget.
+    /// Model context window in tokens. Must cover the worst-case prompt budget.
     /// </summary>
     public int ContextWindowTokens { get; set; } = 32_768;
+
+    /// <summary>
+    /// Responses API reasoning effort. <c>low</c> is the general default; <c>none</c> is used
+    /// for the measured local Ollama Development configuration.
+    /// </summary>
+    public string ReasoningEffort { get; set; } = "low";
 }
 
 public sealed class EmbeddingProviderOptions : AIProviderOptions
@@ -50,6 +55,13 @@ internal sealed class AIProviderOptionsValidator :
     public ValidateOptionsResult Validate(string? name, ChatProviderOptions options)
     {
         var failures = ValidateCommon(ChatProviderOptions.SectionName, options);
+        if (!string.Equals(options.ReasoningEffort, "low", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(options.ReasoningEffort, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            failures.Add(
+                $"{ChatProviderOptions.SectionName}:ReasoningEffort must be 'low' or 'none'.");
+        }
+
         if (options.ContextWindowTokens < ConciergeStayWorkflow.WorstCaseContextTokens)
         {
             failures.Add(
@@ -91,7 +103,20 @@ internal sealed class AIProviderOptionsValidator :
                 $"{section}:Provider must be '{AIProviderNames.Foundry}' or '{AIProviderNames.Ollama}'.");
         }
 
-        if (!Uri.TryCreate(options.Endpoint, UriKind.Absolute, out var endpoint)
+        if (options is ChatProviderOptions)
+        {
+            try
+            {
+                _ = AIProviderEndpoints.NormalizeResponsesEndpoint(options.Provider, options.Endpoint);
+            }
+            catch (ArgumentException)
+            {
+                failures.Add(
+                    $"{section}:Endpoint must be a clean resource root or Responses API base URL "
+                    + "(Ollama HTTP(S), Foundry HTTPS), without credentials, query, or fragment.");
+            }
+        }
+        else if (!Uri.TryCreate(options.Endpoint, UriKind.Absolute, out var endpoint)
             || (endpoint.Scheme != Uri.UriSchemeHttps && endpoint.Scheme != Uri.UriSchemeHttp))
         {
             failures.Add($"{section}:Endpoint must be an absolute HTTP or HTTPS URI.");
@@ -127,4 +152,36 @@ internal sealed class AIProviderOptionsValidator :
 
     private static bool IsOllama(string provider) =>
         StringComparer.OrdinalIgnoreCase.Equals(provider, AIProviderNames.Ollama);
+}
+
+internal static class AIProviderEndpoints
+{
+    public static Uri NormalizeResponsesEndpoint(string provider, string endpoint)
+    {
+        var isOllama = StringComparer.OrdinalIgnoreCase.Equals(provider, AIProviderNames.Ollama);
+        if (!isOllama
+            && !StringComparer.OrdinalIgnoreCase.Equals(provider, AIProviderNames.Foundry))
+        {
+            throw new ArgumentException("Provider must be Foundry or Ollama.", nameof(provider));
+        }
+
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            || (!isOllama && uri.Scheme != Uri.UriSchemeHttps)
+            || uri.Query.Length != 0
+            || uri.Fragment.Length != 0
+            || uri.UserInfo.Length != 0)
+        {
+            throw new ArgumentException("Endpoint is not a valid Responses API base URL.", nameof(endpoint));
+        }
+
+        var suffix = isOllama ? "/v1" : "/openai/v1";
+        var path = uri.AbsolutePath.TrimEnd('/');
+        if (path.Length != 0 && !string.Equals(path, suffix, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Endpoint contains an unsupported path.", nameof(endpoint));
+        }
+
+        return new UriBuilder(uri) { Path = suffix + "/" }.Uri;
+    }
 }

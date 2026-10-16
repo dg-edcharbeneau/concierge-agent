@@ -150,7 +150,11 @@ public sealed class ConciergeRequestGuidanceTests
     }
 
     private static ConciergeService CreateService(ITemporalClient client) =>
-        new(client, Options.Create(new ConciergePersistenceOptions()), NullLogger<ConciergeService>.Instance);
+        new(
+            client,
+            Options.Create(new ConciergePersistenceOptions()),
+            new Concierge.Web.Voice.VoiceSessionRegistry(TimeProvider.System),
+            NullLogger<ConciergeService>.Instance);
 
     private static void AssertInvalid(ConciergeApiException error, string message)
     {

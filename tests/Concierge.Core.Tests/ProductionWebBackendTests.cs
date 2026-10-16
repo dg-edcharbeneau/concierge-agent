@@ -48,6 +48,12 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         Assert.Equal("production", turn.TurnId);
         Assert.Equal("Answer: Breakfast?", turn.AssistantMessage);
         Assert.Equal(0, turn.Sequence);
+        Assert.Contains(worker.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Text.StartsWith("Verified guest context:", StringComparison.Ordinal)
+                && message.Text.Contains("\"GivenName\":\"Test\"", StringComparison.Ordinal)
+                && message.Text.Contains("\"FamilyName\":\"Rivera\"", StringComparison.Ordinal)
+                && message.Text.Contains("\"RoomNumber\":\"412\"", StringComparison.Ordinal)
+                && message.Text.Contains("\"Floor\":4", StringComparison.Ordinal));
     }
 
     /// <summary>Invalid identity has the exact requested guest-facing wording.</summary>
@@ -88,6 +94,7 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         Assert.NotNull(verified);
         Assert.Equal(sessionId, verified.SessionId);
         Assert.Equal(stayId, verified.StayId);
+        Assert.Equal(new ConciergeVerifiedGuest(stayId, "Test", "Rivera", "412"), verified.VerifiedGuest);
         Assert.Equal(ConciergeTestHost.HotelMidnightUtc(today.AddDays(2)), verified.EligibilityDeadlineUtc);
         Assert.Equal(ConciergeActivityNames.VerifySession, (await verify.DescribeAsync()).ActivityType);
 
@@ -204,20 +211,33 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
     {
         var logs = new ServiceLogProvider();
         await using var worker = await ConciergeTestHost.StartAsync(
-            postgreSql, flushIntervalSeconds: 600, logProvider: logs);
+            postgreSql,
+            flushIntervalSeconds: 600,
+            logProvider: logs,
+            patchActivation: input => !input.PatchId.StartsWith("stay-memory-v1-", StringComparison.Ordinal));
         var today = ConciergeTestHost.HotelToday;
         var stayId = await worker.SeedStayAsync("PrivateGuestName", "412", today, today.AddDays(1));
         var handle = await worker.StartStayAsync(stayId, ConciergeTestHost.HotelMidnightUtc(today.AddDays(2)));
-        for (var index = 0; index <= ConciergeStayWorkflow.RecentTurnWindow; index++)
+        // Compaction now starts after answer 7, not on the next question's critical path.
+        worker.ChatClient.FailSummary = true;
+        for (var index = 0; index <= ConciergeStayWorkflow.LegacyRecentTurnWindow; index++)
         {
             await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-                new ConciergeTurnSubmission($"private-turn-{index}", "PrivateGuestQuestion", "web")));
+                new ConciergeTurnSubmission(
+                    $"private-turn-{index}", "PrivateGuestQuestion", "web", ConciergeTestHost.VerifiedGuest(stayId))));
         }
 
-        // The next turn attempts compaction before answering. Fail only the summary.
-        worker.ChatClient.FailSummary = true;
+        using (var bound = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        {
+            while (!logs.Entries.Any(entry => entry.Contains("CompactContextAsync", StringComparison.Ordinal)))
+            {
+                await Task.Delay(20, bound.Token);
+            }
+        }
+        worker.ChatClient.FailSummary = false;
         var answer = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("private-last-turn", "PrivateGuestQuestion", "web")));
+            new ConciergeTurnSubmission(
+                "private-last-turn", "PrivateGuestQuestion", "web", ConciergeTestHost.VerifiedGuest(stayId))));
         Assert.Equal("Answer: PrivateGuestQuestion", answer.AssistantMessage);
         await worker.ExecuteAsync("ALTER TABLE transcript_turns RENAME TO private_transcript_turns;");
         try
@@ -231,7 +251,7 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         }
 
         await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
-        Assert.Equal(ConciergeStayWorkflow.RecentTurnWindow + 2,
+        Assert.Equal(ConciergeStayWorkflow.LegacyRecentTurnWindow + 2,
             (await worker.ReadPersistedTurnIdsAsync(stayId)).Length);
         var entries = logs.Entries.ToArray();
         Assert.Equal(2, entries.Length);
@@ -316,6 +336,13 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         /// <inheritdoc/>
         public Task EndAsync(
             string? bearerCredential, CancellationToken cancellationToken = default) => throw Failure();
+        /// <inheritdoc/>
+        public Task<ConciergeVoiceAuthorization> AuthorizeVoiceAsync(
+            string? bearerCredential, CancellationToken cancellationToken = default) => throw Failure();
+        /// <inheritdoc/>
+        public Task<ConciergeTurnResult> SubmitVoiceTurnAsync(
+            ConciergeSessionContext session, string turnId, string userMessage,
+            CancellationToken cancellationToken = default) => throw Failure();
     }
 
     private static WebApplicationFactory<ConciergeService> CreateFactory(

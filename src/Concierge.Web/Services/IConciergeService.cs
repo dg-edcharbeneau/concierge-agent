@@ -20,6 +20,7 @@ public interface IConciergeService
     /// Submits a guest message to the stay workflow and returns the concierge reply.
     /// Reusing <see cref="ConciergeTurnRequest.TurnId"/> with the same message returns the original reply;
     /// reusing it with a different message throws a 409 <see cref="ConciergeApiException"/>.
+    /// Throws a 401 <see cref="ConciergeApiException"/> when the session has no verified guest profile.
     /// </summary>
     Task<ConciergeTurnResult> SubmitTurnAsync(
         string? bearerCredential,
@@ -36,9 +37,32 @@ public interface IConciergeService
 
     /// <summary>
     /// Flushes pending transcript turns and invalidates the credential. Stay memory is kept, so the
-    /// guest can verify again to continue the same conversation.
+    /// guest can verify again to continue the same conversation. Also revokes every voice bearer of the session.
     /// </summary>
     Task EndAsync(
         string? bearerCredential,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Authenticates a chat credential for voice and reports whether the stay already has turns.
+    /// Throws a 401 <see cref="ConciergeApiException"/> when the credential is invalid or expired, or
+    /// when the session has no verified guest profile.
+    /// </summary>
+    Task<ConciergeVoiceAuthorization> AuthorizeVoiceAsync(
+        string? bearerCredential,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Submits a voice turn for an already authorized session through the same stay workflow update as text.
+    /// The same <paramref name="turnId"/> and message return the original reply.
+    /// Throws a 401 <see cref="ConciergeApiException"/> when the session has no verified guest profile.
+    /// </summary>
+    Task<ConciergeTurnResult> SubmitVoiceTurnAsync(
+        ConciergeSessionContext session,
+        string turnId,
+        string userMessage,
+        CancellationToken cancellationToken = default);
 }
+
+/// <summary>A chat session authorized for voice; <paramref name="HasTurns"/> selects the greeting.</summary>
+public sealed record ConciergeVoiceAuthorization(ConciergeSessionContext Session, bool HasTurns);

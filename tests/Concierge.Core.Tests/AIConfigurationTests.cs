@@ -14,6 +14,17 @@ public sealed class AIConfigurationTests
     private static readonly string RepoRoot = FindRepositoryRoot();
 
     [Fact]
+    public void EvaluationReusesProductionGroundingInstructionsAndAnswerCap()
+    {
+        var runner = File.ReadAllText(
+            Path.Combine(RepoRoot, "tests/Concierge.Evaluation/runner/Program.cs"));
+        Assert.Contains("ConciergeStayWorkflow.ConciergeInstructions", runner, StringComparison.Ordinal);
+        Assert.Contains("MaxOutputTokens = ConciergeStayWorkflow.AnswerMaxOutputTokens",
+            runner, StringComparison.Ordinal);
+        Assert.DoesNotContain("const string SystemPrompt", runner, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void WorkerSettingsDoNotOwnAIDefaults()
     {
         foreach (var name in new[] { "appsettings.json", "appsettings.Development.json" })
@@ -33,10 +44,15 @@ public sealed class AIConfigurationTests
         configuration.Sources.RemoveAt(configuration.Sources.Count - 1);
         var defaults = configuration.Build();
         Assert.Equal("Ollama", defaults["AI:Chat:Provider"]);
-        Assert.Equal("qwen3.8:27b-mlx", defaults["AI:Chat:Model"]);
+        Assert.Equal("concierge-chat", defaults["AI:Chat:Model"]);
         Assert.Equal("embeddinggemma-2:740m", defaults["AI:Embeddings:Model"]);
         Assert.Equal("768", defaults["AI:Embeddings:Dimensions"]);
         Assert.Equal("32768", defaults["AI:Chat:ContextWindowTokens"]);
+        Assert.Equal("low", defaults["AI:Chat:ReasoningEffort"]);
+        var modelfile = File.ReadAllText(
+            Path.Combine(RepoRoot, "models/ollama/Modelfile.concierge-chat"));
+        Assert.Contains("FROM qwen3.8:27b-mlx", modelfile, StringComparison.Ordinal);
+        Assert.Contains("PARAMETER num_ctx 32768", modelfile, StringComparison.Ordinal);
         foreach (var capability in new[] { "Chat", "Embeddings" })
         {
             Assert.Equal("180", defaults[$"AI:{capability}:RequestTimeoutSeconds"]);

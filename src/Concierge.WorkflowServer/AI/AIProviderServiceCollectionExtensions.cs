@@ -4,9 +4,14 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
 using OllamaSharp;
 using OllamaSharp.Models;
+using OpenAI;
+using OpenAI.Responses;
 using System.ClientModel;
+using System.ClientModel.Primitives;
 
 namespace Concierge.WorkflowServer.AI;
+
+#pragma warning disable OPENAI001 // The Responses SDK and its MEAI adapter are experimental.
 
 public static class AIProviderServiceCollectionExtensions
 {
@@ -55,34 +60,99 @@ public static class AIProviderServiceCollectionExtensions
         return services;
     }
 
-    private static IChatClient CreateChatClient(ChatProviderOptions options)
+    internal static IChatClient CreateChatClient(
+        ChatProviderOptions options,
+        PipelineTransport? transport = null)
     {
-        if (IsOllama(options.Provider))
+        var clientOptions = new ResponsesClientOptions
         {
-            // Pin num_ctx on the worker side so Ollama never falls back to a smaller default
-            // window. OllamaSharp maps the "num_ctx" additional property to options.num_ctx;
-            // ConfigureOptions clones the per-call options deserialized by the activity.
-            return new ChatClientBuilder(CreateOllamaClient(options))
-                .ConfigureOptions(chatOptions =>
-                    (chatOptions.AdditionalProperties ??= [])[OllamaOption.NumCtx.Name] =
-                        options.ContextWindowTokens)
-                .Build();
+            Endpoint = AIProviderEndpoints.NormalizeResponsesEndpoint(options.Provider, options.Endpoint),
+            // The outer bounded client owns the request deadline.
+            NetworkTimeout = Timeout.InfiniteTimeSpan,
+        };
+        if (transport is not null)
+        {
+            clientOptions.Transport = transport;
         }
 
-        var client = CreateAzureClient(options);
-        return client.GetChatClient(options.Model).AsIChatClient();
+        var isOllama = IsOllama(options.Provider);
+        var responseClient = isOllama || !string.IsNullOrEmpty(options.ApiKey)
+            ? new ResponsesClient(
+                new ApiKeyCredential(isOllama ? "ollama" : options.ApiKey!),
+                clientOptions)
+            : new ResponsesClient(
+                new BearerTokenPolicy(
+                    new DefaultAzureCredential(),
+                    "https://ai.azure.com/.default"),
+                clientOptions);
+
+        var effort = string.Equals(options.ReasoningEffort, "none", StringComparison.OrdinalIgnoreCase)
+            ? ReasoningEffort.None
+            : ReasoningEffort.Low;
+
+        return new ChatClientBuilder(responseClient.AsIChatClient(options.Model))
+            .ConfigureOptions(chatOptions =>
+            {
+                // The Temporal stay workflow provides complete history and owns conversation state.
+                if (chatOptions.ConversationId is not null
+                    || chatOptions.ContinuationToken is not null
+                    || chatOptions.AllowBackgroundResponses == true
+                    || chatOptions.RawRepresentationFactory is not null)
+                {
+                    throw new ArgumentException(
+                        "The concierge Responses client accepts stateless chat options only.");
+                }
+
+                chatOptions.Reasoning ??= new ReasoningOptions { Effort = effort };
+                // Foundry reasoning requests reject temperature, including zero; Ollama accepts it.
+                if (!isOllama)
+                {
+                    chatOptions.Temperature = null;
+                }
+                chatOptions.RawRepresentationFactory =
+                    _ => new CreateResponseOptions { StoredOutputEnabled = false };
+            })
+            // Inside the options step so spans carry the effective options; sensitive data stays off.
+            .UseOpenTelemetry()
+            .Build();
     }
 
-    private static IEmbeddingGenerator<string, Embedding<float>> CreateEmbeddingGenerator(
-        EmbeddingProviderOptions options)
+#pragma warning restore OPENAI001
+
+    /// <summary>
+    /// Ollama <c>keep_alive</c> sent on every embedding request so the host never unloads the
+    /// embedding model (its default is five idle minutes, costing ~3 s on the next retrieval).
+    /// OllamaSharp maps <see cref="EmbeddingGenerationOptions.AdditionalProperties"/>["keep_alive"]
+    /// (string only) to <c>EmbedRequest.KeepAlive</c>. Ollama parses strings with Go's
+    /// <c>time.ParseDuration</c>, so a unit is required: <c>"-1"</c> is rejected with HTTP 400,
+    /// while any negative duration such as <c>"-1m"</c> means "keep loaded indefinitely".
+    /// </summary>
+    internal const string OllamaEmbeddingKeepAlive = "-1m";
+
+    internal static IEmbeddingGenerator<string, Embedding<float>> CreateEmbeddingGenerator(
+        EmbeddingProviderOptions options,
+        HttpMessageHandler? ollamaHandler = null)
     {
-        if (IsOllama(options.Provider))
+        var isOllama = IsOllama(options.Provider);
+        IEmbeddingGenerator<string, Embedding<float>> provider = isOllama
+            ? CreateOllamaClient(options, ollamaHandler)
+            : CreateAzureClient(options).GetEmbeddingClient(options.Model).AsIEmbeddingGenerator(options.Dimensions);
+
+        var builder = new EmbeddingGeneratorBuilder<string, Embedding<float>>(provider);
+        if (isOllama)
         {
-            return CreateOllamaClient(options);
+            // Applied to a clone of the caller's options; an explicit caller value wins.
+            builder.ConfigureOptions(embeddingOptions =>
+            {
+                embeddingOptions.AdditionalProperties ??= [];
+                embeddingOptions.AdditionalProperties.TryAdd("keep_alive", OllamaEmbeddingKeepAlive);
+            });
         }
 
-        var client = CreateAzureClient(options);
-        return client.GetEmbeddingClient(options.Model).AsIEmbeddingGenerator(options.Dimensions);
+        // Sensitive data stays off: spans and metrics carry model and usage, never input text.
+        return builder
+            .UseOpenTelemetry()
+            .Build();
     }
 
     private static AzureOpenAIClient CreateAzureClient(AIProviderOptions options)
@@ -101,11 +171,13 @@ public static class AIProviderServiceCollectionExtensions
                 clientOptions);
     }
 
-    private static OllamaApiClient CreateOllamaClient(AIProviderOptions options)
+    private static OllamaApiClient CreateOllamaClient(
+        AIProviderOptions options,
+        HttpMessageHandler? handler = null)
     {
-        // The outer MEAI decorators own the configured deadline. Disable HttpClient's
-        // unrelated 100-second default so the same bound applies to both providers.
-        var httpClient = new HttpClient
+        // Embeddings retain the existing Ollama API; only chat moves to Responses.
+        // The outer bounded generator owns the deadline.
+        var httpClient = new HttpClient(handler ?? new HttpClientHandler())
         {
             BaseAddress = new Uri(options.Endpoint),
             Timeout = Timeout.InfiniteTimeSpan,
@@ -133,7 +205,7 @@ internal sealed class BoundedChatClient(
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
-        await gate.WaitAsync(timeoutSource.Token);
+        await ConciergeAITelemetry.WaitForSlotAsync(gate, "chat", timeoutSource.Token);
         try
         {
             return await InnerClient.GetResponseAsync(messages, options, timeoutSource.Token);
@@ -154,7 +226,7 @@ internal sealed class BoundedChatClient(
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
-        await gate.WaitAsync(timeoutSource.Token);
+        await ConciergeAITelemetry.WaitForSlotAsync(gate, "chat", timeoutSource.Token);
         try
         {
             await foreach (var update in InnerClient
@@ -187,7 +259,7 @@ internal sealed class BoundedEmbeddingGenerator(
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
-        await gate.WaitAsync(timeoutSource.Token);
+        await ConciergeAITelemetry.WaitForSlotAsync(gate, "embeddings", timeoutSource.Token);
         try
         {
             return await inner.GenerateAsync(values, options, timeoutSource.Token);

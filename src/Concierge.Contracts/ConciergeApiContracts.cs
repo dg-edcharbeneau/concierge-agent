@@ -42,7 +42,29 @@ public static class ConciergeTurnLimits
 public sealed record ConciergeSessionContext(
     Guid SessionId,
     Guid StayId,
-    DateTimeOffset EligibilityDeadlineUtc);
+    DateTimeOffset EligibilityDeadlineUtc,
+    ConciergeVerifiedGuest? VerifiedGuest = null);
+
+/// <summary>
+/// Authoritative database identity, forwarded only by the authenticated server path.
+/// The stay binding prevents accidental reuse in another stay's answer context.
+/// </summary>
+public sealed record ConciergeVerifiedGuest(
+    Guid StayId,
+    string GivenName,
+    string FamilyName,
+    string RoomNumber)
+{
+    /// <summary>Hotel room convention; short or invalid room numbers have no inferred floor.</summary>
+    public int? Floor => RoomNumberFormat.IsValid(RoomNumber)
+        ? RoomNumber.Length switch
+        {
+            3 => RoomNumber[0] - '0',
+            4 => (RoomNumber[0] - '0') * 10 + RoomNumber[1] - '0',
+            _ => null,
+        }
+        : null;
+}
 
 public sealed record VerifyConciergeSessionActivityRequest(
     Guid SessionId,

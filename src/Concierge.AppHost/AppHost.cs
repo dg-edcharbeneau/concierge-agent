@@ -83,11 +83,17 @@ static void ConfigureAIProvider(
 
     // Forward configured values, leaving absent optional settings to the worker's
     // existing options defaults. API keys stay on the secret-parameter path below.
-    foreach (var key in new[]
+    var forwardedKeys = new List<string>
     {
         "Provider", "Endpoint", "Model", "RequestTimeoutSeconds", "MaxConcurrentRequests",
         capability == "Chat" ? "ContextWindowTokens" : "Dimensions",
-    })
+    };
+    if (capability == "Chat")
+    {
+        forwardedKeys.Add("ReasoningEffort");
+    }
+
+    foreach (var key in forwardedKeys)
     {
         if (section[key] is { } value)
         {

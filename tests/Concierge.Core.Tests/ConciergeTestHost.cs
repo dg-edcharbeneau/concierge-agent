@@ -23,6 +23,7 @@ using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
 using Temporalio.Extensions.Hosting;
 using Temporalio.Testing;
+using Temporalio.Worker;
 
 namespace Concierge.Core.Tests;
 
@@ -88,7 +89,8 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         int flushIntervalSeconds = 30,
         IReadOnlyList<string>? devServerArgs = null,
         int flushBatchSize = ConciergePersistenceOptions.DefaultFlushBatchSize,
-        ILoggerProvider? logProvider = null)
+        ILoggerProvider? logProvider = null,
+        Func<PatchActivationInput, bool>? patchActivation = null)
     {
         var database = await postgreSql.CreateDatabaseAsync();
         var dataSource = NpgsqlDataSource.Create(database.ConnectionString);
@@ -118,6 +120,8 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
                 options.FlushIntervalSeconds = flushIntervalSeconds;
                 options.FlushBatchSize = flushBatchSize;
             });
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<Concierge.Web.Voice.VoiceSessionRegistry>();
         builder.Services.AddScoped<IConciergeService, ConciergeService>();
         builder.Services.AddSingleton<IChatClient>(chatClient);
         builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
@@ -132,6 +136,7 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         builder.Services.AddSingleton<EmbeddingModelIdentityStore>();
         builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
         builder.Services.AddHostedTemporalWorker(TemporalWorkerConnection.TaskQueue)
+            .ConfigureOptions(options => options.PatchActivationCallback = patchActivation ?? (_ => true))
             .AddDurableAI(options => options.RegisterDefaultWorkflow = false)
             .AddWorkflow<ConciergeStayWorkflow>()
             .AddScopedActivities<HotelKnowledgeActivities>()
@@ -180,16 +185,20 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         return stayId;
     }
 
+    /// <summary>The verified guest profile the Web attaches to every turn for <paramref name="stayId"/>.</summary>
+    public static ConciergeVerifiedGuest VerifiedGuest(Guid stayId) => new(stayId, "Test", "Guest", "101");
+
     /// <summary>Starts the stay workflow exactly as the API does for a verified session.</summary>
     public async Task<WorkflowHandle<ConciergeStayWorkflow>> StartStayAsync(
         Guid stayId,
-        DateTimeOffset deadline)
+        DateTimeOffset deadline,
+        string? continuitySummary = null)
     {
         var workflowId = $"concierge-stay-{stayId:N}";
         await Environment.Client.StartWorkflowAsync(
             (ConciergeStayWorkflow workflow) => workflow.RunAsync(
                 new ConciergeStayWorkflowInput(
-                    stayId, deadline, FlushIntervalSeconds, 0, null, null, FlushBatchSize)),
+                    stayId, deadline, FlushIntervalSeconds, 0, continuitySummary, null, FlushBatchSize)),
             new WorkflowOptions(workflowId, TemporalWorkerConnection.TaskQueue)
             {
                 IdConflictPolicy = WorkflowIdConflictPolicy.UseExisting,
@@ -254,11 +263,16 @@ internal sealed class ScriptedChatClient : IChatClient
     /// <summary>When set, every model call waits for it to complete.</summary>
     public TaskCompletionSource? Gate { get; set; }
 
+    public TaskCompletionSource? SummaryGate { get; set; }
+
     /// <summary>When set, every model call throws this internal-looking failure.</summary>
     public bool Fail { get; set; }
 
     /// <summary>Fails summary calls while still allowing guest answers to succeed.</summary>
     public bool FailSummary { get; set; }
+
+    /// <summary>Overrides the deterministic answer text for isolation tests.</summary>
+    public Func<IReadOnlyList<ChatMessage>, string>? AnswerFactory { get; set; }
 
     /// <summary>When set, answers report this finish reason (for example, Length).</summary>
     public ChatFinishReason? AnswerFinishReason { get; set; }
@@ -276,6 +290,10 @@ internal sealed class ScriptedChatClient : IChatClient
             StringComparison.Ordinal) == true;
         requests.Enqueue(new RecordedChatRequest(snapshot, options?.MaxOutputTokens, isSummary));
         firstCall.TrySetResult();
+        if (isSummary && SummaryGate is { } summaryGate)
+        {
+            await summaryGate.Task.WaitAsync(cancellationToken);
+        }
         if (Gate is { } gate)
         {
             await gate.Task.WaitAsync(cancellationToken);
@@ -288,7 +306,8 @@ internal sealed class ScriptedChatClient : IChatClient
 
         var text = isSummary
             ? $"Summary {Interlocked.Increment(ref summaryCount)}"
-            : $"Answer: {snapshot.Last(message => message.Role == ChatRole.User).Text}";
+            : AnswerFactory?.Invoke(snapshot)
+                ?? $"Answer: {snapshot.Last(message => message.Role == ChatRole.User).Text}";
         return new ChatResponse([new ChatMessage(ChatRole.Assistant, text)])
         {
             FinishReason = isSummary ? ChatFinishReason.Stop : AnswerFinishReason ?? ChatFinishReason.Stop,

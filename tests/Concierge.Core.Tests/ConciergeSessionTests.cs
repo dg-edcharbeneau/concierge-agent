@@ -47,6 +47,13 @@ public sealed class ConciergeSessionTests(PostgreSqlFixture postgreSql)
 
         Assert.Equal(firstStay, first.StayId);
         Assert.NotEqual(secondStay, first.StayId);
+        Assert.Equal(new ConciergeVerifiedGuest(firstStay, "Jordan", "Rivera", "412"), first.VerifiedGuest);
+        var otherDigest = RandomNumberGenerator.GetBytes(32);
+        var other = await sessions.VerifyAsync(
+            new VerifyConciergeSessionActivityRequest(Guid.NewGuid(), otherDigest, "Morgan", "812"),
+            CancellationToken.None);
+        Assert.Equal(new ConciergeVerifiedGuest(secondStay, "Taylor", "Morgan", "812"), other!.VerifiedGuest);
+        Assert.Equal(first.VerifiedGuest, (await sessions.AuthenticateAsync(firstDigest, CancellationToken.None))!.VerifiedGuest);
         Assert.Equal(
             firstDigest,
             await ReadCredentialHashAsync(dataSource, first.SessionId));

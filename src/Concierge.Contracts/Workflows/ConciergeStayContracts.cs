@@ -11,9 +11,27 @@ public sealed record ConciergeStayWorkflowInput(
     long NextSequence = 0,
     string? ContinuitySummary = null,
     IReadOnlyList<ConciergeTranscriptTurn>? RecentTurns = null,
-    int TranscriptFlushBatchSize = ConciergePersistenceOptions.DefaultFlushBatchSize);
+    int TranscriptFlushBatchSize = ConciergePersistenceOptions.DefaultFlushBatchSize,
+    IReadOnlyList<ConciergeStayMemoryItem>? StayMemory = null,
+    ConciergeVerifiedGuest? VerifiedGuest = null);
 
-public sealed record ConciergeTurnSubmission(string TurnId, string UserMessage, string Channel);
+/// <summary>
+/// A bounded, guest-reported statement retained for one stay. It is linked to the stable
+/// transcript sequence; a correction replaces the active item while the transcript keeps both.
+/// </summary>
+public sealed record ConciergeStayMemoryItem(
+    string Category,
+    string Subject,
+    string Statement,
+    long SourceSequence,
+    long? SupersedesSequence = null);
+
+/// <summary>VerifiedGuest is supplied by Web authentication, never bound from guest request JSON.</summary>
+public sealed record ConciergeTurnSubmission(
+    string TurnId,
+    string UserMessage,
+    string Channel,
+    ConciergeVerifiedGuest? VerifiedGuest = null);
 
 /// <summary>A completed guest/assistant exchange; failed turns are never recorded.</summary>
 public sealed record ConciergeTranscriptTurn(

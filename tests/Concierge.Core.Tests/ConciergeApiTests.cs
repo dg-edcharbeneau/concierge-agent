@@ -6,6 +6,8 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using Google.Protobuf;
 using Concierge.Contracts;
+using Concierge.Web.Services;
+using Microsoft.Extensions.DependencyInjection;
 using Concierge.WorkflowServer.Setup;
 using Concierge.WorkflowServer.Workflows;
 
@@ -239,6 +241,38 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
         host.Http.PostAsJsonAsync(
             "/api/concierge/sessions",
             new ConciergeVerificationRequest(lastName, roomNumber));
+
+    [Fact]
+    public async Task VoiceTurnRetryAttachesToTheInFlightTemporalUpdate()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var today = ConciergeTestHost.HotelToday;
+        var stayId = await host.SeedStayAsync("Rivera", "412", today, today.AddDays(2));
+        var credential = await VerifiedCredentialAsync(host, "Rivera", "412");
+        host.ChatClient.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Separate scopes model a retry that bypasses the Web's in-process join (for example, another replica).
+        await using var firstScope = host.App.Services.CreateAsyncScope();
+        await using var retryScope = host.App.Services.CreateAsyncScope();
+        var first = firstScope.ServiceProvider.GetRequiredService<IConciergeService>();
+        var retry = retryScope.ServiceProvider.GetRequiredService<IConciergeService>();
+        var stay = (await first.AuthorizeVoiceAsync(credential)).Session;
+        const string turnId = "v:0123456789abcdef0123456789abcdef:1:1";
+
+        var admitted = first.SubmitVoiceTurnAsync(stay, turnId, "Is the pool open?");
+        await host.ChatClient.WaitForCallAsync();
+        var retried = retry.SubmitVoiceTurnAsync(stay, turnId, "Is the pool open?");
+        host.ChatClient.Gate.SetResult();
+        var results = await Task.WhenAll(admitted, retried);
+
+        Assert.Equal(results[0], results[1]);
+        Assert.Single(host.ChatClient.AnswerRequests);
+        var workflow = host.Environment.Client.GetWorkflowHandle($"concierge-stay-{stayId:N}");
+        Assert.Equal(results[0], await workflow.GetUpdateHandle<ConciergeTurnResult>(turnId).GetResultAsync());
+        var history = await workflow.FetchHistoryAsync();
+        Assert.Single(history.Events, historyEvent =>
+            historyEvent.WorkflowExecutionUpdateAcceptedEventAttributes?.AcceptedRequest.Meta.UpdateId == turnId);
+    }
 
     private static async Task<string> VerifiedCredentialAsync(
         ConciergeTestHost host,

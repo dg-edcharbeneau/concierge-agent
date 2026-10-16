@@ -35,9 +35,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Evaluation-only: the Hotel ZGY retrieval evaluation runner reads the single
-         lexical and vector arms. This is not a product surface. -->
+    <!-- The evaluation runner reads retrieval arms; core tests exercise the provider's fake-transport contract. -->
     <InternalsVisibleTo Include="Concierge.Evaluation.Runner" />
+    <InternalsVisibleTo Include="Concierge.Core.Tests" />
   </ItemGroup>
 
   <ItemGroup>

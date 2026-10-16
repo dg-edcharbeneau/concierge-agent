@@ -1,7 +1,5 @@
 using System.Globalization;
 using System.Net;
-using System.Net.Sockets;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -12,6 +10,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using System.ClientModel.Primitives;
 
 namespace Concierge.Core.Tests;
 
@@ -72,6 +71,33 @@ public sealed class AIProviderRegistrationTests
 
         Assert.Contains("AI:Chat:Endpoint", error.Message, StringComparison.Ordinal);
         Assert.Contains("HTTPS", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ChatRejectsUnsupportedResponsesEndpointPaths()
+    {
+        var values = ValidSettings(AIProviderNames.Ollama, AIProviderNames.Ollama);
+        values["AI:Chat:Endpoint"] = "http://127.0.0.1:11434/api/chat";
+        using var services = CreateServices(values);
+
+        var error = Assert.Throws<OptionsValidationException>(
+            () => services.GetRequiredService<IChatClient>());
+
+        Assert.Contains("AI:Chat:Endpoint", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ChatRejectsUnrecognizedReasoningEffort()
+    {
+        var values = ValidSettings(AIProviderNames.Ollama, AIProviderNames.Ollama);
+        values["AI:Chat:ReasoningEffort"] = "medium";
+        using var services = CreateServices(values);
+
+        var error = Assert.Throws<OptionsValidationException>(
+            () => services.GetRequiredService<IChatClient>());
+
+        Assert.Contains("AI:Chat:ReasoningEffort", error.Message, StringComparison.Ordinal);
+        Assert.Contains("'low' or 'none'", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -149,11 +175,13 @@ public sealed class AIProviderRegistrationTests
     {
         using var services = CreateServices(AIProviderNames.Ollama, AIProviderNames.Ollama);
 
-        var window = services.GetRequiredService<IOptions<ChatProviderOptions>>().Value
-            .ContextWindowTokens;
+        var options = services.GetRequiredService<IOptions<ChatProviderOptions>>().Value;
 
-        Assert.Equal(32_768, window);
-        Assert.InRange(ConciergeStayWorkflow.WorstCaseContextTokens, 30_000, window);
+        Assert.Equal(32_768, options.ContextWindowTokens);
+        Assert.Equal(
+            ConciergeStayWorkflow.AnswerWorkingContextBudgetTokens,
+            ConciergeStayWorkflow.WorstCaseContextTokens);
+        Assert.Equal("low", options.ReasoningEffort);
     }
 
     [Fact]
@@ -168,7 +196,7 @@ public sealed class AIProviderRegistrationTests
     }
 
     [Theory]
-    [InlineData("8192")]
+    [InlineData("7999")]
     [InlineData("0")]
     [InlineData("-1")]
     public void ContextWindowSmallerThanWorstCaseBudgetFailsWithActionableMessage(string window)
@@ -188,21 +216,14 @@ public sealed class AIProviderRegistrationTests
     }
 
     [Fact]
-    public void FixedPromptAllowanceCoversInstructionsLabelsAndTemplateOverhead()
+    public void PromptEstimateCountsInstructionsSeparatelyFromFixedAllowance()
     {
-        // Instructions, labels, and separators are well under 1 KB of ASCII; the remainder
-        // covers chat-template tokens for the at most 16 messages in an answer request.
-        var instructions = Encoding.UTF8.GetByteCount((string)typeof(ConciergeStayWorkflow)
-            .GetField("ConciergeInstructions", BindingFlags.NonPublic | BindingFlags.Static)!
-            .GetRawConstantValue()!);
-        const int labelBytes = 256;
-        const int messagesPerAnswer = 1 + 1 + (2 * ConciergeStayWorkflow.RecentTurnWindow) + 1 + 1;
-        const int templateTokensPerMessage = 16;
+        var instructions = Encoding.UTF8.GetByteCount(ConciergeStayWorkflow.ConciergeInstructions);
+        ChatMessage[] messages = [new(ChatRole.System, ConciergeStayWorkflow.ConciergeInstructions)];
 
-        Assert.True(
-            instructions + labelBytes + (messagesPerAnswer * templateTokensPerMessage)
-                <= ConciergeStayWorkflow.FixedPromptAllowanceTokens,
-            $"Fixed prompt text is {instructions} bytes.");
+        Assert.Equal(
+            ConciergeStayWorkflow.FixedPromptAllowanceTokens + instructions + 8,
+            ConciergeStayWorkflow.EstimatePromptTokens(messages));
     }
 
     [Fact]
@@ -217,80 +238,200 @@ public sealed class AIProviderRegistrationTests
         Assert.False(ConciergeTurnLimits.IsUserMessageWithinLimit(multiByte));
     }
 
-    [Fact]
-    public async Task OllamaChatRequestsCarryConfiguredContextWindowAndOutputCap()
+    [Theory]
+    [InlineData(AIProviderNames.Ollama, "low", null)]
+    [InlineData(AIProviderNames.Ollama, "low", 0f)]
+    [InlineData(AIProviderNames.Ollama, "none", null)]
+    [InlineData(AIProviderNames.Ollama, "none", 0f)]
+    [InlineData(AIProviderNames.Foundry, "low", null)]
+    [InlineData(AIProviderNames.Foundry, "low", 0f)]
+    [InlineData(AIProviderNames.Foundry, "none", null)]
+    [InlineData(AIProviderNames.Foundry, "none", 0f)]
+    public async Task ChatResponsesRequestsUseProviderContractAndReasoningSetting(
+        string provider,
+        string reasoningEffort,
+        float? temperature)
     {
-        using var listener = StartListener(out var endpoint);
-        var values = ValidSettings(AIProviderNames.Ollama, AIProviderNames.Ollama);
-        values["AI:Chat:Endpoint"] = endpoint;
+        var values = ValidSettings(provider, AIProviderNames.Ollama);
+        values["AI:Chat:Endpoint"] = provider == AIProviderNames.Ollama
+            ? "http://127.0.0.1:11434"
+            : "https://concierge.openai.azure.com";
         values["AI:Chat:ContextWindowTokens"] = "40000";
-        values["AI:Chat:ApiKey"] = NewTestApiKey();
+        values["AI:Chat:ReasoningEffort"] = reasoningEffort;
+        values["AI:Chat:Model"] = provider == AIProviderNames.Foundry ? "gpt-5-mini" : "chat-model";
+        var apiKey = NewTestApiKey();
+        values["AI:Chat:ApiKey"] = apiKey;
         using var services = CreateServices(values);
-        var client = services.GetRequiredService<IChatClient>();
+        var options = services.GetRequiredService<IOptions<ChatProviderOptions>>().Value;
+        var handler = new ResponsesApiHandler();
+        using var httpClient = new HttpClient(handler);
+        var transport = new HttpClientPipelineTransport(httpClient);
+        var client = AIProviderServiceCollectionExtensions.CreateChatClient(options, transport);
 
-        var serverTask = RespondOnceAsync(listener);
         var response = await client.GetResponseAsync(
             [new ChatMessage(ChatRole.User, "Hello")],
-            new ChatOptions { MaxOutputTokens = ConciergeStayWorkflow.AnswerMaxOutputTokens });
-        var (requestBody, authorization) = await serverTask;
-        using var request = JsonDocument.Parse(requestBody);
+            new ChatOptions
+            {
+                MaxOutputTokens = ConciergeStayWorkflow.AnswerMaxOutputTokens,
+                Temperature = temperature,
+            });
+        using var request = JsonDocument.Parse(handler.RequestBody!);
 
-        var options = request.RootElement.GetProperty("options");
-        Assert.Equal(40_000, options.GetProperty("num_ctx").GetInt32());
+        Assert.Equal(
+            provider == AIProviderNames.Ollama ? "/v1/responses" : "/openai/v1/responses",
+            handler.RequestPath);
+        Assert.Equal(
+            "Bearer " + (provider == AIProviderNames.Ollama ? "ollama" : apiKey),
+            handler.Authorization);
+        Assert.Equal(options.Model, request.RootElement.GetProperty("model").GetString());
+        if (provider == AIProviderNames.Ollama && temperature.HasValue)
+        {
+            Assert.Equal(temperature.Value, request.RootElement.GetProperty("temperature").GetSingle());
+        }
+        else
+        {
+            Assert.False(request.RootElement.TryGetProperty("temperature", out _));
+        }
+        Assert.False(request.RootElement.GetProperty("store").GetBoolean());
+        Assert.False(request.RootElement.TryGetProperty("num_ctx", out _));
+        Assert.Equal(
+            reasoningEffort,
+            request.RootElement.GetProperty("reasoning").GetProperty("effort").GetString());
         Assert.Equal(
             ConciergeStayWorkflow.AnswerMaxOutputTokens,
-            options.GetProperty("num_predict").GetInt32());
-        // Ollama's done_reason "length" surfaces as FinishReason.Length with the text intact.
-        Assert.Equal(ChatFinishReason.Length, response.FinishReason);
+            request.RootElement.GetProperty("max_output_tokens").GetInt32());
         Assert.Equal("Partial answer", response.Text);
-        Assert.Null(authorization);
+        Assert.Equal(
+            40_000,
+            options.ContextWindowTokens);
     }
 
-    private static HttpListener StartListener(out string endpoint)
+    [Fact]
+    public async Task OllamaEmbeddingRequestsKeepTheModelLoaded()
     {
-        for (var attempt = 0; ; attempt++)
+        using var services = CreateServices(AIProviderNames.Ollama, AIProviderNames.Ollama);
+        var options = services.GetRequiredService<IOptions<EmbeddingProviderOptions>>().Value;
+        var handler = new OllamaEmbedHandler();
+        using var generator = AIProviderServiceCollectionExtensions.CreateEmbeddingGenerator(options, handler);
+
+        var result = await generator.GenerateAsync(["first question"]);
+        using var request = JsonDocument.Parse(handler.RequestBody!);
+
+        Assert.Equal("/api/embed", handler.RequestPath);
+        Assert.Equal("embedding-model", request.RootElement.GetProperty("model").GetString());
+        // Unitless "-1" is rejected by Ollama (Go time.ParseDuration); a negative duration never unloads.
+        Assert.Equal("-1m", request.RootElement.GetProperty("keep_alive").GetString());
+        Assert.Single(result);
+    }
+
+    [Fact]
+    public async Task OllamaEmbeddingKeepAliveDoesNotOverrideCallerValue()
+    {
+        using var services = CreateServices(AIProviderNames.Ollama, AIProviderNames.Ollama);
+        var options = services.GetRequiredService<IOptions<EmbeddingProviderOptions>>().Value;
+        var handler = new OllamaEmbedHandler();
+        using var generator = AIProviderServiceCollectionExtensions.CreateEmbeddingGenerator(options, handler);
+        var callerOptions = new EmbeddingGenerationOptions
         {
-            var probe = new TcpListener(IPAddress.Loopback, 0);
-            probe.Start();
-            var port = ((IPEndPoint)probe.LocalEndpoint).Port;
-            probe.Stop();
-            endpoint = $"http://127.0.0.1:{port}/";
-            var listener = new HttpListener();
-            listener.Prefixes.Add(endpoint);
-            try
-            {
-                listener.Start();
-                return listener;
-            }
-            catch (HttpListenerException) when (attempt < 5)
-            {
-                listener.Close();
-            }
+            AdditionalProperties = new() { ["keep_alive"] = "10m" },
+        };
+
+        await generator.GenerateAsync(["question"], callerOptions);
+        using var request = JsonDocument.Parse(handler.RequestBody!);
+
+        Assert.Equal("10m", request.RootElement.GetProperty("keep_alive").GetString());
+        // The caller's options instance is cloned, not mutated.
+        Assert.Single(callerOptions.AdditionalProperties);
+    }
+
+    [Theory]
+    [InlineData(AIProviderNames.Ollama, 1)]
+    [InlineData(AIProviderNames.Foundry, 0)]
+    public async Task EmbeddingWarmupRunsOnlyForOllamaAndIsNonFatal(string provider, int expectedCalls)
+    {
+        using var services = CreateServices(AIProviderNames.Ollama, provider);
+        var generator = new FailingEmbeddingGenerator();
+        using var warmup = new OllamaEmbeddingWarmup(
+            generator,
+            services.GetRequiredService<IOptions<EmbeddingProviderOptions>>(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<OllamaEmbeddingWarmup>.Instance);
+
+        await warmup.StartAsync(CancellationToken.None);
+        await warmup.ExecuteTask!;
+
+        Assert.Equal(expectedCalls, generator.Calls);
+        Assert.True(warmup.ExecuteTask.IsCompletedSuccessfully);
+    }
+
+    private sealed class FailingEmbeddingGenerator : IEmbeddingGenerator<string, Embedding<float>>
+    {
+        public int Calls { get; private set; }
+
+        public Task<GeneratedEmbeddings<Embedding<float>>> GenerateAsync(
+            IEnumerable<string> values,
+            EmbeddingGenerationOptions? options = null,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            throw new HttpRequestException("Ollama is not running.");
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
         }
     }
 
-    private static async Task<(string Body, string? Authorization)> RespondOnceAsync(
-        HttpListener listener)
+    private sealed class OllamaEmbedHandler : HttpMessageHandler
     {
-        var context = await listener.GetContextAsync();
-        var authorization = context.Request.Headers["Authorization"];
-        string body;
-        using (var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8))
-        {
-            body = await reader.ReadToEndAsync();
-        }
+        public string? RequestPath { get; private set; }
+        public string? RequestBody { get; private set; }
 
-        var payload = Encoding.UTF8.GetBytes(
-            """
-            {"model":"chat-model","created_at":"2026-10-10T00:00:00Z",
-             "message":{"role":"assistant","content":"Partial answer"},
-             "done":true,"done_reason":"length"}
-            """.ReplaceLineEndings(string.Empty) + "\n");
-        context.Response.ContentType = "application/x-ndjson";
-        context.Response.ContentLength64 = payload.Length;
-        await context.Response.OutputStream.WriteAsync(payload);
-        context.Response.Close();
-        return (body, authorization);
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestPath = request.RequestUri!.AbsolutePath;
+            RequestBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"model":"embedding-model","embeddings":[[0.1,0.2,0.3]],"prompt_eval_count":2}""",
+                    Encoding.UTF8,
+                    "application/json"),
+            };
+        }
+    }
+
+    private sealed class ResponsesApiHandler : HttpMessageHandler
+    {
+        public string? RequestPath { get; private set; }
+        public string? RequestBody { get; private set; }
+        public string? Authorization { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestPath = request.RequestUri!.AbsolutePath;
+            RequestBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+            Authorization = request.Headers.Authorization?.ToString();
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """
+                    {"id":"resp_test","object":"response","created_at":1791936000,"status":"completed",
+                     "model":"chat-model","output":[{"id":"msg_test","type":"message","status":"completed",
+                     "role":"assistant","content":[{"type":"output_text","text":"Partial answer","annotations":[]}]}],
+                     "usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}
+                    """,
+                    Encoding.UTF8,
+                    "application/json"),
+            };
+        }
     }
 
     private static ServiceProvider CreateServices(

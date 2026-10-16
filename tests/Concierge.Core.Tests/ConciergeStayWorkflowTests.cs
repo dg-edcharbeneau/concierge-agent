@@ -18,7 +18,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
         var (stayId, handle) = await StartStayAsync(host);
-        var firstRequest = new ConciergeTurnSubmission("shared-1", "Where is breakfast?", "web");
+        var firstRequest = Turn(stayId, "shared-1", "Where is breakfast?", "web");
 
         var first = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(firstRequest));
         var replay = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(firstRequest));
@@ -33,11 +33,23 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
             Assert.IsType<ApplicationFailureException>(conflict.InnerException).ErrorType);
 
         var second = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("shared-2", "And what time?", "voice")));
+            Turn(stayId, "shared-2", "And what time?", "voice")));
         Assert.Equal(0, first.Sequence);
         Assert.Equal(1, second.Sequence);
 
         var voiceRequest = host.ChatClient.AnswerRequests[^1];
+        var instructions = voiceRequest.Messages[0];
+        Assert.Equal(ChatRole.System, instructions.Role);
+        Assert.Equal(ConciergeStayWorkflow.ConciergeInstructions, instructions.Text);
+        Assert.Contains("Use only the current hotel evidence", instructions.Text, StringComparison.Ordinal);
+        Assert.Contains("same service or facility in other words", instructions.Text, StringComparison.Ordinal);
+        Assert.Contains("Treat a related but different topic as evidence", instructions.Text, StringComparison.Ordinal);
+        Assert.Contains("Invent facts, procedures, policies", instructions.Text, StringComparison.Ordinal);
+        Assert.Contains("Answer the supported parts", instructions.Text, StringComparison.Ordinal);
+        Assert.Contains("say you do not know and refer the guest to hotel staff",
+            instructions.Text, StringComparison.Ordinal);
+        Assert.Contains("Earlier turns, summaries, and guest-reported details are continuity only",
+            instructions.Text, StringComparison.Ordinal);
         Assert.Contains(firstRequest.UserMessage, voiceRequest.UserTexts);
         Assert.Contains(
             voiceRequest.Messages,
@@ -64,7 +76,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         var (stayId, handle) = await StartStayAsync(host);
 
         var pendingAnswer = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("voice-pending", "Where is the pool?", "voice")));
+            Turn(stayId, "voice-pending", "Where is the pool?", "voice")));
         await handle.ExecuteUpdateAsync(wf => wf.MarkTurnInterruptedAsync(
             new ConciergeTurnInterruption("voice-pending")));
 
@@ -81,7 +93,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
             await ReadPersistedAnswerAsync(host, stayId, "voice-pending"));
 
         var flushedAnswer = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("voice-flushed", "Where is breakfast?", "voice")));
+            Turn(stayId, "voice-flushed", "Where is breakfast?", "voice")));
         await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
         Assert.False(await ReadPersistedInterruptionAsync(host, stayId, "voice-flushed"));
 
@@ -100,7 +112,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
             await ReadPersistedAnswerAsync(host, stayId, "voice-flushed"));
 
         await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("web-turn", "Is parking available?", "web")));
+            Turn(stayId, "web-turn", "Is parking available?", "web")));
         await handle.ExecuteUpdateAsync(wf => wf.MarkTurnInterruptedAsync(
             new ConciergeTurnInterruption("web-turn")));
         var webTurn = (await handle.ExecuteUpdateAsync(wf => wf.GetHistoryAsync()))
@@ -118,7 +130,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         host.ChatClient.Gate = gate;
         var submitted = await handle.StartUpdateAsync(
-            wf => wf.SubmitTurnAsync(new ConciergeTurnSubmission("admitted-voice", "Still working?", "voice")),
+            wf => wf.SubmitTurnAsync(Turn(stayId, "admitted-voice", "Still working?", "voice")),
             new(WorkflowUpdateStage.Accepted));
         await host.ChatClient.WaitForCallAsync().WaitAsync(TimeSpan.FromSeconds(15));
 
@@ -144,7 +156,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
         var (stayId, handle) = await StartStayAsync(host);
         var result = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("legacy-turn", "Is breakfast served?", "voice")));
+            Turn(stayId, "legacy-turn", "Is breakfast served?", "voice")));
         await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
 
         // Recreate a pre-Step-8 transcript table shape with a persisted row.
@@ -164,7 +176,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         await using var host = await ConciergeTestHost.StartAsync(postgreSql, flushIntervalSeconds: 1);
         var (stayId, handle) = await StartStayAsync(host);
         await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("timed-1", "Where is the pool?", "web")));
+            Turn(stayId, "timed-1", "Where is the pool?", "web")));
 
         await WaitUntilAsync(
             async () => (await host.ReadPersistedTurnIdsAsync(stayId)).Length > 0,
@@ -180,13 +192,13 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         var (stayId, handle) = await StartStayAsync(host);
 
         await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("batch-1", "Where is the pool?", "web")));
+            Turn(stayId, "batch-1", "Where is the pool?", "web")));
         // Below the threshold the batch waits for the 600-second interval.
         await Task.Delay(TimeSpan.FromSeconds(2));
         Assert.Empty(await host.ReadPersistedTurnIdsAsync(stayId));
 
         await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("batch-2", "Where is breakfast?", "voice")));
+            Turn(stayId, "batch-2", "Where is breakfast?", "voice")));
         await WaitUntilAsync(
             async () => (await host.ReadPersistedTurnIdsAsync(stayId)).Length == 2,
             TimeSpan.FromSeconds(15));
@@ -219,11 +231,11 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         host.ChatClient.Gate = gate;
         var first = await handle.StartUpdateAsync(
-            wf => wf.SubmitTurnAsync(new ConciergeTurnSubmission("end-1", "First?", "web")),
+            wf => wf.SubmitTurnAsync(Turn(stayId, "end-1", "First?", "web")),
             new(WorkflowUpdateStage.Accepted));
         await host.ChatClient.WaitForCallAsync().WaitAsync(TimeSpan.FromSeconds(15));
         var second = await handle.StartUpdateAsync(
-            wf => wf.SubmitTurnAsync(new ConciergeTurnSubmission("end-2", "Second?", "voice")),
+            wf => wf.SubmitTurnAsync(Turn(stayId, "end-2", "Second?", "voice")),
             new(WorkflowUpdateStage.Accepted));
         var end = await handle.StartUpdateAsync(
             wf => wf.EndInteractionAsync(), new(WorkflowUpdateStage.Accepted));
@@ -259,16 +271,16 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
     public async Task SimultaneousTurnsRunInArrivalOrderWithSharedContext()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
-        var (_, handle) = await StartStayAsync(host);
+        var (stayId, handle) = await StartStayAsync(host);
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         host.ChatClient.Gate = gate;
 
         var firstUpdate = await handle.StartUpdateAsync(
-            wf => wf.SubmitTurnAsync(new ConciergeTurnSubmission("arrive-1", "First?", "web")),
+            wf => wf.SubmitTurnAsync(Turn(stayId, "arrive-1", "First?", "web")),
             new(WorkflowUpdateStage.Accepted));
         await host.ChatClient.WaitForCallAsync();
         var secondUpdate = await handle.StartUpdateAsync(
-            wf => wf.SubmitTurnAsync(new ConciergeTurnSubmission("arrive-2", "Second?", "voice")),
+            wf => wf.SubmitTurnAsync(Turn(stayId, "arrive-2", "Second?", "voice")),
             new(WorkflowUpdateStage.Accepted));
 
         // The second turn waits for the first; it has not reached the model.
@@ -284,36 +296,398 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
     }
 
     [Fact]
-    public async Task OlderTurnsFoldIntoOneProviderBoundedSummary()
+    public async Task GuestAllergyRemainsAvailableAfterMoreThanSixSmallTurns()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
         var (stayId, handle) = await StartStayAsync(host);
-        var turnCount = ConciergeStayWorkflow.RecentTurnWindow + 2;
+        var allergyTurn = Turn(stayId,
+            "allergy", "I am allergic to shellfish.", "web");
+        var original = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(allergyTurn));
+        Assert.Contains(
+            host.ChatClient.AnswerRequests[0].Messages,
+            message => message.Role == ChatRole.System
+                && message.Text.Contains("shellfish", StringComparison.Ordinal));
+        var modelCallCount = host.ChatClient.AnswerRequests.Count;
+        Assert.Equal(original, await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(allergyTurn)));
+        Assert.Equal(modelCallCount, host.ChatClient.AnswerRequests.Count);
+        const int turnCount = 9;
         for (var index = 0; index < turnCount; index++)
         {
             await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-                new ConciergeTurnSubmission($"t-{index}", $"Question {index}", "web")));
+                Turn(stayId, $"t-{index}", $"Question {index}", "web")));
+            Assert.Contains(
+                host.ChatClient.AnswerRequests[^1].Messages,
+                message => message.Role == ChatRole.System
+                    && message.Text.Contains("shellfish", StringComparison.Ordinal));
         }
 
-        var summaries = host.ChatClient.Requests.Where(request => request.IsSummary).ToArray();
-        Assert.Single(summaries);
-        Assert.Equal(1024, summaries[0].MaxOutputTokens);
-        Assert.Equal(ConciergeStayWorkflow.SummaryMaxOutputTokens, summaries[0].MaxOutputTokens);
-        Assert.Contains("[t-0]", summaries[0].LastUserText, StringComparison.Ordinal);
-
-        var last = host.ChatClient.AnswerRequests[^1];
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "recall-allergy", "What allergy did I report?", "voice")));
+        var answers = host.ChatClient.AnswerRequests;
+        var last = answers[^1];
         Assert.Contains(
             last.Messages,
             message => message.Role == ChatRole.System
-                && message.Text.Contains("Summary 1", StringComparison.Ordinal));
-        Assert.DoesNotContain("Question 0", last.UserTexts);
-        Assert.Equal(
-            ConciergeStayWorkflow.RecentTurnWindow + 1,
-            last.Messages.Count(message => message.Role == ChatRole.User));
+                && message.Text.Contains("Guest-reported allergy", StringComparison.Ordinal)
+                && message.Text.Contains("shellfish", StringComparison.Ordinal)
+                && message.Text.Contains("transcript sequence 0", StringComparison.Ordinal));
+        Assert.DoesNotContain(host.ChatClient.Requests, request => request.IsSummary);
 
-        // Compaction never removes turns from the complete transcript.
         await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
-        Assert.Equal(turnCount, (await host.ReadPersistedTurnIdsAsync(stayId)).Length);
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId,
+                "recall-after-interaction", "What allergy did I report?", "web")));
+        Assert.Contains(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Role == ChatRole.System
+                && message.Text.Contains("shellfish", StringComparison.Ordinal));
+        await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
+        Assert.Equal(turnCount + 3, (await host.ReadPersistedTurnIdsAsync(stayId)).Length);
+    }
+
+    [Fact]
+    public async Task AllergyCorrectionSupersedesActiveMemoryButKeepsBothTranscriptTurns()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "allergy-original", "I am allergic to shellfish.", "web")));
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId,
+                "allergy-correction", "I have no allergy to shellfish.", "web")));
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "allergy-recall", "What allergy did I report?", "voice")));
+
+        var memory = Assert.Single(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Role == ChatRole.System
+                && message.Text.Contains("Guest-reported allergy", StringComparison.Ordinal));
+        Assert.Contains("no allergy to shellfish", memory.Text, StringComparison.Ordinal);
+        Assert.Contains("transcript sequence 1, supersedes sequence 0", memory.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("reports allergic to shellfish", memory.Text, StringComparison.Ordinal);
+
+        await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
+        var history = await handle.ExecuteUpdateAsync(wf => wf.GetHistoryAsync());
+        Assert.Equal(
+            ["I am allergic to shellfish.", "I have no allergy to shellfish."],
+            history.Turns.Take(2).Select(turn => turn.GuestMessage));
+        Assert.Equal(3, (await host.ReadPersistedTurnIdsAsync(stayId)).Length);
+    }
+
+    [Fact]
+    public async Task QuestionsAndAssistantAnswersDoNotBecomeGuestMemory()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ChatClient.AnswerFactory = _ => "You told me you are allergic to shellfish.";
+
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "allergy-question", "Am I allergic to shellfish?", "web")));
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "memory-check", "What do you remember?", "web")));
+
+        Assert.DoesNotContain(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Role == ChatRole.System
+                && message.Text.Contains("Guest-reported allergy", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task FailedAnswerDoesNotDiscardPreviouslyRecordedStayMemory()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "remember-allergy", "I am allergic to shellfish.", "web")));
+
+        host.ChatClient.Fail = true;
+        await Assert.ThrowsAsync<WorkflowUpdateFailedException>(() =>
+            handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                Turn(stayId, "failed-followup", "Can you help?", "web"))));
+
+        host.ChatClient.Fail = false;
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "retry-followup", "What allergy did I report?", "web")));
+        Assert.Contains(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Role == ChatRole.System
+                && message.Text.Contains("shellfish", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task UnresolvedGuestRequestPersistsWithoutClaimingCompletion()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "request-towels", "Please send extra towels.", "web")));
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "request-status", "Did you send them?", "web")));
+
+        Assert.Contains(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Role == ChatRole.System
+                && message.Text.Contains("unresolved-request", StringComparison.Ordinal)
+                && message.Text.Contains("remains unresolved", StringComparison.Ordinal)
+                && message.Text.Contains("no system confirmation", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StayMemoryDoesNotCrossStayWorkflowBoundaries()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, firstStay) = await StartStayAsync(host);
+        var secondStayId = await host.SeedStayAsync(
+            "Other",
+            "102",
+            ConciergeTestHost.HotelToday,
+            ConciergeTestHost.HotelToday.AddDays(1));
+        var secondStay = await host.StartStayAsync(
+            secondStayId,
+            ConciergeTestHost.HotelMidnightUtc(ConciergeTestHost.HotelToday.AddDays(2)));
+
+        await firstStay.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "stay-one-allergy", "I am allergic to shellfish.", "web")));
+        await secondStay.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(secondStayId, "stay-two-query", "What do you remember?", "web")));
+
+        Assert.DoesNotContain(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Role == ChatRole.System
+                && message.Text.Contains("shellfish", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task WorkingHistoryIsBudgetSizedAndLongTurnsPruneOldCompletePairs()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        const int smallTurnCount = 12;
+        for (var index = 0; index < smallTurnCount; index++)
+        {
+            var message = $"small-{index}";
+            await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                Turn(stayId, $"small-{index}", message, "web")));
+        }
+
+        const string smallCurrentMessage = "What should I know now?";
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "small-current", smallCurrentMessage, "web")));
+
+        var smallAnswer = host.ChatClient.AnswerRequests[^1];
+        Assert.Equal(smallCurrentMessage, smallAnswer.LastUserText);
+        Assert.Equal(
+            smallTurnCount,
+            smallAnswer.Messages.Count(message =>
+                message.Role == ChatRole.User
+                && message.Text.StartsWith("small-", StringComparison.Ordinal)));
+
+        for (var index = 0; index < 12; index++)
+        {
+            var message = $"medium-{index}: {new string((char)('a' + index), 140)}";
+            await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                Turn(stayId, $"medium-{index}", message, "web")));
+        }
+
+        var longMessage = $"long-request: {new string('x', 1_880)}";
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "long-request", longMessage, "web")));
+        var longAnswer = host.ChatClient.AnswerRequests[^1];
+        Assert.Equal(longMessage, longAnswer.LastUserText);
+        Assert.DoesNotContain(
+            longAnswer.UserTexts,
+            text => text.StartsWith("medium-0:", StringComparison.Ordinal));
+        Assert.Contains(
+            longAnswer.UserTexts,
+            text => text.StartsWith("medium-11:", StringComparison.Ordinal));
+
+        var conversation = longAnswer.Messages
+            .Where(message => message.Role == ChatRole.User || message.Role == ChatRole.Assistant)
+            .ToArray();
+        Assert.Equal(ChatRole.User, conversation[^1].Role);
+        Assert.Equal(longMessage, conversation[^1].Text);
+        Assert.Equal(0, (conversation.Length - 1) % 2);
+        for (var index = 0; index < conversation.Length - 1; index += 2)
+        {
+            Assert.Equal(ChatRole.User, conversation[index].Role);
+            Assert.Equal(ChatRole.Assistant, conversation[index + 1].Role);
+        }
+
+        Assert.True(
+            ConciergeStayWorkflow.EstimatePromptTokens(longAnswer.Messages)
+            + ConciergeStayWorkflow.AnswerMaxOutputTokens
+            + ConciergeStayWorkflow.ContextEstimationHeadroomTokens
+            <= ConciergeStayWorkflow.AnswerWorkingContextBudgetTokens);
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "after-long", "Anything else?", "web")));
+        var afterLong = host.ChatClient.AnswerRequests[^1];
+        Assert.DoesNotContain(
+            afterLong.UserTexts,
+            text => text.StartsWith("medium-0:", StringComparison.Ordinal));
+        var afterLongConversation = afterLong.Messages
+            .Where(message => message.Role == ChatRole.User || message.Role == ChatRole.Assistant)
+            .ToArray();
+        Assert.Equal(0, (afterLongConversation.Length - 1) % 2);
+    }
+
+    [Fact]
+    public async Task ExistingStayAdoptsBetweenTurnCompactionAfterLegacyTurns()
+    {
+        var enableCompaction = false;
+        await using var host = await ConciergeTestHost.StartAsync(
+            postgreSql,
+            patchActivation: input => input.PatchId.StartsWith("stay-memory-v1-", StringComparison.Ordinal)
+                ? false
+                : !input.PatchId.StartsWith("compact-context-between-turns-", StringComparison.Ordinal)
+                    || enableCompaction);
+        var (stayId, handle) = await StartStayAsync(host);
+        for (var index = 0; index <= ConciergeStayWorkflow.LegacyRecentTurnWindow; index++)
+        {
+            await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                Turn(stayId, $"legacy-{index}", $"Question {index}", "web")));
+        }
+        Assert.DoesNotContain(host.ChatClient.Requests, request => request.IsSummary);
+        enableCompaction = true;
+        // This turn compacts the old context before answering, then prepares the next summary.
+        await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+            Turn(stayId, "adopt", "Next question", "voice")));
+        using (var bound = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+        {
+            while (host.ChatClient.Requests.Count(request => request.IsSummary) < 2)
+            {
+                await Task.Delay(20, bound.Token);
+            }
+        }
+        var replayer = new WorkflowReplayer(new WorkflowReplayerOptions
+        {
+            DataConverter = DurableAIDataConverter.Instance,
+        }.AddWorkflow<ConciergeStayWorkflow>());
+        await replayer.ReplayWorkflowAsync(await handle.FetchHistoryAsync());
+    }
+
+    [Fact]
+    public async Task CompletingLegacyCompactionBeforeMemoryAdoptionPreventsSummaryFromCrossingCAN()
+    {
+        var enableMemory = false;
+        var enableCompaction = false;
+        await using var host = await ConciergeTestHost.StartAsync(
+            postgreSql,
+            flushIntervalSeconds: 600,
+            flushBatchSize: 100,
+            devServerArgs:
+            [
+                "--dynamic-config-value",
+                "limit.historyCount.suggestContinueAsNew=160",
+            ],
+            patchActivation: input =>
+                input.PatchId.StartsWith("stay-memory-v1-", StringComparison.Ordinal)
+                    ? enableMemory
+                    : !input.PatchId.StartsWith(
+                        "compact-context-between-turns-", StringComparison.Ordinal)
+                        || enableCompaction);
+        var (stayId, handle) = await StartStayAsync(host);
+        var summaryGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.ChatClient.SummaryGate = summaryGate;
+        try
+        {
+            for (var index = 0; index < ConciergeStayWorkflow.LegacyRecentTurnWindow; index++)
+            {
+                await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                    Turn(stayId, $"legacy-before-{index}", $"Question {index}", "web")));
+            }
+
+            enableCompaction = true;
+            await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                Turn(stayId, "legacy-compaction", "Question 6", "web")));
+            await WaitUntilAsync(
+                () => Task.FromResult(host.ChatClient.Requests.Any(request => request.IsSummary)),
+                TimeSpan.FromSeconds(15));
+
+            enableMemory = true;
+            var adoption = await handle.StartUpdateAsync(
+                wf => wf.SubmitTurnAsync(
+                    Turn(stayId, "adopt-memory", "Question 7", "web")),
+                new(WorkflowUpdateStage.Accepted));
+            var adoptionResult = adoption.GetResultAsync();
+            await Task.Delay(100);
+            Assert.False(adoptionResult.IsCompleted);
+
+            summaryGate.TrySetResult();
+            await adoptionResult.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.DoesNotContain(
+                host.ChatClient.AnswerRequests[^1].Messages,
+                message => message.Text.Contains("Summary 1", StringComparison.Ordinal));
+
+            var initialRunId = (await handle.DescribeAsync()).RunId;
+            for (var index = 0; index < 12
+                && (await handle.DescribeAsync()).RunId == initialRunId; index++)
+            {
+                await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                    Turn(stayId, $"post-adoption-{index}", $"Follow-up {index}", "web")));
+                await WaitUntilAsync(
+                    async () => (await handle.DescribeAsync()).RunId != initialRunId,
+                    TimeSpan.FromSeconds(2),
+                    throwOnTimeout: false);
+            }
+
+            Assert.NotEqual(initialRunId, (await handle.DescribeAsync()).RunId);
+            var continued = await ReadRunInputAsync(host, handle);
+            Assert.Null(continued.ContinuitySummary);
+        }
+        finally
+        {
+            summaryGate.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task CompactionDoesNotHoldCompletedAnswerButNextTurnWaitsForItsContext()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(
+            postgreSql,
+            patchActivation: input => !input.PatchId.StartsWith("stay-memory-v1-", StringComparison.Ordinal));
+        var (stayId, handle) = await StartStayAsync(host);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.ChatClient.SummaryGate = gate;
+        try
+        {
+            for (var index = 0; index <= ConciergeStayWorkflow.LegacyRecentTurnWindow; index++)
+            {
+                await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                    Turn(stayId, $"idle-{index}", $"Question {index}", "voice")))
+                    .WaitAsync(TimeSpan.FromSeconds(15));
+            }
+
+            // A blocked summary cannot delay the seventh completed answer or its same-ID retry.
+            var retry = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
+                Turn(stayId, "idle-6", "Question 6", "voice")));
+            Assert.Equal(6, retry.Sequence);
+            var admitted = await handle.StartUpdateAsync(wf => wf.SubmitTurnAsync(
+                Turn(stayId, "idle-7", "Question 7", "web")),
+                new(WorkflowUpdateStage.Accepted));
+            var next = admitted.GetResultAsync();
+            await Task.Delay(200);
+            Assert.False(next.IsCompleted);
+            Assert.Equal(7, host.ChatClient.AnswerRequests.Count);
+
+            gate.SetResult();
+            await next.WaitAsync(TimeSpan.FromSeconds(15));
+            var answer = host.ChatClient.AnswerRequests[^1];
+            Assert.Contains(answer.Messages, message => message.Text.Contains("Summary 1", StringComparison.Ordinal));
+            Assert.DoesNotContain("Question 0", answer.UserTexts);
+            Assert.Contains("Question 6", answer.UserTexts);
+            await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
+            var replayer = new WorkflowReplayer(new WorkflowReplayerOptions
+            {
+                DataConverter = DurableAIDataConverter.Instance,
+            }.AddWorkflow<ConciergeStayWorkflow>());
+            await replayer.ReplayWorkflowAsync(await handle.FetchHistoryAsync());
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
     }
 
     [Fact]
@@ -324,18 +698,26 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
             devServerArgs:
             [
                 "--dynamic-config-value",
-                "limit.historyCount.suggestContinueAsNew=30",
+                "limit.historyCount.suggestContinueAsNew=160",
             ],
             flushBatchSize: 7);
-        var (stayId, handle) = await StartStayAsync(host);
-        var deadline = (await ReadRunInputAsync(host, handle)).EligibilityDeadlineUtc;
+        const string legacySummary = "LEGACY DAMAGED SUMMARY MUST NOT REACH THE MODEL";
+        var stayId = await SeedStayAsync(host);
+        var deadline = ConciergeTestHost.HotelMidnightUtc(
+            ConciergeTestHost.HotelToday.AddDays(2));
+        var handle = await host.StartStayAsync(stayId, deadline, legacySummary);
         var firstRunId = (await handle.DescribeAsync()).RunId;
+        var verifiedGuest = new ConciergeVerifiedGuest(stayId, "Cecil", "Phillip", "112");
 
         var submitted = new List<ConciergeTurnResult>();
         for (var index = 0; index < 12 && (await handle.DescribeAsync()).RunId == firstRunId; index++)
         {
+            var guestMessage = index == 0 ? "I am allergic to shellfish." : $"Question {index}";
             submitted.Add(await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-                new ConciergeTurnSubmission($"can-{index}", $"Question {index}", "web"))));
+                new ConciergeTurnSubmission($"can-{index}", guestMessage, "web", verifiedGuest))));
+            Assert.DoesNotContain(
+                host.ChatClient.AnswerRequests[^1].Messages,
+                message => message.Text.Contains(legacySummary, StringComparison.Ordinal));
             await WaitUntilAsync(
                 async () => (await handle.DescribeAsync()).RunId != firstRunId,
                 TimeSpan.FromSeconds(2),
@@ -346,8 +728,17 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         var continued = await ReadRunInputAsync(host, handle);
         Assert.Equal(deadline, continued.EligibilityDeadlineUtc);
         Assert.Equal(stayId, continued.StayId);
+        Assert.Equal(verifiedGuest, continued.VerifiedGuest);
         Assert.Equal(submitted.Count, continued.NextSequence);
         Assert.Equal(7, continued.TranscriptFlushBatchSize);
+        Assert.Null(continued.ContinuitySummary);
+        Assert.True(continued.RecentTurns!.Count > 6);
+        Assert.True(
+            ConciergeStayWorkflow.EstimateRecentHistoryTokens(continued.RecentTurns)
+            <= ConciergeStayWorkflow.RecentHistoryStorageBudgetTokens);
+        var carriedMemory = Assert.Single(continued.StayMemory!);
+        Assert.Equal("allergy", carriedMemory.Category);
+        Assert.Contains("shellfish", carriedMemory.Subject, StringComparison.Ordinal);
 
         // Every earlier-run turn was flushed before Continue-As-New.
         var expectedIds = submitted.Select(turn => turn.TurnId).ToArray();
@@ -356,29 +747,47 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         // A retried turn from the earlier run returns its original result without a model call.
         var modelCalls = host.ChatClient.Requests.Count;
         var replay = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("can-0", "Question 0", "web")));
+            new ConciergeTurnSubmission("can-0", "I am allergic to shellfish.", "web", verifiedGuest)));
         Assert.Equal(submitted[0], replay);
         var conflict = await Assert.ThrowsAsync<WorkflowUpdateFailedException>(() =>
             handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-                new ConciergeTurnSubmission("can-0", "Changed", "web"))));
+                new ConciergeTurnSubmission("can-0", "Changed", "web", verifiedGuest))));
         Assert.Equal(
             ConciergeStayWorkflow.TurnConflictErrorType,
             Assert.IsType<ApplicationFailureException>(conflict.InnerException).ErrorType);
         Assert.Equal(modelCalls, host.ChatClient.Requests.Count);
 
         var next = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("after-can", "Anything else?", "voice")));
+            new ConciergeTurnSubmission("after-can", "Anything else?", "voice", verifiedGuest)));
         Assert.Equal(submitted.Count, next.Sequence);
         // Recent context crossed Continue-As-New with the carried input.
         Assert.Contains(
             $"Question {submitted.Count - 1}",
             host.ChatClient.AnswerRequests[^1].UserTexts);
+        Assert.Contains(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Role == ChatRole.System
+                && message.Text.Contains("shellfish", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Text.Contains(legacySummary, StringComparison.Ordinal));
+        Assert.Contains(
+            host.ChatClient.AnswerRequests[^1].Messages,
+            message => message.Text.StartsWith("Verified guest context:", StringComparison.Ordinal)
+                && message.Text.Contains("Cecil", StringComparison.Ordinal));
 
         string[] allIds = [.. expectedIds, "after-can"];
         var history = await handle.ExecuteUpdateAsync(wf => wf.GetHistoryAsync());
         Assert.Equal(allIds, history.Turns.Select(turn => turn.TurnId));
         await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
         Assert.Equal(allIds, await host.ReadPersistedTurnIdsAsync(stayId));
+        var replayer = new WorkflowReplayer(new WorkflowReplayerOptions
+        {
+            DataConverter = DurableAIDataConverter.Instance,
+        }.AddWorkflow<ConciergeStayWorkflow>());
+        await replayer.ReplayWorkflowAsync(await handle.FetchHistoryAsync());
+        await replayer.ReplayWorkflowAsync(await host.Environment.Client
+            .GetWorkflowHandle<ConciergeStayWorkflow>(handle.Id, firstRunId).FetchHistoryAsync());
     }
 
     [Fact]
@@ -389,7 +798,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         var deadline = DateTimeOffset.UtcNow.AddSeconds(6);
         var handle = await host.StartStayAsync(stayId, deadline);
         await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("expiring", "Late checkout?", "web")));
+            Turn(stayId, "expiring", "Late checkout?", "web")));
 
         await handle.GetResultAsync();
         Assert.True(DateTimeOffset.UtcNow >= deadline);
@@ -402,7 +811,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
         var (stayId, handle) = await StartStayAsync(host);
         host.ChatClient.Fail = true;
-        var request = new ConciergeTurnSubmission("retry-me", "Is the spa open?", "web");
+        var request = Turn(stayId, "retry-me", "Is the spa open?", "web");
 
         await Assert.ThrowsAsync<WorkflowUpdateFailedException>(() =>
             handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(request)));
@@ -423,7 +832,7 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         host.ChatClient.AnswerFinishReason = ChatFinishReason.Length;
 
         var result = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("cut-off", "Describe every amenity.", "web")));
+            Turn(stayId, "cut-off", "Describe every amenity.", "web")));
 
         var answerRequest = Assert.Single(host.ChatClient.AnswerRequests);
         Assert.Equal(1024, answerRequest.MaxOutputTokens);
@@ -437,18 +846,18 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
     public async Task MessageOverTheUtf8ByteLimitIsRejectedBeforeTheModel()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
-        var (_, handle) = await StartStayAsync(host);
+        var (stayId, handle) = await StartStayAsync(host);
 
         // 700 three-byte characters: 700 chars passes a character count, 2,100 bytes does not.
         var multiByte = new string('\u20AC', 700);
         await Assert.ThrowsAsync<WorkflowUpdateFailedException>(() =>
             handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-                new ConciergeTurnSubmission("too-big", multiByte, "web"))));
+                Turn(stayId, "too-big", multiByte, "web"))));
         Assert.Empty(host.ChatClient.Requests);
 
         var atLimit = new string('a', ConciergeTurnLimits.MaxUserMessageUtf8Bytes);
         await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(
-            new ConciergeTurnSubmission("at-limit", atLimit, "web")));
+            Turn(stayId, "at-limit", atLimit, "web")));
         Assert.Single(host.ChatClient.AnswerRequests);
     }
 
@@ -460,6 +869,10 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
             ConciergeTestHost.HotelToday.AddDays(2));
         return (stayId, await host.StartStayAsync(stayId, deadline));
     }
+
+    /// <summary>A turn carrying a verified guest bound to <paramref name="stayId"/>, as the Web sends it.</summary>
+    private static ConciergeTurnSubmission Turn(Guid stayId, string turnId, string message, string channel) =>
+        new(turnId, message, channel, ConciergeTestHost.VerifiedGuest(stayId));
 
     private static Task<Guid> SeedStayAsync(ConciergeTestHost host) =>
         host.SeedStayAsync(

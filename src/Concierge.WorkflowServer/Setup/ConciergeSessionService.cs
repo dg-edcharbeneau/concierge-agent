@@ -26,9 +26,11 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
         // Return the first committed binding rather than selecting a different stay later.
         await using (var command = dataSource.CreateCommand(
             """
-            SELECT stay_id, expires_at_utc
-            FROM concierge_sessions
-            WHERE session_id = $1 AND credential_sha256 = $2;
+            SELECT cs.stay_id, cs.expires_at_utc, g.given_name, g.family_name, s.room_number
+            FROM concierge_sessions cs
+            JOIN stays s ON s.stay_id = cs.stay_id
+            JOIN guests g ON g.guest_id = s.guest_id
+            WHERE cs.session_id = $1 AND cs.credential_sha256 = $2;
             """))
         {
             command.Parameters.AddWithValue(request.SessionId);
@@ -39,7 +41,8 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
                 return new ConciergeSessionContext(
                     request.SessionId,
                     reader.GetGuid(0),
-                    reader.GetFieldValue<DateTimeOffset>(1));
+                    reader.GetFieldValue<DateTimeOffset>(1),
+                    ReadVerifiedGuest(reader, reader.GetGuid(0), 2));
             }
         }
 
@@ -92,9 +95,11 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
         // A concurrent retry may have inserted this ID. Only accept the matching verifier.
         await using (var command = dataSource.CreateCommand(
             """
-            SELECT stay_id, expires_at_utc
-            FROM concierge_sessions
-            WHERE session_id = $1 AND credential_sha256 = $2;
+            SELECT cs.stay_id, cs.expires_at_utc, g.given_name, g.family_name, s.room_number
+            FROM concierge_sessions cs
+            JOIN stays s ON s.stay_id = cs.stay_id
+            JOIN guests g ON g.guest_id = s.guest_id
+            WHERE cs.session_id = $1 AND cs.credential_sha256 = $2;
             """))
         {
             command.Parameters.AddWithValue(request.SessionId);
@@ -104,7 +109,8 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
                 ? new ConciergeSessionContext(
                     request.SessionId,
                     reader.GetGuid(0),
-                    reader.GetFieldValue<DateTimeOffset>(1))
+                    reader.GetFieldValue<DateTimeOffset>(1),
+                    ReadVerifiedGuest(reader, reader.GetGuid(0), 2))
                 : null;
         }
     }
@@ -124,9 +130,11 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
 
         await using var command = dataSource.CreateCommand(
             """
-            SELECT cs.session_id, cs.stay_id, cs.expires_at_utc
+            SELECT cs.session_id, cs.stay_id, cs.expires_at_utc,
+                   g.given_name, g.family_name, s.room_number
             FROM concierge_sessions cs
             JOIN stays s ON s.stay_id = cs.stay_id
+            JOIN guests g ON g.guest_id = s.guest_id
             WHERE cs.credential_sha256 = $1
               AND cs.ended_at_utc IS NULL
               AND cs.expires_at_utc > CURRENT_TIMESTAMP
@@ -143,8 +151,12 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
         return new ConciergeSessionContext(
             reader.GetGuid(0),
             reader.GetGuid(1),
-            reader.GetFieldValue<DateTimeOffset>(2));
+            reader.GetFieldValue<DateTimeOffset>(2),
+            ReadVerifiedGuest(reader, reader.GetGuid(1), 3));
     }
+
+    private static ConciergeVerifiedGuest ReadVerifiedGuest(NpgsqlDataReader reader, Guid stayId, int offset) =>
+        new(stayId, reader.GetString(offset), reader.GetString(offset + 1), reader.GetString(offset + 2));
 
     /// <summary>
     /// Marks the session ended. Already-ended sessions are left unchanged, so retries are safe.

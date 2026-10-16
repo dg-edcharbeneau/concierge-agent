@@ -81,6 +81,12 @@
                         <option value="dark">Dark</option>
                     </select>
                 </label>
+                @if (session?.Credential is not null && !hasExpired && !voiceMode)
+                {
+                    <button class="start-voice-button" type="button" @onclick="StartVoiceAsync" disabled="@(!CanStartVoice)">
+                        Start voice
+                    </button>
+                }
                 @if (session?.Credential is not null)
                 {
                     <button class="end-chat-button" type="button" @onclick="EndChatAsync" disabled="@isEnding">
@@ -258,6 +264,36 @@
                         </div>
                     }
 
+                    @if (voiceMode)
+                    {
+                        <section class="voice-panel voice-@voiceState" aria-label="Voice conversation">
+                            <div class="voice-status" role="status" aria-live="polite">
+                                <span class="voice-indicator" aria-hidden="true"></span>
+                                <strong>@VoiceStateLabel</strong>
+                                @if (!string.IsNullOrWhiteSpace(voiceMessage))
+                                {
+                                    <span class="voice-message">@voiceMessage</span>
+                                }
+                                else if (voiceState == "paused")
+                                {
+                                    <span class="voice-message">Voice paused while this page was hidden.</span>
+                                }
+                            </div>
+                            <div class="voice-actions">
+                                @if (voiceState == "paused")
+                                {
+                                    <button class="primary-button" type="button" @onclick="ResumeVoiceAsync">Resume voice</button>
+                                }
+                                else if (voiceState == "disconnected")
+                                {
+                                    <button class="primary-button" type="button" @onclick="ConnectVoiceAsync">Reconnect</button>
+                                }
+                                <button class="secondary-button" type="button" @onclick="UseTextChatAsync">Use text chat</button>
+                            </div>
+                        </section>
+                    }
+                    else
+                    {
                     <form class="composer" @onsubmit="SendDraftAsync" @onsubmit:preventDefault>
                         <label class="message-label" for="message-draft">MESSAGE</label>
                         <div class="compose-box">
@@ -280,6 +316,7 @@
                             </div>
                         </div>
                     </form>
+                    }
                 </section>
             }
         </main>
