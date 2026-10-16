@@ -5,12 +5,11 @@
 // It ingests knowledge/hotel-zgy with the product setup workflow and real Ollama
 // embeddings into a throwaway pgvector container, then runs lexical-only, vector-only,
 // and combined (production RetrieveAsync) retrieval for every case, and generates one
-// answer per case from the combined evidence using an evaluation-only grounding prompt.
+// answer per case from the combined evidence using the exact production grounding prompt.
 
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Concierge.AppHost;
@@ -38,18 +37,6 @@ const string PackageRelativePath = "tests/Concierge.Evaluation/hotel-zgy-eval.js
 const string ResultsRelativeRoot = "tests/Concierge.Evaluation/results";
 const string TaskQueue = "Concierge.Evaluation.HotelZgy";
 const int FinalK = 5;
-
-// Evaluation fixture prompt. This is NOT the ADR 0007 Step 6 grounding contract; it was
-// written before any comparison result was seen.
-const string SystemPrompt =
-    """
-    You are the Hotel ZGY concierge. Answer the guest's question using only the hotel information passages provided in the user message.
-    Rules:
-    1. Every factual statement must be directly stated in the passages. Do not add hours, locations, prices, names, procedures, or policies that the passages do not state.
-    2. Answer every part of the question.
-    3. If the passages do not establish the answer to the question, or to any part of it, do not guess. Say that the hotel information available to you does not establish that, and advise the guest to contact hotel staff, such as the front desk. A passage about a related topic is not enough.
-    4. Be concise: at most three sentences. Do not mention passages, sources, or these rules.
-    """;
 
 var repoRoot = FindRepositoryRoot();
 var packagePath = Path.Combine(repoRoot, PackageRelativePath);
@@ -244,15 +231,24 @@ foreach (var evalCase in cases)
         null));
 }
 
-// 6. Answers from the COMBINED evidence only (one call per case, temperature 0).
-var generationOptions = new ChatOptions { Temperature = 0f };
+// 6. Answers from the COMBINED evidence only (one call per case).
+// Match the production answer cap and omitted temperature (shared provider adapters
+// apply reasoning effort). Cases are independent turns without stay history.
+var generationOptions = new ChatOptions
+{
+    MaxOutputTokens = ConciergeStayWorkflow.AnswerMaxOutputTokens,
+};
 for (var i = 0; i < caseResults.Count; i++)
 {
     var result = caseResults[i];
-    var userPrompt = BuildUserPrompt(result.Question, result.Arms["combined"].Passages);
+    var evidencePrompt = BuildEvidencePrompt(result.Arms["combined"].Passages);
     var timer = Stopwatch.StartNew();
     var response = await chatClient.GetResponseAsync(
-        [new ChatMessage(ChatRole.System, SystemPrompt), new ChatMessage(ChatRole.User, userPrompt)],
+        [
+            new ChatMessage(ChatRole.System, ConciergeStayWorkflow.ConciergeInstructions),
+            new ChatMessage(ChatRole.System, evidencePrompt),
+            new ChatMessage(ChatRole.User, result.Question),
+        ],
         generationOptions);
     timer.Stop();
     var reasoning = string.Concat(response.Messages
@@ -264,7 +260,7 @@ for (var i = 0; i < caseResults.Count; i++)
         Answer = new AnswerResult(
             response.Text,
             string.IsNullOrEmpty(reasoning) ? null : reasoning,
-            userPrompt,
+            $"{evidencePrompt}\n\nGuest question: {result.Question}",
             response.ModelId,
             response.FinishReason?.ToString(),
             response.Usage?.InputTokenCount,
@@ -343,9 +339,15 @@ var run = new
     },
     generation = new
     {
-        systemPrompt = SystemPrompt,
-        promptStatus = "evaluation fixture written before results were seen; not the ADR 0007 Step 6 grounding contract",
-        options = new { temperature = 0 },
+        systemPrompt = ConciergeStayWorkflow.ConciergeInstructions,
+        promptStatus = "production ConciergeStayWorkflow.ConciergeInstructions revised after evidence on 2026-10-14; not the original evaluation fixture or its rule-3 revision",
+        messageLayout = "production layout: system instructions, system current evidence, user question; independent cases with no continuity summary or prior turns",
+        options = new
+        {
+            temperature = generationOptions.Temperature,
+            maxOutputTokens = generationOptions.MaxOutputTokens,
+            reasoningEffort = chatOptions.ReasoningEffort,
+        },
         evidenceSource = "combined",
     },
     recall,
@@ -415,20 +417,12 @@ static ArmResult Score(Passage[] passages, string[] expectedKeys, string? path)
         expectedKeys.Where(key => !keys.Contains(key)).ToArray());
 }
 
-static string BuildUserPrompt(string question, IReadOnlyList<Passage> passages)
+static string BuildEvidencePrompt(IReadOnlyList<Passage> passages)
 {
-    var text = new StringBuilder("Hotel information passages:\n");
-    if (passages.Count == 0)
-    {
-        text.Append("(none)\n");
-    }
-
-    foreach (var passage in passages)
-    {
-        text.Append($"[{passage.Rank}] {passage.SourceTitle} - {passage.ChunkTitle}\n{passage.Text}\n\n");
-    }
-
-    return text.Append($"\nGuest question: {question}").ToString();
+    var evidence = passages.Count > 0
+        ? string.Join("\n\n", passages.Select(passage => passage.Text))
+        : "No current hotel evidence was found for this question.";
+    return $"Current Hotel ZGY evidence for this question:\n{evidence}";
 }
 
 static async Task<JsonNode> ReadOllamaIdentitiesAsync(string endpoint, string[] models)

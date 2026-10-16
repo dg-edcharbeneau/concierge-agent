@@ -262,10 +262,10 @@
           "const": 1.0
         },
         "plannedDenominator": {
-          "const": 12
+          "const": 17
         },
         "minimumPassingCount": {
-          "const": 12
+          "const": 17
         }
       },
       "additionalProperties": false
@@ -282,10 +282,10 @@
           "const": 1.0
         },
         "plannedDenominator": {
-          "const": 3
+          "const": 5
         },
         "minimumPassingCount": {
-          "const": 3
+          "const": 5
         }
       },
       "additionalProperties": false
@@ -330,10 +330,10 @@
           "const": 0.9
         },
         "plannedDenominator": {
-          "const": 14
+          "const": 19
         },
         "minimumPassingCount": {
-          "const": 13
+          "const": 18
         }
       },
       "additionalProperties": false

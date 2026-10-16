@@ -12,7 +12,13 @@ All details in this document are fictional demo facts for Hotel ZGY.
 Hotel ZGY room service is available from 6:00 a.m. to 10:00 a.m. and from
 7:00 p.m. to 1:00 a.m. Eastern Time. The evening period runs past midnight and
 ends at 1:00 a.m. the following morning. The concierge can provide this
-information but cannot place an order.
+information but cannot place an order. To order room service, guests can call
+the front desk and ask for room service.
+
+## Contacting hotel staff
+
+The Hotel ZGY front desk is staffed 24 hours a day. Guests can reach the front
+desk by dialing 0 from the room phone.
 
 ## Luggage storage
 

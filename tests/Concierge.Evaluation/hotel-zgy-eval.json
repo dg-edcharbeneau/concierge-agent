@@ -23,23 +23,23 @@
     "recallAtK": {
       "k": 5,
       "threshold": 0.9,
-      "plannedDenominator": 14,
-      "minimumPassingCount": 13
+      "plannedDenominator": 19,
+      "minimumPassingCount": 18
     },
     "answerSupport": {
       "threshold": 1.0,
-      "plannedDenominator": 12,
-      "minimumPassingCount": 12
+      "plannedDenominator": 17,
+      "minimumPassingCount": 17
     },
     "noEvidenceBehavior": {
       "threshold": 1.0,
-      "plannedDenominator": 3,
-      "minimumPassingCount": 3
+      "plannedDenominator": 5,
+      "minimumPassingCount": 5
     }
   },
   "answerSupportRules": {
-    "supported": "Pass only when the response answers every part of the question and covers the case's expected claims (a multi-part answer that omits any part fails even if Recall@5 passes); every hotel fact it states is entailed by a passage that was actually retrieved for that case (any retrieved passage, not only the expected evidence keys); and it adds no invented hotel fact and nothing that contradicts the hotel information. Expected evidence keys measure retrieval (Recall@5) only.",
-    "staff_fallback": "Pass only when the response gives no unsupported answer and does not guess, clearly says the hotel information does not establish the answer, and directly advises the guest to contact hotel staff. The retrieval result does not have to be empty: a related passage does not count as sufficient evidence (for example, phone-charger availability in guest rooms and conference rooms does not establish front-desk charger lending)."
+    "supported": "Pass only when the response answers every part of the question and covers the case's expected claims (a multi-part answer that omits any part fails even if Recall@5 passes); every hotel fact it states is entailed by a passage that was actually retrieved for that case (any retrieved passage, not only the expected evidence keys); and it adds no invented hotel fact and nothing that contradicts the hotel information. A generic conversational referral to hotel staff or the front desk (for example, \"please contact the front desk\" or \"ask hotel staff for details\") is not a hotel fact and does not fail support, even when no retrieved passage mentions staff, provided it does not state or contradict a specific fact such as hours, a phone number, a cost, or a procedure that is not in a retrieved passage (Cecil Phillip, 2026-10-14). Naming a staff role, department, or service that no retrieved passage establishes (for example, \"parking attendants\") is an invented fact and fails; generic \"hotel staff\" does not (Cecil Phillip, 2026-10-15). Expected evidence keys measure retrieval (Recall@5) only.",
+    "staff_fallback": "Pass only when the response gives no unsupported answer and does not guess, clearly says the hotel information does not establish the answer, and directly advises the guest to contact hotel staff. The referral must not name a staff role, department, or service that no retrieved passage establishes (for example, \"parking attendants\"); generic \"hotel staff\" or \"the front desk\" passes (Cecil Phillip, 2026-10-15). The retrieval result does not have to be empty: a related passage does not count as sufficient evidence (for example, phone-charger availability in guest rooms and conference rooms does not establish front-desk charger lending)."
   },
   "sourceIdConvention": {
     "sourceIdPattern": "^zgy-[a-z0-9]+(?:-[a-z0-9]+)*$",
@@ -51,7 +51,7 @@
   "humanReview": {
     "status": "approved",
     "reviewedBy": "Cecil Phillip",
-    "reviewedOn": "2026-10-09",
+    "reviewedOn": "2026-10-16",
     "reviewChecklist": [
       "Questions sound like realistic guest questions.",
       "Expected evidence is necessary and sufficient.",
@@ -98,17 +98,18 @@
       ],
       "contentStatus": "approved",
       "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
-      "notes": "knowledge/hotel-zgy/amenities.md records the fourth-floor gym location by the east elevators, pool availability, and phone chargers in guest rooms and conference rooms. No pool hours or location and no front-desk charger lending are stated. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+      "notes": "knowledge/hotel-zgy/amenities.md records the fourth-floor gym location by the east elevators, pool availability, and phone chargers in guest rooms and conference rooms. Pool hours are separately approved in zgy-amenity-hours#pool-hours as of 2026-10-16. No pool location or front-desk charger lending is stated. Approved by Cecil Phillip on 2026-10-09 per user handoff."
     },
     {
       "sourceId": "zgy-amenity-hours",
       "step4SuggestedPath": "knowledge/hotel-zgy/amenity-hours.md",
       "requiredSections": [
-        "gym-hours"
+        "gym-hours",
+        "pool-hours"
       ],
       "contentStatus": "approved",
       "trace": "../../.artifacts/hotel-concierge-demo.md#real-services-and-demo-fakes",
-      "notes": "The gym-hours section in knowledge/hotel-zgy/amenity-hours.md states the fitness room is open 24 hours daily. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+      "notes": "The gym-hours section states the fitness room is open 24 hours daily (approved 2026-10-09). The pool-hours section states the pool is open from 8:00 a.m. to 8:00 p.m., approved by Cecil Phillip on 2026-10-16. No pool timezone, daily schedule, or location is established."
     },
     {
       "sourceId": "zgy-policies",
@@ -126,12 +127,13 @@
       "step4SuggestedPath": "knowledge/hotel-zgy/services.md",
       "requiredSections": [
         "room-service",
+        "contacting-hotel-staff",
         "luggage-storage",
         "hotel-shuttle"
       ],
       "contentStatus": "approved",
       "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
-      "notes": "knowledge/hotel-zgy/services.md records room service from 6:00 a.m. to 10:00 a.m. and 7:00 p.m. to 1:00 a.m. Eastern Time (concierge cannot order), tagged-luggage holding until 8:00 p.m. on checkout day (not overnight), and shuttle availability with no approved schedule or pickup location. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+      "notes": "knowledge/hotel-zgy/services.md records room service from 6:00 a.m. to 10:00 a.m. and 7:00 p.m. to 1:00 a.m. Eastern Time (concierge cannot order; guests can call the front desk and ask for room service), a 24-hour front desk reached by dialing 0 from the room phone, tagged-luggage holding until 8:00 p.m. on checkout day (not overnight), and shuttle availability with no approved schedule or pickup location. Approved by Cecil Phillip on 2026-10-09 per user handoff; staff-contact facts approved by Cecil Phillip on 2026-10-14."
     },
     {
       "sourceId": "zgy-connectivity",
@@ -142,6 +144,17 @@
       "contentStatus": "approved",
       "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
       "notes": "The guest-wi-fi section in knowledge/hotel-zgy/connectivity.md states guests use their room number to access guest Wi-Fi. It does not call the room number a password and names no network. Approved by Cecil Phillip on 2026-10-09 per user handoff."
+    },
+    {
+      "sourceId": "zgy-convenience-store",
+      "step4SuggestedPath": "knowledge/hotel-zgy/convenience-store.md",
+      "requiredSections": [
+        "store-location-and-hours",
+        "store-stock"
+      ],
+      "contentStatus": "approved",
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "notes": "Cecil Phillip approved the first-floor location, 7:00 a.m. to 10:00 p.m. hours, drinks, snacks, over-the-counter pain and cold medication, toothpaste, mouthwash, souvenirs, and front-desk or store referral for specific brands and sizes on 2026-10-16. No brand, size, price, medical advice, timezone, or daily schedule is established."
     },
     {
       "sourceId": "zgy-parking",
@@ -159,8 +172,8 @@
     "repositoryRootFromPackage": "../..",
     "includePattern": "**/*.md",
     "hashAlgorithm": "sha256",
-    "capturedOn": "2026-10-09",
-    "rule": "Every Markdown file under the root is listed with its repository-relative path, front-matter sourceId, SHA-256 of the exact file bytes, and byte length. Captured after the 2026-10-09 approved corpus updates and before any comparison run.",
+    "capturedOn": "2026-10-16",
+    "rule": "Every Markdown file under the root is listed with its repository-relative path, front-matter sourceId, SHA-256 of the exact file bytes, and byte length. Captured after the 2026-10-16 user-approved pool-hours and convenience-store updates and before comparison runs against this snapshot.",
     "files": [
       {
         "path": "knowledge/hotel-zgy/amenities.md",
@@ -171,14 +184,20 @@
       {
         "path": "knowledge/hotel-zgy/amenity-hours.md",
         "sourceId": "zgy-amenity-hours",
-        "sha256": "ccb7dcab88041162223ec74ef9856222ae62d31371b7a16508d4ed7d5d2bbd65",
-        "byteLength": 230
+        "sha256": "5c4189bb1cd9cb62118408cfc024b90c3c0a60052a678fc868a0f31a8dc5e9be",
+        "byteLength": 301
       },
       {
         "path": "knowledge/hotel-zgy/connectivity.md",
         "sourceId": "zgy-connectivity",
         "sha256": "c8816230b0328063dc81fc96bc4afbee1d0e3af6d125e08e652e25187f64f74a",
         "byteLength": 244
+      },
+      {
+        "path": "knowledge/hotel-zgy/convenience-store.md",
+        "sourceId": "zgy-convenience-store",
+        "sha256": "2842411a4e2779fcf194c76958bdf412bbf8b9c4707b854d996b405734cd5862",
+        "byteLength": 640
       },
       {
         "path": "knowledge/hotel-zgy/parking.md",
@@ -201,8 +220,8 @@
       {
         "path": "knowledge/hotel-zgy/services.md",
         "sourceId": "zgy-services",
-        "sha256": "e00dbb57ec1561838b1de05499f89a47e3d8bec4ef92f15de3513be2e4e7d7f0",
-        "byteLength": 859
+        "sha256": "42f7ffc58428953f167e4268ee3ddaaa3160d39a8b05ad1c8b58c0bcda22f0a8",
+        "byteLength": 1085
       }
     ]
   },
@@ -313,7 +332,7 @@
         "Hotel ZGY has a pool."
       ],
       "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
-      "seedAuthoringNotes": "Answered by zgy-amenities#pool. No pool hours or location are approved; a supported answer must not invent them. Added 2026-10-09 per user handoff; approved and active."
+      "seedAuthoringNotes": "Answered by zgy-amenities#pool. Pool hours are separately approved in zgy-amenity-hours#pool-hours as of 2026-10-16; no pool location is approved. Added 2026-10-09 per user handoff; approved and active."
     },
     {
       "id": "ZGY-EXACT-007",
@@ -332,6 +351,79 @@
       ],
       "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
       "seedAuthoringNotes": "Answered by zgy-services#hotel-shuttle. No schedule, pickup location, cost, or eligibility is approved; a supported answer must not invent them. Added 2026-10-09 per user handoff; approved and active."
+    },
+    {
+      "id": "ZGY-EXACT-008",
+      "category": "exact_term",
+      "status": "active",
+      "question": "What are the pool hours?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-amenity-hours",
+          "sectionId": "pool-hours"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "The Hotel ZGY pool is open from 8:00 a.m. to 8:00 p.m."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Fact and case approved by Cecil Phillip on 2026-10-16. Do not add a pool location, timezone, or daily schedule."
+    },
+    {
+      "id": "ZGY-EXACT-009",
+      "category": "exact_term",
+      "status": "active",
+      "question": "Where is the convenience store, and what are its opening hours?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-convenience-store",
+          "sectionId": "store-location-and-hours"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "The Hotel ZGY convenience store is on the first floor of the hotel.",
+        "The convenience store is open from 7:00 a.m. to 10:00 p.m."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Facts and case approved by Cecil Phillip on 2026-10-16. Both location and hours are required; no timezone or daily schedule is established."
+    },
+    {
+      "id": "ZGY-EXACT-010",
+      "category": "exact_term",
+      "status": "active",
+      "question": "What items does the convenience store stock?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-convenience-store",
+          "sectionId": "store-stock"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "The convenience store stocks drinks, snacks, over-the-counter pain and cold medication, toothpaste, mouthwash, and souvenirs."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Facts and case approved by Cecil Phillip on 2026-10-16. Require all listed categories; do not invent brands, sizes, prices, or medical advice."
+    },
+    {
+      "id": "ZGY-PARA-005",
+      "category": "paraphrase",
+      "status": "active",
+      "question": "I forgot my toothpaste. Does the hotel have somewhere that stocks it?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-convenience-store",
+          "sectionId": "store-stock"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "The Hotel ZGY convenience store stocks toothpaste."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Fact and paraphrase case approved by Cecil Phillip on 2026-10-16. Stock categories do not establish specific brands or sizes."
     },
     {
       "id": "ZGY-PARA-001",
@@ -364,10 +456,10 @@
       ],
       "answerSupportLabel": "supported",
       "expectedClaims": [
-        "Late checkout is subject to availability and must be requested with the front desk; the concierge can explain the policy but cannot change a checkout time or confirm an extension."
+        "Late checkout is subject to availability and must be requested with the front desk."
       ],
       "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
-      "seedAuthoringNotes": "The late-checkout process is authored in zgy-policies#late-checkout, including the concierge limitation. Approved and active as of 2026-10-09."
+      "seedAuthoringNotes": "The late-checkout process is authored in zgy-policies#late-checkout, including the concierge limitation. Approved and active as of 2026-10-09. On 2026-10-14 the concierge limitation was removed from the expected claims: it reflects features not yet implemented, not a hotel fact, so omitting it does not fail support; claiming the concierge can perform the action still fails."
     },
     {
       "id": "ZGY-PARA-003",
@@ -382,10 +474,28 @@
       ],
       "answerSupportLabel": "supported",
       "expectedClaims": [
-        "Hotel ZGY room service is available from 6:00 a.m. to 10:00 a.m. and from 7:00 p.m. to 1:00 a.m. Eastern Time; the concierge cannot place an order."
+        "Hotel ZGY room service is available from 6:00 a.m. to 10:00 a.m. and from 7:00 p.m. to 1:00 a.m. Eastern Time, and guests can call the front desk and ask for room service."
       ],
       "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
-      "seedAuthoringNotes": "Room-service availability and the concierge limitation are authored in zgy-services#room-service. Approved and active as of 2026-10-09. The room-service claim was updated to the approved hours; the evening period ends at 1:00 a.m. the following morning."
+      "seedAuthoringNotes": "Room-service availability and the concierge limitation are authored in zgy-services#room-service. Approved and active as of 2026-10-09. The room-service claim was updated to the approved hours; the evening period ends at 1:00 a.m. the following morning. On 2026-10-14 the claim was extended with the approved front-desk ordering route, and the concierge limitation was removed from the expected claims: concierge ordering is planned but not yet implemented, so omitting it does not fail support; claiming the concierge can place an order still fails."
+    },
+    {
+      "id": "ZGY-PARA-004",
+      "category": "paraphrase",
+      "status": "active",
+      "question": "How do I get hold of someone at the hotel if I need help?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-services",
+          "sectionId": "contacting-hotel-staff"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "The Hotel ZGY front desk is staffed 24 hours a day, and guests can reach it by dialing 0 from the room phone."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Staff-contact facts are authored in zgy-services#contacting-hotel-staff. Fact and case approved by Cecil Phillip on 2026-10-14; active."
     },
     {
       "id": "ZGY-MULTI-001",
@@ -432,6 +542,28 @@
       ],
       "trace": "../../.artifacts/hotel-concierge-demo.md#evaluation-and-success-criteria",
       "seedAuthoringNotes": "Checkout and luggage storage are authored in zgy-policies#checkout and zgy-services#luggage-storage. Approved and active as of 2026-10-09."
+    },
+    {
+      "id": "ZGY-NONE-006",
+      "category": "no_evidence",
+      "status": "active",
+      "question": "Which toothpaste brands does the convenience store stock?",
+      "expectedEvidence": [],
+      "answerSupportLabel": "staff_fallback",
+      "expectedClaims": [],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#first-slice-web-chat",
+      "seedAuthoringNotes": "Approved 2026-10-16. The full recorded corpus establishes toothpaste stock but no specific brands. zgy-convenience-store#store-stock is related but insufficient to name brands, and explicitly directs guests to the front desk or store. Require an explicit unknown and staff referral under the existing fallback rule; visiting the store may also be mentioned. Do not infer brands from model knowledge."
+    },
+    {
+      "id": "ZGY-NONE-007",
+      "category": "no_evidence",
+      "status": "active",
+      "question": "What sizes of mouthwash does the convenience store stock?",
+      "expectedEvidence": [],
+      "answerSupportLabel": "staff_fallback",
+      "expectedClaims": [],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#first-slice-web-chat",
+      "seedAuthoringNotes": "Approved 2026-10-16. The full recorded corpus establishes mouthwash stock but no specific sizes. zgy-convenience-store#store-stock is related but insufficient to name sizes, and explicitly directs guests to the front desk or store. Require an explicit unknown and staff referral under the existing fallback rule; visiting the store may also be mentioned. Do not invent sizes."
     },
     {
       "id": "ZGY-NONE-003",
