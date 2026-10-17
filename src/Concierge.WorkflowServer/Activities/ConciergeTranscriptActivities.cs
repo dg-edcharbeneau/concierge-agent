@@ -91,6 +91,23 @@ public sealed class ConciergeTranscriptActivities(NpgsqlDataSource dataSource)
         return turns;
     }
 
+    /// <summary>Returns the next free sequence number for a stay's persisted transcript.</summary>
+    [Activity(nameof(ReadNextSequenceAsync))]
+    public async Task<long> ReadNextSequenceAsync(ReadNextTranscriptSequenceRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var cancellationToken = ActivityExecutionContext.Current.CancellationToken;
+        await using var command = dataSource.CreateCommand(
+            """
+            SELECT COALESCE(MAX(turn_sequence) + 1, 0)
+            FROM transcript_turns
+            WHERE stay_id = $1;
+            """);
+        command.Parameters.AddWithValue(request.StayId);
+        return (long)(await command.ExecuteScalarAsync(cancellationToken)
+            ?? throw new InvalidOperationException("Could not read the next transcript sequence."));
+    }
+
     /// <summary>
     /// Returns the persisted turn with the given turn ID, or <see langword="null"/> if it was never stored.
     /// Used after Continue-As-New to detect a retried turn from an earlier run.

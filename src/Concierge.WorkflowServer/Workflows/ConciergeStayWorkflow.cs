@@ -37,6 +37,7 @@ public sealed class ConciergeStayWorkflow
     public const int AnswerMaxOutputTokens = 1024;
 
     private const string TranscriptBatchSizePatch = "transcript-flush-batch-size";
+    private const string TranscriptSequenceRecoveryPatch = "recover-transcript-sequence-from-postgres";
     private const string StayMemoryPatchPrefix = "stay-memory-v1-";
 
     /// <summary>
@@ -144,7 +145,7 @@ public sealed class ConciergeStayWorkflow
     private readonly DateTimeOffset eligibilityDeadlineUtc;
     private readonly TimeSpan flushInterval;
     private readonly int flushBatchSize;
-    private readonly bool hasEarlierRuns;
+    private bool hasEarlierRuns;
     private string? continuitySummary;
     private ConciergeVerifiedGuest? verifiedGuest;
     private long nextSequence;
@@ -189,6 +190,19 @@ public sealed class ConciergeStayWorkflow
     [WorkflowRun]
     public async Task RunAsync(ConciergeStayWorkflowInput input)
     {
+        if (Workflow.Patched(TranscriptSequenceRecoveryPatch))
+        {
+            var persistedNextSequence = await Workflow.ExecuteActivityAsync(
+                (ConciergeTranscriptActivities activities) =>
+                    activities.ReadNextSequenceAsync(new ReadNextTranscriptSequenceRequest(stayId)),
+                TranscriptActivityOptions);
+            if (persistedNextSequence > nextSequence)
+            {
+                nextSequence = persistedNextSequence;
+                hasEarlierRuns = true;
+            }
+        }
+
         while (Workflow.UtcNow < eligibilityDeadlineUtc)
         {
             if (pendingPersistence.Count == 0 && !Workflow.ContinueAsNewSuggested)

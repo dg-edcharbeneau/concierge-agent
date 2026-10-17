@@ -55,6 +55,8 @@ public sealed record PersistTranscriptRequest(
 
 public sealed record ReadTranscriptRequest(Guid StayId);
 
+public sealed record ReadNextTranscriptSequenceRequest(Guid StayId);
+
 public sealed record FindTranscriptTurnRequest(Guid StayId, string TurnId);
 
 public sealed record MarkTranscriptTurnInterruptedRequest(Guid StayId, string TurnId);

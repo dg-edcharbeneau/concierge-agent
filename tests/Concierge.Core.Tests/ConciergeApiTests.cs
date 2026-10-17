@@ -275,6 +275,32 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
             historyEvent.WorkflowExecutionUpdateAcceptedEventAttributes?.AcceptedRequest.Meta.UpdateId == turnId);
     }
 
+    [Fact]
+    public async Task NewStayWorkflowContinuesAfterPreviousWorkflowWasTerminated()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var today = ConciergeTestHost.HotelToday;
+        var stayId = await host.SeedStayAsync("Rivera", "412", today, today.AddDays(2));
+        var firstCredential = await VerifiedCredentialAsync(host, "Rivera", "412");
+        var firstTurn = await SubmitAsync(host, firstCredential, Turn("first", "Hello", "web"));
+        Assert.Equal(0, firstTurn.Sequence);
+        Assert.Equal(HttpStatusCode.NoContent, (await Send(
+            host, HttpMethod.Post, "/api/concierge/end", firstCredential)).StatusCode);
+
+        await host.Environment.Client
+            .GetWorkflowHandle($"concierge-stay-{stayId:N}")
+            .TerminateAsync("Simulate a terminated stay workflow.");
+
+        var replacementCredential = await VerifiedCredentialAsync(host, "Rivera", "412");
+        var nextTurn = await SubmitAsync(
+            host, replacementCredential, Turn("second", "Where is breakfast?", "web"));
+
+        Assert.Equal(1, nextTurn.Sequence);
+        Assert.Equal(HttpStatusCode.NoContent, (await Send(
+            host, HttpMethod.Post, "/api/concierge/end", replacementCredential)).StatusCode);
+        Assert.Equal(["first", "second"], await host.ReadPersistedTurnIdsAsync(stayId));
+    }
+
     /// <summary>
     /// Regression: after the stay workflow continues as new, the current run's first-execution run ID
     /// is the chain's original run, so Web updates must not pin the handle returned by
