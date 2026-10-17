@@ -46,6 +46,9 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
     private readonly PlaybackQueue toBrowser = new(BrowserQueueItems);
     private readonly PlaybackPacer pacer = new(VoiceAgentSettings.OutputSampleRate * 380 / 1000);
     private readonly VoiceInterruptionTimings interruptionTimings = new();
+    // Deepgram repeats some warnings (SLOW_THINK_REQUEST) while one Think request is pending;
+    // each code is logged once per user turn. Only the Deepgram reader touches this set.
+    private readonly HashSet<string> warningCodesThisTurn = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource stopping = new();
     private int end = -1;
     private int interruptions;
@@ -283,26 +286,34 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
         }
     }
 
-    private void HandleAgentEvent(byte[] data)
+    internal void HandleAgentEvent(byte[] data)
     {
         string? type;
-        string? role = null;
-        string? code = null;
+        string? role;
+        string? code;
+        string? description;
+        string? requestId;
+        LatencyReport? latency = null;
         try
         {
             using var document = JsonDocument.Parse(data);
             var root = document.RootElement;
-            type = root.TryGetProperty("type", out var typeValue) && typeValue.ValueKind == JsonValueKind.String
-                ? typeValue.GetString()
-                : null;
-            if (root.TryGetProperty("role", out var roleValue) && roleValue.ValueKind == JsonValueKind.String)
+            type = ReadString(root, "type");
+            role = ReadString(root, "role");
+            code = ReadString(root, "code");
+            // Deepgram-authored Error/Warning text and the Welcome session ID; never transcript content.
+            description = ReadString(root, "description");
+            requestId = ReadString(root, "request_id");
+            if (type == "LatencyReport")
             {
-                role = roleValue.GetString();
-            }
-
-            if (root.TryGetProperty("code", out var codeValue) && codeValue.ValueKind == JsonValueKind.String)
-            {
-                code = codeValue.GetString();
+                latency = new LatencyReport(
+                    ReadSeconds(root, "total_latency"),
+                    ReadSeconds(root, "stt_latency"),
+                    ReadSeconds(root, "ttt_token_latency"),
+                    ReadSeconds(root, "ttt_text_latency"),
+                    ReadSeconds(root, "ttt_tool_latency"),
+                    ReadSeconds(root, "ttt_thinking_latency"),
+                    ReadSeconds(root, "tts_latency"));
             }
         }
         catch (JsonException)
@@ -332,6 +343,7 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
                 // Live sessions sent no AgentStartedSpeaking; the user's final transcript ends the interruption.
                 suppressAgentAudio = false;
                 activeInterruptionNumber = 0;
+                warningCodesThisTurn.Clear();
                 Forward(type, role);
                 break;
             case "AgentStartedSpeaking":
@@ -345,15 +357,51 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
             case "SettingsApplied" or "AgentThinking" or "AgentAudioDone":
                 Forward(type, null);
                 break;
+            case "Welcome":
+                logger.LogInformation(
+                    "Deepgram Voice Agent session {DeepgramRequestId} opened (connection {ConnectionNumber}).",
+                    requestId ?? "(none)", connection.Number);
+                break;
+            case "LatencyReport" when latency is { } report:
+                logger.LogInformation(
+                    "Deepgram latency report (connection {ConnectionNumber}): total {TotalLatencySeconds} s, "
+                    + "STT {SttLatencySeconds} s, first token {TttTokenLatencySeconds} s, first text {TttTextLatencySeconds} s, "
+                    + "first tool {TttToolLatencySeconds} s, first thinking {TttThinkingLatencySeconds} s, TTS {TtsLatencySeconds} s.",
+                    connection.Number, report.Total, report.Stt, report.TttToken, report.TttText,
+                    report.TttTool, report.TttThinking, report.Tts);
+                break;
             case "Error":
-                logger.LogWarning("Deepgram Voice Agent reported error {DeepgramCode}.", code ?? "(none)");
+                logger.LogWarning(
+                    "Deepgram Voice Agent reported error {DeepgramCode}: {DeepgramDescription} (connection {ConnectionNumber}).",
+                    code ?? "(none)", description ?? "(none)", connection.Number);
                 Forward(type, null);
                 break;
-            case "Warning":
-                logger.LogInformation("Deepgram Voice Agent reported warning {DeepgramCode}.", code ?? "(none)");
+            case "Warning" when warningCodesThisTurn.Add(code ?? "(none)"):
+                logger.LogInformation(
+                    "Deepgram Voice Agent reported warning {DeepgramCode}: {DeepgramDescription} (connection {ConnectionNumber}).",
+                    code ?? "(none)", description ?? "(none)", connection.Number);
                 break;
         }
     }
+
+    private static string? ReadString(JsonElement root, string name) =>
+        root.ValueKind == JsonValueKind.Object
+        && root.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    // Every LatencyReport field is optional; a missing or non-numeric field logs as null.
+    private static double? ReadSeconds(JsonElement root, string name) =>
+        root.ValueKind == JsonValueKind.Object
+        && root.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetDouble(out var seconds)
+            ? seconds
+            : null;
+
+    private readonly record struct LatencyReport(
+        double? Total, double? Stt, double? TttToken, double? TttText, double? TttTool, double? TttThinking, double? Tts);
 
     // The browser needs event types for its state display, never transcript text.
     private void Forward(string type, string? role) =>

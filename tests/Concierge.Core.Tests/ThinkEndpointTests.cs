@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 
 namespace Concierge.Core.Tests;
@@ -25,6 +26,7 @@ public sealed class ThinkEndpointTests : IDisposable
     private readonly FakeTimeProvider time = new(Now);
     private readonly FakeConcierge concierge = new();
     private readonly BodyTracker bodies = new();
+    private readonly CapturedLogs logs = new();
     private readonly WebApplicationFactory<ConciergeService> factory;
     private readonly HttpClient http;
     private readonly VoiceSessionRegistry registry;
@@ -42,6 +44,7 @@ public sealed class ThinkEndpointTests : IDisposable
                 services.RemoveAll<IConciergeService>();
                 services.AddSingleton<IConciergeService>(concierge);
                 services.AddSingleton<IStartupFilter>(new ThinkListenerFilter(bodies));
+                services.AddLogging(logging => logging.AddProvider(logs));
             });
         });
         http = factory.CreateClient(new() { BaseAddress = new Uri("https://hotel.example") });
@@ -204,6 +207,44 @@ public sealed class ThinkEndpointTests : IDisposable
         Assert.NotEqual(submissions[0].TurnId, submissions[1].TurnId);
         Assert.Equal("Is breakfast served?", submissions[0].UserMessage);
         Assert.Equal("Is breakfast served every day?", submissions[1].UserMessage);
+    }
+
+    [Fact]
+    public async Task CallerDisconnectLogsConnectionUserOrdinalAndTurnId()
+    {
+        var connection = registry.Open(Stay, null);
+        var release = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        concierge.Answer = _ => release.Task;
+        using var abort = new CancellationTokenSource();
+
+        var request = new HttpRequestMessage(HttpMethod.Post, Path)
+        {
+            Content = Json(Chat(("user", "Is there a pool?"), ("assistant", "Yes."), ("user", "Late checkout?"))),
+        };
+        request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + connection.Bearer);
+        var pending = http.SendAsync(request, abort.Token);
+        await concierge.FirstSubmission.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        abort.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+
+        CapturedLogs.CapturedLog? entry = null;
+        for (var attempt = 0; attempt < 100 && entry is null; attempt++)
+        {
+            entry = logs.Entries.FirstOrDefault(log => log.Message.StartsWith("Think caller disconnected", StringComparison.Ordinal));
+            if (entry is null)
+            {
+                await Task.Delay(50);
+            }
+        }
+
+        release.SetResult("Until noon.");
+        Assert.NotNull(entry);
+        Assert.Equal(connection.Number, entry.Values["ConnectionNumber"]);
+        Assert.Equal(2, entry.Values["UserOrdinal"]);
+        Assert.Equal(
+            ThinkRequest.TurnId(connection.Session.Id, connection.Number, 2, "Late checkout?"),
+            entry.Values["TurnId"]);
+        Assert.DoesNotContain("Late checkout?", entry.Message, StringComparison.Ordinal);
     }
 
     [Fact]

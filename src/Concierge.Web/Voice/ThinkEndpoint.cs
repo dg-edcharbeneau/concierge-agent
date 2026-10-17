@@ -78,8 +78,9 @@ internal static class ThinkEndpoint
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
             logger.LogInformation(
-                "Think caller disconnected after {ElapsedMs:F0} ms; the voice turn continues in Temporal.",
-                Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                "Think caller disconnected after {ElapsedMs:F0} ms (connection {ConnectionNumber}, user message {UserOrdinal}, turn {TurnId}); "
+                + "the voice turn continues in Temporal.",
+                Stopwatch.GetElapsedTime(started).TotalMilliseconds, connection.Number, request.UserOrdinal, turnId);
             VoiceTelemetry.RecordThink(requestStarted, "caller_disconnected");
             return;
         }
