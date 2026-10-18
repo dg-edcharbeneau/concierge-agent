@@ -142,8 +142,79 @@ public sealed class ThinkEndpointTests : IDisposable
         Assert.Equal(turnId, submission.TurnId);
         Assert.Equal("When is breakfast?", submission.UserMessage);
         Assert.Same(Stay, submission.Session);
+        Assert.True(submission.EnableEndChatFunction);
         // Admitted Temporal work must not depend on the HTTP request's lifetime.
         Assert.False(submission.CancellationToken.CanBeCanceled);
+    }
+
+    [Fact]
+    public async Task EndChatToolCallIsForwardedAndMatchingResultGetsFarewellWithoutAnotherTurn()
+    {
+        using var traces = new EndChatTraceCapture();
+        var connection = registry.Open(Stay, null);
+        concierge.EndChatFunctionCall = new ConciergeEndChatFunctionCall(
+            "call_end_chat_1", ConciergeEndChat.FunctionName, "{}");
+
+        using var initial = await PostAsync(Json(Chat(("user", "Please end our chat."))), connection.Bearer);
+        var initialSse = await initial.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, initial.StatusCode);
+        Assert.Contains("\"finish_reason\":\"tool_calls\"", initialSse, StringComparison.Ordinal);
+        Assert.Contains("\"id\":\"call_end_chat_1\"", initialSse, StringComparison.Ordinal);
+        Assert.Contains("\"name\":\"end_chat\"", initialSse, StringComparison.Ordinal);
+        Assert.Contains(":1:", Assert.Single(concierge.Submissions).TurnId, StringComparison.Ordinal);
+        Assert.True(concierge.Submissions[0].EnableEndChatFunction);
+
+        Assert.True(connection.ConfirmEndChatCall("call_end_chat_1"));
+        using var followup = await PostAsync(Json(
+            """{"model":"deepgram-model","stream":true,"messages":[{"role":"user","content":"Please end our chat."},{"role":"assistant","tool_calls":[{"id":"call_end_chat_1","type":"function","function":{"name":"end_chat","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_end_chat_1","name":"end_chat","content":"End chat confirmed."}]}"""),
+            connection.Bearer);
+
+        Assert.Equal(HttpStatusCode.OK, followup.StatusCode);
+        Assert.Contains(ConciergeEndChat.Farewell, await followup.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Single(concierge.Submissions);
+        Assert.True(connection.HasEndChatResult);
+        foreach (var name in new[] { "call_registered", "tool_result_accepted", "farewell_returned" })
+        {
+            var eventName = "concierge.voice.end_chat." + name;
+            var activity = traces.AssertEvent(eventName, connection.Session.Id);
+            Assert.Equal("call_end_chat_1", activity.GetTagItem("concierge.voice.function_call_id"));
+            Assert.Contains(logs.Entries, entry =>
+                Equals(entry.Values.GetValueOrDefault("EndChatEvent"), eventName)
+                && Equals(entry.Values["FunctionCallId"], "call_end_chat_1"));
+        }
+    }
+
+    [Fact]
+    public async Task EndChatToolResultMustMatchConfirmedCall()
+    {
+        var connection = registry.Open(Stay, null);
+        Assert.True(connection.RegisterEndChatCall("expected"));
+        Assert.True(connection.ConfirmEndChatCall("expected"));
+
+        using var response = await PostAsync(Json(
+            """{"model":"deepgram-model","messages":[{"role":"assistant","tool_calls":[{"id":"different","type":"function","function":{"name":"end_chat","arguments":"{}"}}]},{"role":"tool","tool_call_id":"different","name":"end_chat","content":"ok"}]}"""),
+            connection.Bearer);
+
+        await AssertOpenAIError(response, HttpStatusCode.BadRequest, "invalid_request_error", "invalid_request");
+        Assert.False(connection.HasEndChatResult);
+        Assert.Empty(concierge.Submissions);
+    }
+
+    [Fact]
+    public void DeepgramSettingsDeferTheClientSideEndFunctionUntilEndOfTurn()
+    {
+        using var settings = JsonDocument.Parse(VoiceAgentSettings.Build(
+            new DeepgramVoiceOptions(),
+            new Uri("https://think.example/v1/chat/completions"),
+            "opaque-bearer",
+            hasTurns: false));
+        var function = settings.RootElement
+            .GetProperty("agent").GetProperty("think").GetProperty("functions")[0];
+
+        Assert.Equal(ConciergeEndChat.FunctionName, function.GetProperty("name").GetString());
+        Assert.True(function.GetProperty("defer_until_eot").GetBoolean());
+        Assert.False(function.TryGetProperty("endpoint", out _));
+        Assert.Equal(JsonValueKind.Object, function.GetProperty("parameters").GetProperty("properties").ValueKind);
     }
 
     [Fact]
@@ -160,6 +231,19 @@ public sealed class ThinkEndpointTests : IDisposable
             Assert.Single(concierge.Submissions).TurnId);
         Assert.True(ThinkRequest.TurnId(Guid.NewGuid(), int.MinValue, int.MinValue, "Hello").Length
             <= ConciergeTurnLimits.MaxTurnIdLength);
+    }
+
+    [Fact]
+    public async Task AcceptedThinkTurnResetsTheVoiceIdleDeadline()
+    {
+        var connection = registry.Open(Stay, null);
+        time.Advance(TimeSpan.FromMinutes(2));
+        Assert.True(connection.IsIdle(TimeSpan.FromMinutes(2)));
+
+        using var response = await PostAsync(Json(Chat(("user", "Is breakfast served?"))), connection.Bearer);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(connection.IsIdle(TimeSpan.FromMinutes(2)));
     }
 
     [Fact]
@@ -312,7 +396,11 @@ public sealed class ThinkEndpointTests : IDisposable
     }
 
     private sealed record Submission(
-        ConciergeSessionContext Session, string TurnId, string UserMessage, CancellationToken CancellationToken);
+        ConciergeSessionContext Session,
+        string TurnId,
+        string UserMessage,
+        CancellationToken CancellationToken,
+        bool EnableEndChatFunction);
 
     private sealed class FakeConcierge : IConciergeService
     {
@@ -320,6 +408,7 @@ public sealed class ThinkEndpointTests : IDisposable
         private readonly List<Submission> submissions = [];
 
         public Func<string, Task<string>> Answer { get; set; } = message => Task.FromResult("Answer");
+        public ConciergeEndChatFunctionCall? EndChatFunctionCall { get; set; }
 
         public TaskCompletionSource FirstSubmission { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource SecondSubmission { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -337,11 +426,16 @@ public sealed class ThinkEndpointTests : IDisposable
 
         /// <summary>Records the voice turn and returns the arranged answer.</summary>
         public async Task<ConciergeTurnResult> SubmitVoiceTurnAsync(
-            ConciergeSessionContext session, string turnId, string userMessage, CancellationToken cancellationToken = default)
+            ConciergeSessionContext session,
+            string turnId,
+            string userMessage,
+            CancellationToken cancellationToken = default,
+            bool enableEndChatFunction = false)
         {
             lock (gate)
             {
-                submissions.Add(new Submission(session, turnId, userMessage, cancellationToken));
+                submissions.Add(new Submission(
+                    session, turnId, userMessage, cancellationToken, enableEndChatFunction));
             }
 
             if (Submissions.Count >= 2)
@@ -350,7 +444,9 @@ public sealed class ThinkEndpointTests : IDisposable
             }
 
             FirstSubmission.TrySetResult();
-            return new ConciergeTurnResult(turnId, await Answer(userMessage), 1);
+            return EndChatFunctionCall is { } call
+                ? new ConciergeTurnResult(turnId, ConciergeEndChat.Farewell, 1, call)
+                : new ConciergeTurnResult(turnId, await Answer(userMessage), 1);
         }
 
         /// <summary>Not used by the Think handler.</summary>

@@ -21,7 +21,8 @@ public enum VoiceRevocation
 /// In-process owner of voice sessions and their short-lived Think bearers. A voice session spans
 /// manual reconnects for one chat session; each Deepgram connection gets its own bearer and number.
 /// </summary>
-public sealed class VoiceSessionRegistry(TimeProvider timeProvider)
+public sealed class VoiceSessionRegistry(
+    TimeProvider timeProvider, ILogger<VoiceSessionRegistry>? logger = null)
 {
     /// <summary>
     /// Deepgram cannot rotate Think headers on an open connection, so the bearer must outlive the
@@ -43,11 +44,19 @@ public sealed class VoiceSessionRegistry(TimeProvider timeProvider)
         var now = timeProvider.GetUtcNow();
         RemoveAbandonedSessions(now);
 
-        var session = voiceSessionId is { } id
+        VoiceSession session;
+        if (voiceSessionId is { } id
             && sessions.TryGetValue(id, out var existing)
-            && existing.Stay.SessionId == stay.SessionId
-                ? existing
-                : sessions.GetOrAdd(Guid.NewGuid(), newId => new VoiceSession(newId, stay));
+            && existing.Stay.SessionId == stay.SessionId)
+        {
+            session = existing;
+            // A reconnect gives the guest a full idle timeout again (user decision 2026-10-18).
+            session.RestartIdleClock(now);
+        }
+        else
+        {
+            session = sessions.GetOrAdd(Guid.NewGuid(), newId => new VoiceSession(newId, stay, now));
+        }
 
         var bearer = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(32));
         var expiresAt = Min(now + ConnectionLifetime, stay.EligibilityDeadlineUtc);
@@ -104,6 +113,37 @@ public sealed class VoiceSessionRegistry(TimeProvider timeProvider)
     }
 
     /// <summary>
+    /// Calls <paramref name="onClosed"/> with the connection number when the active connection of
+    /// voice session <paramref name="voiceSessionId"/> goes away because its relay closed or its
+    /// bearer expired. Replaced and ended connections are not reported. The callback runs on the
+    /// revoking thread and must not block. Returns a no-op subscription for an unknown session.
+    /// </summary>
+    public IDisposable SubscribeConnectionClosed(Guid voiceSessionId, Action<int> onClosed)
+    {
+        ArgumentNullException.ThrowIfNull(onClosed);
+        if (!sessions.TryGetValue(voiceSessionId, out var session))
+        {
+            return ClosedSubscription.None;
+        }
+
+        var subscription = new ClosedSubscription(session, onClosed);
+        lock (session.Gate)
+        {
+            session.ClosedSubscribers.Add(subscription);
+        }
+
+        // The session may have been removed between the lookup and the add; never keep a
+        // subscriber on a session the registry no longer owns.
+        if (!sessions.TryGetValue(voiceSessionId, out var current) || !ReferenceEquals(current, session))
+        {
+            subscription.Dispose();
+            return ClosedSubscription.None;
+        }
+
+        return subscription;
+    }
+
+    /// <summary>
     /// Revokes every voice bearer of a chat session and forgets its voice sessions. Admitted turns
     /// keep running; only new Think requests are refused.
     /// </summary>
@@ -116,6 +156,7 @@ public sealed class VoiceSessionRegistry(TimeProvider timeProvider)
             lock (session.Gate)
             {
                 active = session.Active;
+                session.ClosedSubscribers.Clear();
             }
 
             active?.Revoke(VoiceRevocation.Ended);
@@ -124,16 +165,52 @@ public sealed class VoiceSessionRegistry(TimeProvider timeProvider)
 
     internal int SessionCount => sessions.Count;
 
+    internal int ClosedSubscriberCount(Guid voiceSessionId)
+    {
+        if (!sessions.TryGetValue(voiceSessionId, out var session))
+        {
+            return 0;
+        }
+
+        lock (session.Gate)
+        {
+            return session.ClosedSubscribers.Count;
+        }
+    }
+
     private void Forget(VoiceConnection connection)
     {
         connections.TryRemove(new KeyValuePair<string, VoiceConnection>(connection.Key, connection));
         var session = connection.Session;
+        // Token callbacks run in reverse registration order, so for a lifetime-timer expiry this
+        // runs before the constructor's callback has recorded why; record it here.
+        var reason = connection.ResolveRevocation();
+        ClosedSubscription[] notify = [];
         lock (session.Gate)
         {
             if (ReferenceEquals(session.Active, connection))
             {
                 session.Active = null;
                 session.IdleSinceUtc = timeProvider.GetUtcNow();
+                if (reason is VoiceRevocation.Closed or VoiceRevocation.Expired)
+                {
+                    notify = [.. session.ClosedSubscribers];
+                }
+            }
+        }
+
+        foreach (var subscription in notify)
+        {
+            try
+            {
+                subscription.Invoke(connection.Number);
+            }
+            catch (Exception exception)
+            {
+                // A faulty subscriber must not break revocation or the other subscribers.
+                logger?.LogWarning(exception,
+                    "Voice connection-closed subscriber failed for session {VoiceSessionId} (connection {ConnectionNumber}).",
+                    session.Id, connection.Number);
             }
         }
     }
@@ -150,6 +227,7 @@ public sealed class VoiceSessionRegistry(TimeProvider timeProvider)
                     && now - session.IdleSinceUtc > ConnectionLifetime)
                 {
                     sessions.TryRemove(session.Id, out _);
+                    session.ClosedSubscribers.Clear();
                 }
             }
         }
@@ -159,16 +237,68 @@ public sealed class VoiceSessionRegistry(TimeProvider timeProvider)
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(bearer)));
 
     private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right) => left <= right ? left : right;
+
+    internal sealed class ClosedSubscription : IDisposable
+    {
+        public static readonly IDisposable None = new NoSubscription();
+
+        private readonly VoiceSession session;
+        private Action<int>? onClosed;
+
+        public ClosedSubscription(VoiceSession session, Action<int> onClosed)
+        {
+            this.session = session;
+            this.onClosed = onClosed;
+        }
+
+        public void Invoke(int connectionNumber) => Volatile.Read(ref onClosed)?.Invoke(connectionNumber);
+
+        public void Dispose()
+        {
+            // Clearing the callback first stops a notification already snapshotted outside the lock.
+            if (Interlocked.Exchange(ref onClosed, null) is null)
+            {
+                return;
+            }
+
+            lock (session.Gate)
+            {
+                session.ClosedSubscribers.Remove(this);
+            }
+        }
+
+        private sealed class NoSubscription : IDisposable
+        {
+            public void Dispose()
+            {
+            }
+        }
+    }
 }
 
 /// <summary>One guest voice mode: the chat session it belongs to and its in-flight Think turns.</summary>
-public sealed class VoiceSession(Guid id, ConciergeSessionContext stay)
+public sealed class VoiceSession
 {
     private readonly Dictionary<string, Task<ConciergeTurnResult>> inFlight = new(StringComparer.Ordinal);
+    private readonly object activityGate = new();
+    private DateTimeOffset lastSpeechUtc;
+    private bool replyInProgress;
 
-    public Guid Id { get; } = id;
+    public VoiceSession(Guid id, ConciergeSessionContext stay)
+        : this(id, stay, DateTimeOffset.UtcNow)
+    {
+    }
 
-    public ConciergeSessionContext Stay { get; } = stay;
+    internal VoiceSession(Guid id, ConciergeSessionContext stay, DateTimeOffset initialSpeechUtc)
+    {
+        Id = id;
+        Stay = stay;
+        lastSpeechUtc = initialSpeechUtc;
+    }
+
+    public Guid Id { get; }
+
+    public ConciergeSessionContext Stay { get; }
 
     internal object Gate { get; } = new();
 
@@ -178,6 +308,9 @@ public sealed class VoiceSession(Guid id, ConciergeSessionContext stay)
 
     internal DateTimeOffset IdleSinceUtc { get; set; }
 
+    /// <summary>Connection-closed subscribers; guarded by <see cref="Gate"/>.</summary>
+    internal List<VoiceSessionRegistry.ClosedSubscription> ClosedSubscribers { get; } = [];
+
     internal int InFlightCount
     {
         get
@@ -186,6 +319,79 @@ public sealed class VoiceSession(Guid id, ConciergeSessionContext stay)
             {
                 return inFlight.Count;
             }
+        }
+    }
+
+    internal DateTimeOffset LastSpeechUtc
+    {
+        get
+        {
+            lock (activityGate)
+            {
+                return lastSpeechUtc;
+            }
+        }
+    }
+
+    internal bool ReplyInProgress
+    {
+        get
+        {
+            lock (activityGate)
+            {
+                return replyInProgress;
+            }
+        }
+    }
+
+    internal void RecordSpeech(DateTimeOffset atUtc)
+    {
+        lock (activityGate)
+        {
+            lastSpeechUtc = atUtc;
+        }
+    }
+
+    /// <summary>Starts the idle timeout over from <paramref name="atUtc"/>; reply state is unchanged.</summary>
+    internal void RestartIdleClock(DateTimeOffset atUtc)
+    {
+        lock (activityGate)
+        {
+            lastSpeechUtc = atUtc;
+        }
+    }
+
+    internal void RecordReplyStarted()
+    {
+        lock (activityGate)
+        {
+            replyInProgress = true;
+        }
+    }
+
+    internal void RecordReplyCompleted()
+    {
+        lock (activityGate)
+        {
+            replyInProgress = false;
+        }
+    }
+
+    internal bool IsIdle(DateTimeOffset nowUtc, TimeSpan timeout)
+    {
+        lock (activityGate)
+        {
+            return !replyInProgress && nowUtc - lastSpeechUtc >= timeout;
+        }
+    }
+
+    internal bool TryWhileIdle(DateTimeOffset nowUtc, TimeSpan timeout, Func<bool> claim)
+    {
+        lock (activityGate)
+        {
+            return !replyInProgress
+                && nowUtc - lastSpeechUtc >= timeout
+                && claim();
         }
     }
 
@@ -232,6 +438,13 @@ public sealed class VoiceSession(Guid id, ConciergeSessionContext stay)
 public sealed class VoiceConnection
 {
     private readonly CancellationTokenSource revocation;
+    private readonly TimeProvider timeProvider;
+    private readonly object endChatGate = new();
+    private string? endChatCallId;
+    private bool endChatConfirmed;
+    private bool endChatCancelled;
+    private bool endChatResultReceived;
+    private bool endChatFlowClaimed;
     private int revokedAs;
 
     internal VoiceConnection(
@@ -248,6 +461,7 @@ public sealed class VoiceConnection
         Key = key;
         Bearer = bearer;
         ExpiresAtUtc = expiresAtUtc;
+        this.timeProvider = timeProvider;
         revocation = new CancellationTokenSource(lifetime, timeProvider);
         // The timer cancels the token directly; record why so the relay can tell the guest.
         revocation.Token.Register(() => Interlocked.CompareExchange(
@@ -269,7 +483,190 @@ public sealed class VoiceConnection
 
     public VoiceRevocation Revocation => (VoiceRevocation)Volatile.Read(ref revokedAs);
 
+    internal DateTimeOffset LastSpeechUtc
+        => Session.LastSpeechUtc;
+
+    internal bool ReplyInProgress
+        => Session.ReplyInProgress;
+
+    internal void RecordSpeech() => Session.RecordSpeech(timeProvider.GetUtcNow());
+
+    internal void RecordReplyStarted() => Session.RecordReplyStarted();
+
+    internal void RecordReplyCompleted() => Session.RecordReplyCompleted();
+
+    internal bool IsIdle(TimeSpan timeout) => Session.IsIdle(timeProvider.GetUtcNow(), timeout);
+
+    internal string? EndChatCallId
+    {
+        get
+        {
+            lock (endChatGate)
+            {
+                return endChatCallId;
+            }
+        }
+    }
+
+    internal bool RegisterEndChatCall(string callId)
+    {
+        if (string.IsNullOrWhiteSpace(callId))
+        {
+            return false;
+        }
+
+        lock (endChatGate)
+        {
+            if (endChatCallId is not null)
+            {
+                if (StringComparer.Ordinal.Equals(endChatCallId, callId))
+                {
+                    return !endChatCancelled;
+                }
+
+                if (!endChatCancelled)
+                {
+                    return false;
+                }
+            }
+
+            endChatCallId = callId;
+            endChatCancelled = false;
+            endChatConfirmed = false;
+            endChatResultReceived = false;
+            endChatFlowClaimed = false;
+            return true;
+        }
+    }
+
+    internal bool ConfirmEndChatCall(string callId)
+    {
+        lock (endChatGate)
+        {
+            if (endChatCancelled || !StringComparer.Ordinal.Equals(endChatCallId, callId))
+            {
+                return false;
+            }
+
+            endChatConfirmed = true;
+            return true;
+        }
+    }
+
+    internal bool CancelEndChatCall(string callId)
+    {
+        lock (endChatGate)
+        {
+            if (!StringComparer.Ordinal.Equals(endChatCallId, callId))
+            {
+                return false;
+            }
+
+            endChatCancelled = true;
+            endChatResultReceived = false;
+            endChatResultReceivedAtUtc = null;
+            endChatFlowClaimed = false;
+            return true;
+        }
+    }
+
+    internal bool CancelPendingEndChatFarewell()
+    {
+        lock (endChatGate)
+        {
+            if (endChatCallId is null || endChatCancelled
+                || (!endChatConfirmed && !endChatResultReceived))
+            {
+                return false;
+            }
+
+            endChatCancelled = true;
+            endChatResultReceived = false;
+            endChatResultReceivedAtUtc = null;
+            endChatFlowClaimed = false;
+            return true;
+        }
+    }
+
+    internal bool AcceptEndChatToolResult(string callId)
+    {
+        lock (endChatGate)
+        {
+            if (!endChatConfirmed || endChatCancelled
+                || !StringComparer.Ordinal.Equals(endChatCallId, callId))
+            {
+                return false;
+            }
+
+            if (!endChatResultReceived)
+            {
+                endChatResultReceived = true;
+                endChatResultReceivedAtUtc = timeProvider.GetUtcNow();
+            }
+            return true;
+        }
+    }
+
+    private DateTimeOffset? endChatResultReceivedAtUtc;
+
+    internal DateTimeOffset? EndChatResultReceivedAtUtc
+    {
+        get
+        {
+            lock (endChatGate)
+            {
+                return endChatResultReceived ? endChatResultReceivedAtUtc : null;
+            }
+        }
+    }
+
+    internal bool HasEndChatResult
+    {
+        get
+        {
+            lock (endChatGate)
+            {
+                return endChatResultReceived;
+            }
+        }
+    }
+
+    internal bool TryClaimEndChatFlow(bool farewellOnly = false, TimeSpan? idleTimeout = null)
+    {
+        lock (endChatGate)
+        {
+            if (endChatFlowClaimed || (farewellOnly && (!endChatResultReceived || endChatCancelled))
+                || (!farewellOnly && endChatResultReceived))
+            {
+                return false;
+            }
+
+            if (idleTimeout is { } timeout)
+            {
+                return Session.TryWhileIdle(timeProvider.GetUtcNow(), timeout, () =>
+                {
+                    endChatFlowClaimed = true;
+                    return true;
+                });
+            }
+
+            endChatFlowClaimed = true;
+            return true;
+        }
+    }
+
     internal string Key { get; }
+
+    /// <summary>Returns why the connection was revoked, treating an unrecorded cancellation as expiry.</summary>
+    internal VoiceRevocation ResolveRevocation()
+    {
+        if (revocation.IsCancellationRequested)
+        {
+            Interlocked.CompareExchange(ref revokedAs, (int)VoiceRevocation.Expired, (int)VoiceRevocation.None);
+        }
+
+        return Revocation;
+    }
 
     internal void Revoke(VoiceRevocation reason)
     {

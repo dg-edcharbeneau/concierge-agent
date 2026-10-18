@@ -1,5 +1,13 @@
 namespace Concierge.Contracts;
 
+/// <summary>Stable contract values for the one voice-only end-chat function.</summary>
+public static class ConciergeEndChat
+{
+    public const string FunctionName = "end_chat";
+    public const string ModelOptionKey = "concierge.voice.end_chat";
+    public const string Farewell = "Goodbye, and thank you for staying with us.";
+}
+
 /// <summary>
 /// Stay workflow input. The server binds the stay and absolute eligibility deadline from a
 /// verified session; Continue-As-New carries both unchanged with the bounded conversation context.
@@ -31,7 +39,8 @@ public sealed record ConciergeTurnSubmission(
     string TurnId,
     string UserMessage,
     string Channel,
-    ConciergeVerifiedGuest? VerifiedGuest = null);
+    ConciergeVerifiedGuest? VerifiedGuest = null,
+    bool EnableEndChatFunction = false);
 
 /// <summary>A completed guest/assistant exchange; failed turns are never recorded.</summary>
 public sealed record ConciergeTranscriptTurn(
@@ -43,7 +52,14 @@ public sealed record ConciergeTranscriptTurn(
     DateTimeOffset OccurredAtUtc,
     bool Interrupted = false);
 
-public sealed record ConciergeTurnResult(string TurnId, string AssistantMessage, long Sequence);
+public sealed record ConciergeTurnResult(
+    string TurnId,
+    string AssistantMessage,
+    long Sequence,
+    ConciergeEndChatFunctionCall? EndChatFunctionCall = null);
+
+/// <summary>The model-generated client-side end-chat call forwarded to Deepgram.</summary>
+public sealed record ConciergeEndChatFunctionCall(string Id, string Name, string Arguments);
 
 public sealed record ConciergeTurnInterruption(string TurnId);
 

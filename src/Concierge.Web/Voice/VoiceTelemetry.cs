@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 
 namespace Concierge.Web.Voice;
@@ -8,7 +9,44 @@ namespace Concierge.Web.Voice;
 /// </summary>
 internal static class VoiceTelemetry
 {
+    // ServiceDefaults registers the Web application name as a tracing source.
+    internal static readonly ActivitySource Source = new(typeof(VoiceTelemetry).Assembly.GetName().Name!);
     private static readonly Meter Meter = new(typeof(VoiceTelemetry).Assembly.GetName().Name!);
+
+    internal static void RecordEndChat(
+        ILogger logger, string transition, VoiceConnection connection, string reason, string? functionCallId = null) =>
+        RecordEndChat(logger, transition, connection.Session.Id.ToString(), reason,
+            connection.Number, functionCallId ?? connection.EndChatCallId);
+
+    internal static void RecordEndChat(
+        ILogger logger, string transition, string? sessionId, string reason,
+        int? connectionNumber = null, string? functionCallId = null)
+    {
+        var name = "concierge.voice.end_chat." + transition;
+        var tags = new ActivityTagsCollection
+        {
+            { "concierge.voice.session_id", sessionId },
+            { "concierge.voice.connection", connectionNumber },
+            { "concierge.voice.function_call_id", functionCallId },
+            { "concierge.voice.end_chat.reason", reason },
+        };
+        // Relay pumps and timers need their own sampled activity; Activity.Current may be null.
+        using var activity = Source.StartActivity(name, ActivityKind.Internal, default(ActivityContext), tags);
+        activity?.AddEvent(new ActivityEvent(name, tags: tags));
+        if (transition == "completion_failed")
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, reason);
+            logger.LogWarning(
+                "Voice end-chat {EndChatEvent}: {EndChatReason} (session {VoiceSessionId}, connection {ConnectionNumber}, function {FunctionCallId}).",
+                name, reason, sessionId, connectionNumber, functionCallId);
+        }
+        else
+        {
+            logger.LogInformation(
+                "Voice end-chat {EndChatEvent}: {EndChatReason} (session {VoiceSessionId}, connection {ConnectionNumber}, function {FunctionCallId}).",
+                name, reason, sessionId, connectionNumber, functionCallId);
+        }
+    }
 
     /// <summary>Think request duration in seconds, tagged with <c>outcome</c>.</summary>
     public static readonly Histogram<double> ThinkDuration = Meter.CreateHistogram<double>(

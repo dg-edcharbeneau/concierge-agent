@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Concierge.Contracts;
 
 namespace Concierge.Web.Voice;
 
@@ -15,6 +16,9 @@ public sealed class DeepgramVoiceOptions
 
     /// <summary>Text-to-speech voice model.</summary>
     public string SpeakModel { get; set; } = "aura-2-thalia-en";
+
+    /// <summary>Minutes without speech before ending an otherwise idle chat.</summary>
+    public int IdleTimeoutMinutes { get; set; } = 2;
 }
 
 /// <summary>Builds the Voice Agent <c>Settings</c> message for one relay connection.</summary>
@@ -53,6 +57,21 @@ internal static class VoiceAgentSettings
                 {
                     provider = new { type = "open_ai", model = "concierge" },
                     prompt = "Hotel ZGY concierge. Answers come from the custom endpoint.",
+                    functions = new[]
+                    {
+                        new
+                        {
+                            name = ConciergeEndChat.FunctionName,
+                            description = "End the chat only when the guest clearly and explicitly asks to end the conversation.",
+                            parameters = new
+                            {
+                                type = "object",
+                                properties = new { },
+                                required = Array.Empty<string>(),
+                            },
+                            defer_until_eot = true,
+                        },
+                    },
                     endpoint = new
                     {
                         url = thinkUrl.AbsoluteUri,

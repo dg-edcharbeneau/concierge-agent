@@ -26,7 +26,12 @@ public enum VoiceRelayEnd
 /// connection held with the server's API key. Ported from the relay-latency prototype: agent audio
 /// is paced to a ~380 ms browser playback lead so an interruption can discard the rest server-side.
 /// </summary>
-internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, ILogger logger)
+internal sealed class VoiceRelay(
+    WebSocket browser,
+    VoiceConnection connection,
+    ILogger logger,
+    TimeProvider? timeProvider = null,
+    TimeSpan? idleTimeout = null)
 {
     public static readonly Uri AgentUri = new("wss://agent.deepgram.com/v1/agent/converse");
 
@@ -38,11 +43,12 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
     private const int PlaybackFrameBytes = VoiceAgentSettings.OutputSampleRate / 50 * 2;
     private const int MaxBrowserMessageBytes = 64 * 1024;
     private const int MaxAgentMessageBytes = 256 * 1024;
+    private const int AgentQueueCapacity = MicQueueFrames + 1; // One reserved slot for FunctionCallResponse.
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan CloseBound = TimeSpan.FromSeconds(3);
     private static readonly byte[] KeepAliveMessage = """{"type":"KeepAlive"}"""u8.ToArray();
-    private readonly Channel<byte[]> toAgent = Channel.CreateBounded<byte[]>(
-        new BoundedChannelOptions(MicQueueFrames) { SingleReader = true, SingleWriter = true });
+    private readonly Channel<AgentOutbound> toAgent = Channel.CreateBounded<AgentOutbound>(
+        new BoundedChannelOptions(AgentQueueCapacity) { SingleReader = true, SingleWriter = false });
     private readonly PlaybackQueue toBrowser = new(BrowserQueueItems);
     private readonly PlaybackPacer pacer = new(VoiceAgentSettings.OutputSampleRate * 380 / 1000);
     private readonly VoiceInterruptionTimings interruptionTimings = new();
@@ -50,12 +56,33 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
     // each code is logged once per user turn. Only the Deepgram reader touches this set.
     private readonly HashSet<string> warningCodesThisTurn = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource stopping = new();
+    private readonly object endChatRequestGate = new();
+    private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+    private readonly TimeSpan idleLimit = idleTimeout ?? TimeSpan.FromMinutes(2);
     private int end = -1;
+    private int endChatRequested;
+    private int queuedMicFrames;
     private int interruptions;
     private int interruptionSequence;
     private int activeInterruptionNumber;
     // Agent audio between UserStartedSpeaking and the user's final transcript belongs to a superseded reply.
     private bool suppressAgentAudio;
+    private bool farewellResponseStarted;
+    private bool farewellAudioDone;
+    private bool endChatAfterPlaybackRequested;
+
+    internal bool EndChatFlowRequested => Volatile.Read(ref endChatRequested) != 0;
+
+    internal bool EndChatAfterPlaybackRequested
+    {
+        get
+        {
+            lock (endChatRequestGate)
+            {
+                return endChatAfterPlaybackRequested;
+            }
+        }
+    }
 
     public async Task<VoiceRelayEnd> RunAsync(string apiKey, byte[] settings, CancellationToken requestAborted)
     {
@@ -94,18 +121,21 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
         var agentReader = Guard(() => ReadAgentAsync(agent), VoiceRelayEnd.DeepgramClosed);
         var agentSender = Guard(() => SendToAgentAsync(agent), VoiceRelayEnd.DeepgramClosed);
         var browserSender = Guard(SendToBrowserAsync, VoiceRelayEnd.BrowserClosed);
+        var idleMonitor = Guard(MonitorIdleAsync, VoiceRelayEnd.Failed);
 
         await Task.WhenAny(browserReader, agentReader, agentSender, browserSender,
             Task.Delay(Timeout.Infinite, stopping.Token).ContinueWith(_ => { }, TaskScheduler.Default));
         Stop(VoiceRelayEnd.Failed);
-        await Task.WhenAll(agentSender, browserSender);
+        await Task.WhenAll(agentSender, browserSender, idleMonitor);
 
         await CloseAsync(agent, agentReader, WebSocketCloseStatus.NormalClosure, "session ended");
         await CloseBrowserAsync(browserReader);
 
         logger.LogInformation(
-            "Voice relay ended: {EndReason} after {DurationSeconds:F0} s (connection {ConnectionNumber}, {Interruptions} interruptions).",
-            Ended, Stopwatch.GetElapsedTime(started).TotalSeconds, connection.Number, interruptions);
+            "Voice relay ended: {EndReason} after {DurationSeconds:F0} s (session {VoiceSessionId}, connection {ConnectionNumber}, "
+            + "{Interruptions} interruptions, end-chat requested {EndChatRequested}). Socket closure does not confirm EndInteraction completion.",
+            Ended, Stopwatch.GetElapsedTime(started).TotalSeconds, connection.Session.Id, connection.Number, interruptions,
+            EndChatFlowRequested);
         return Ended;
     }
 
@@ -168,8 +198,10 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
             if (type == WebSocketMessageType.Binary)
             {
                 // Never drop speech silently: a full queue ends voice and the guest reconnects.
-                if (!toAgent.Writer.TryWrite(data))
+                if (Interlocked.Increment(ref queuedMicFrames) > MicQueueFrames
+                    || !toAgent.Writer.TryWrite(new AgentOutbound(WebSocketMessageType.Binary, data)))
                 {
+                    Interlocked.Decrement(ref queuedMicFrames);
                     Stop(VoiceRelayEnd.MicBacklog);
                 }
 
@@ -222,8 +254,40 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
 
             while (reader.TryRead(out var frame))
             {
-                await agent.SendAsync(frame, WebSocketMessageType.Binary, true, stopping.Token);
+                if (frame.Type == WebSocketMessageType.Binary)
+                {
+                    Interlocked.Decrement(ref queuedMicFrames);
+                }
+
+                await agent.SendAsync(frame.Data, frame.Type, true, stopping.Token);
             }
+        }
+    }
+
+    private async Task MonitorIdleAsync()
+    {
+        while (!stopping.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), clock, stopping.Token);
+            CheckEndChatTimers();
+        }
+    }
+
+    internal void CheckEndChatTimers()
+    {
+        var now = clock.GetUtcNow();
+        if (!connection.HasEndChatResult && connection.IsIdle(idleLimit))
+        {
+            RequestEndChat(afterPlayback: false, "idle_timeout");
+        }
+
+        if (connection.EndChatResultReceivedAtUtc is { } resultAt
+            && now - resultAt >= TimeSpan.FromSeconds(15))
+        {
+            // Deepgram normally emits ConversationText and AgentAudioDone for the farewell.
+            // If it does not, ask the browser to end after playback drains (or immediately
+            // when there is no active playback) rather than cutting off queued farewell audio.
+            RequestEndChat(afterPlayback: true, "farewell_fallback");
         }
     }
 
@@ -293,6 +357,7 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
         string? code;
         string? description;
         string? requestId;
+        string? functionCallId = null;
         LatencyReport? latency = null;
         try
         {
@@ -304,6 +369,14 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
             // Deepgram-authored Error/Warning text and the Welcome session ID; never transcript content.
             description = ReadString(root, "description");
             requestId = ReadString(root, "request_id");
+            if (type == "FunctionCallRequest"
+                && root.TryGetProperty("functions", out var functions)
+                && functions.ValueKind == JsonValueKind.Array
+                && functions.GetArrayLength() == 1
+                && ReadString(functions[0], "id") is { Length: > 0 and <= 128 } id)
+            {
+                functionCallId = id;
+            }
             if (type == "LatencyReport")
             {
                 latency = new LatencyReport(
@@ -326,6 +399,23 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
         switch (type)
         {
             case "UserStartedSpeaking":
+                var farewellCancelled = false;
+                lock (endChatRequestGate)
+                {
+                    connection.RecordSpeech();
+                    // New speech supersedes any reply left in progress by the previous utterance
+                    // (including one carried across a voice reconnect).
+                    connection.RecordReplyCompleted();
+                    farewellCancelled = connection.CancelPendingEndChatFarewell();
+                    if (farewellCancelled)
+                    {
+                        connection.RecordReplyCompleted();
+                        Interlocked.Exchange(ref endChatRequested, 0);
+                        endChatAfterPlaybackRequested = false;
+                        farewellResponseStarted = false;
+                        farewellAudioDone = false;
+                    }
+                }
                 // Repeated speech notifications for one utterance still flush, but share one timing sample.
                 Interlocked.Increment(ref interruptions);
                 toBrowser.FlushAudio();
@@ -338,8 +428,29 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
                 suppressAgentAudio = true;
                 toBrowser.ForceEnqueue(new PlaybackItem(true, JsonSerializer.SerializeToUtf8Bytes(
                     new { type = "UserStartedSpeaking", interruptionNumber = activeInterruptionNumber })));
+                if (farewellCancelled)
+                {
+                    VoiceTelemetry.RecordEndChat(logger, "cancelled", connection, "user_speech");
+                    toBrowser.ForceEnqueue(new PlaybackItem(true, JsonSerializer.SerializeToUtf8Bytes(
+                        new { type = "CancelEndChat" })));
+                }
                 break;
             case "ConversationText" when role == "user":
+                lock (endChatRequestGate)
+                {
+                    connection.RecordSpeech();
+                    if (connection.CancelPendingEndChatFarewell())
+                    {
+                        VoiceTelemetry.RecordEndChat(logger, "cancelled", connection, "user_speech");
+                        Interlocked.Exchange(ref endChatRequested, 0);
+                        endChatAfterPlaybackRequested = false;
+                        farewellResponseStarted = false;
+                        farewellAudioDone = false;
+                        toBrowser.ForceEnqueue(new PlaybackItem(true, JsonSerializer.SerializeToUtf8Bytes(
+                            new { type = "CancelEndChat" })));
+                    }
+                    connection.RecordReplyStarted();
+                }
                 // Live sessions sent no AgentStartedSpeaking; the user's final transcript ends the interruption.
                 suppressAgentAudio = false;
                 activeInterruptionNumber = 0;
@@ -352,10 +463,55 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
                 Forward(type, null);
                 break;
             case "ConversationText":
+                if (role == "assistant" && connection.HasEndChatResult)
+                {
+                    farewellResponseStarted = true;
+                    CompleteFarewellIfReady();
+                }
                 Forward(type, role);
                 break;
-            case "SettingsApplied" or "AgentThinking" or "AgentAudioDone":
+            case "AgentAudioDone":
+                connection.RecordReplyCompleted();
                 Forward(type, null);
+                farewellAudioDone = connection.HasEndChatResult;
+                CompleteFarewellIfReady();
+                break;
+            case "SettingsApplied" or "AgentThinking":
+                Forward(type, null);
+                break;
+            case "FunctionCallRequest":
+                if (DeepgramFunctionProtocol.TryCreateEndChatResponse(data, connection, out var response))
+                {
+                    VoiceTelemetry.RecordEndChat(logger, "function_request_accepted", connection, "confirmed_call", functionCallId);
+                    var queued = toAgent.Writer.TryWrite(new AgentOutbound(WebSocketMessageType.Text, response));
+                    VoiceTelemetry.RecordEndChat(logger,
+                        queued ? "function_response_queued" : "function_response_not_queued",
+                        connection, queued ? "confirmed_call" : "agent_queue_full_or_closed");
+                }
+                else
+                {
+                    VoiceTelemetry.RecordEndChat(logger, "function_request_rejected", connection, "invalid_or_unmatched_request", functionCallId);
+                }
+                break;
+            case "FunctionCallCancelled":
+                lock (endChatRequestGate)
+                {
+                    if (DeepgramFunctionProtocol.HandleCancellation(data, connection))
+                    {
+                        VoiceTelemetry.RecordEndChat(logger, "cancelled", connection, "deepgram_cancelled");
+                        connection.RecordReplyCompleted();
+                        Interlocked.Exchange(ref endChatRequested, 0);
+                        endChatAfterPlaybackRequested = false;
+                        farewellResponseStarted = false;
+                        farewellAudioDone = false;
+                        toBrowser.ForceEnqueue(new PlaybackItem(true, JsonSerializer.SerializeToUtf8Bytes(
+                            new { type = "CancelEndChat" })));
+                    }
+                }
+                break;
+            case "FunctionCallResponse":
+                // Deepgram echoes the browser's FunctionCallResponse. It is not another request
+                // and must not start the End flow a second time.
                 break;
             case "Welcome":
                 logger.LogInformation(
@@ -371,6 +527,7 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
                     report.TttTool, report.TttThinking, report.Tts);
                 break;
             case "Error":
+                connection.RecordReplyCompleted();
                 logger.LogWarning(
                     "Deepgram Voice Agent reported error {DeepgramCode}: {DeepgramDescription} (connection {ConnectionNumber}).",
                     code ?? "(none)", description ?? "(none)", connection.Number);
@@ -400,6 +557,37 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
             ? seconds
             : null;
 
+    private void RequestEndChat(bool afterPlayback, string reason)
+    {
+        lock (endChatRequestGate)
+        {
+            if (endChatRequested != 0
+                || !connection.TryClaimEndChatFlow(
+                    farewellOnly: afterPlayback,
+                    idleTimeout: afterPlayback ? null : idleLimit))
+            {
+                return;
+            }
+
+            endChatRequested = 1;
+            endChatAfterPlaybackRequested = afterPlayback;
+            VoiceTelemetry.RecordEndChat(logger, "requested", connection, reason);
+            toBrowser.ForceEnqueue(new PlaybackItem(true, JsonSerializer.SerializeToUtf8Bytes(
+                new { type = afterPlayback ? "EndChatAfterPlayback" : "EndChatRequested" }),
+                reason, connection.EndChatCallId));
+        }
+    }
+
+    private void CompleteFarewellIfReady()
+    {
+        if (farewellResponseStarted && farewellAudioDone && connection.HasEndChatResult)
+        {
+            farewellResponseStarted = false;
+            farewellAudioDone = false;
+            RequestEndChat(afterPlayback: true, "farewell_playback_ready");
+        }
+    }
+
     private readonly record struct LatencyReport(
         double? Total, double? Stt, double? TttToken, double? TttText, double? TttTool, double? TttThinking, double? Tts);
 
@@ -419,6 +607,10 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
                 item.IsText ? WebSocketMessageType.Text : WebSocketMessageType.Binary,
                 true,
                 stopping.Token);
+            if (item.EndChatReason is { } reason)
+            {
+                VoiceTelemetry.RecordEndChat(logger, "dispatched", connection, reason, item.FunctionCallId);
+            }
         }
     }
 
@@ -460,6 +652,8 @@ internal sealed class VoiceRelay(WebSocket browser, VoiceConnection connection, 
             socket.Abort();
         }
     }
+
+    private sealed record AgentOutbound(WebSocketMessageType Type, byte[] Data);
 
     private static async Task<(WebSocketMessageType Type, byte[] Data)> ReceiveAsync(WebSocket socket, byte[] buffer)
     {
@@ -580,7 +774,7 @@ internal static class VoiceCloseCodes
     }
 }
 
-internal sealed record PlaybackItem(bool IsText, byte[] Data);
+internal sealed record PlaybackItem(bool IsText, byte[] Data, string? EndChatReason = null, string? FunctionCallId = null);
 
 /// <summary>Bounded FIFO whose interrupt flush removes queued agent audio but keeps JSON events.</summary>
 internal sealed class PlaybackQueue(int capacity)

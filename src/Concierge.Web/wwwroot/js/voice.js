@@ -77,6 +77,8 @@
                 }
                 break;
             case "drained":
+                voice.playbackActive = false;
+                if (voice.endAfterPlayback) requestEndChat(voice);
                 if (voice.state === "speaking") notify(voice, "listening");
                 break;
             case "overflow":
@@ -87,6 +89,7 @@
 
     function onSocketMessage(voice, event) {
         if (typeof event.data !== "string") {
+            voice.playbackActive = true;
             const pcm = new Int16Array(event.data);
             const samples = new Float32Array(pcm.length);
             for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 0x8000;
@@ -108,6 +111,8 @@
                 });
                 break;
             case "UserStartedSpeaking":
+                voice.endAfterPlayback = false;
+                voice.endRequested = false;
                 voice.playNode.port.postMessage({
                     type: "flush",
                     interruptionNumber: message.interruptionNumber,
@@ -120,7 +125,24 @@
             case "AgentThinking":
                 notify(voice, "thinking");
                 break;
+            case "EndChatRequested":
+                requestEndChat(voice);
+                break;
+            case "EndChatAfterPlayback":
+                voice.endAfterPlayback = true;
+                if (!voice.playbackActive) requestEndChat(voice);
+                break;
+            case "CancelEndChat":
+                voice.endAfterPlayback = false;
+                voice.endRequested = false;
+                break;
         }
+    }
+
+    function requestEndChat(voice) {
+        if (voice.endRequested || voice.stopped) return;
+        voice.endRequested = true;
+        voice.dotNet.invokeMethodAsync("OnVoiceEndRequested").catch(() => {});
     }
 
     function release(voice) {

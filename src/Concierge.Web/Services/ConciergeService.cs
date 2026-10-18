@@ -102,21 +102,23 @@ public sealed class ConciergeService(
         ConciergeSessionContext session,
         string turnId,
         string userMessage,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool enableEndChatFunction = false)
     {
         ArgumentNullException.ThrowIfNull(session);
         var request = new ConciergeTurnRequest(turnId, userMessage, "voice");
         ValidateTurn(request);
         // Deepgram retries reuse the payload, so the TurnId is also the Temporal update ID: a retry
         // after a lost response attaches to the admitted update, even while it is still running.
-        return await ExecuteTurnAsync(session, request, updateId: turnId, cancellationToken);
+        return await ExecuteTurnAsync(session, request, updateId: turnId, cancellationToken, enableEndChatFunction);
     }
 
     private async Task<ConciergeTurnResult> ExecuteTurnAsync(
         ConciergeSessionContext session,
         ConciergeTurnRequest request,
         string? updateId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool enableEndChatFunction = false)
     {
         // Outside the try below, which would map this rejection to 503.
         RequireVerifiedGuest(session);
@@ -130,7 +132,7 @@ public sealed class ConciergeService(
             return await workflow.ExecuteUpdateAsync<ConciergeTurnResult>(
                 ConciergeWorkflowNames.SubmitTurnUpdate,
                 [new ConciergeTurnSubmission(
-                    request.TurnId, request.UserMessage, request.Channel, session.VerifiedGuest)],
+                request.TurnId, request.UserMessage, request.Channel, session.VerifiedGuest, enableEndChatFunction)],
                 options);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

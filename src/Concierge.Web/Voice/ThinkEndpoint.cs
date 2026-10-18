@@ -55,6 +55,32 @@ internal static class ThinkEndpoint
         }
 
         var session = connection.Session;
+        if (request.EndChatToolResultId is { } callId)
+        {
+            if (!connection.AcceptEndChatToolResult(callId))
+            {
+                VoiceTelemetry.RecordEndChat(logger, "tool_result_rejected", connection, "unconfirmed_or_cancelled_call", callId);
+                await WriteErrorAsync(context, StatusCodes.Status400BadRequest,
+                    "The end-chat function result does not match a confirmed request.",
+                    "invalid_request_error", "invalid_request");
+                VoiceTelemetry.RecordThink(requestStarted, "invalid");
+                return;
+            }
+
+            VoiceTelemetry.RecordEndChat(logger, "tool_result_accepted", connection, "confirmed_call", callId);
+            var createdAt = services.GetRequiredService<TimeProvider>().GetUtcNow().ToUnixTimeSeconds();
+            await WriteSseAsync(
+                context,
+                ThinkRequest.TurnId(session.Id, connection.Number, request.UserOrdinal, request.UserMessage),
+                request.Model,
+                createdAt,
+                ConciergeEndChat.Farewell);
+            VoiceTelemetry.RecordEndChat(logger, "farewell_returned", connection, "tool_result", callId);
+            VoiceTelemetry.RecordThink(requestStarted, "answered");
+            return;
+        }
+
+        connection.RecordSpeech();
         var turnId = ThinkRequest.TurnId(session.Id, connection.Number, request.UserOrdinal, request.UserMessage);
         var concierge = services.GetRequiredService<IConciergeService>();
         var started = Stopwatch.GetTimestamp();
@@ -68,7 +94,7 @@ internal static class ThinkEndpoint
         // The shared task outlives this request: a Deepgram abort or retry must not cancel or
         // resubmit admitted Temporal work. ConciergeService holds no disposable scoped state.
         var turn = session.JoinOrStart(turnId, () => concierge.SubmitVoiceTurnAsync(
-            session.Stay, turnId, request.UserMessage, CancellationToken.None));
+            session.Stay, turnId, request.UserMessage, CancellationToken.None, enableEndChatFunction: true));
 
         ConciergeTurnResult result;
         try
@@ -108,14 +134,45 @@ internal static class ThinkEndpoint
             Stopwatch.GetElapsedTime(started).TotalMilliseconds, connection.Number, request.UserOrdinal);
 
         var created = services.GetRequiredService<TimeProvider>().GetUtcNow().ToUnixTimeSeconds();
+        if (result.EndChatFunctionCall is { } endChatCall)
+        {
+            if (!StringComparer.Ordinal.Equals(endChatCall.Name, ConciergeEndChat.FunctionName)
+                || !connection.RegisterEndChatCall(endChatCall.Id))
+            {
+                VoiceTelemetry.RecordEndChat(logger, "call_rejected", connection, "invalid_or_conflicting_call", endChatCall.Id);
+                await WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable,
+                    "The concierge could not complete this request. Please try again.",
+                    "server_error", "unavailable");
+                VoiceTelemetry.RecordThink(requestStarted, "unavailable");
+                return;
+            }
+
+            VoiceTelemetry.RecordEndChat(logger, "call_registered", connection, "model_decision", endChatCall.Id);
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "text/event-stream";
+            context.Response.Headers.CacheControl = "no-cache";
+            await context.Response.WriteAsync(
+                ThinkRequest.SseFunctionCallFrames(turnId, request.Model, created, endChatCall),
+                context.RequestAborted);
+            await context.Response.Body.FlushAsync(context.RequestAborted);
+            VoiceTelemetry.RecordThink(requestStarted, "answered");
+            return;
+        }
+
+        await WriteSseAsync(context, turnId, request.Model, created, result.AssistantMessage);
+        VoiceTelemetry.RecordThink(requestStarted, "answered");
+    }
+
+    private static async Task WriteSseAsync(
+        HttpContext context, string turnId, string model, long created, string answer)
+    {
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/event-stream";
         context.Response.Headers.CacheControl = "no-cache";
         await context.Response.WriteAsync(
-            ThinkRequest.SseFrames(turnId, request.Model, created, result.AssistantMessage),
+            ThinkRequest.SseFrames(turnId, model, created, answer),
             context.RequestAborted);
         await context.Response.Body.FlushAsync(context.RequestAborted);
-        VoiceTelemetry.RecordThink(requestStarted, "answered");
     }
 
     private static string? GetBearer(HttpContext context) =>
@@ -158,7 +215,11 @@ internal static class ThinkEndpoint
 }
 
 /// <summary>The parts of an OpenAI chat completions request that a voice turn uses.</summary>
-internal sealed record ThinkRequest(string UserMessage, int UserOrdinal, string Model)
+internal sealed record ThinkRequest(
+    string UserMessage,
+    int UserOrdinal,
+    string Model,
+    string? EndChatToolResultId = null)
 {
     private const string DefaultModel = "concierge";
 
@@ -183,6 +244,11 @@ internal sealed record ThinkRequest(string UserMessage, int UserOrdinal, string 
                 return false;
             }
 
+            if (!TryParseEndChatToolResult(messages, out var toolResultId, out error))
+            {
+                return false;
+            }
+
             var ordinal = 0;
             JsonElement latest = default;
             foreach (var message in messages.EnumerateArray())
@@ -197,18 +263,27 @@ internal sealed record ThinkRequest(string UserMessage, int UserOrdinal, string 
                 }
             }
 
-            if (ordinal == 0)
+            if (ordinal == 0 && toolResultId is null)
             {
                 error = "Include at least one message with role 'user'.";
                 return false;
             }
 
-            if (!latest.TryGetProperty("content", out var content)
+            string userMessage;
+            if (ordinal == 0)
+            {
+                userMessage = string.Empty;
+            }
+            else if (!latest.TryGetProperty("content", out var content)
                 || content.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(content.GetString()))
             {
                 error = "The latest 'user' message must have nonblank string 'content'.";
                 return false;
+            }
+            else
+            {
+                userMessage = content.GetString()!.Trim();
             }
 
             var model = root.TryGetProperty("model", out var modelValue)
@@ -216,7 +291,7 @@ internal sealed record ThinkRequest(string UserMessage, int UserOrdinal, string 
                 && !string.IsNullOrWhiteSpace(modelValue.GetString())
                     ? modelValue.GetString()!
                     : DefaultModel;
-            request = new ThinkRequest(content.GetString()!.Trim(), ordinal, model);
+            request = new ThinkRequest(userMessage, ordinal, model, toolResultId);
             return true;
         }
         catch (JsonException)
@@ -224,6 +299,112 @@ internal sealed record ThinkRequest(string UserMessage, int UserOrdinal, string 
             error = "Send a valid JSON request body.";
             return false;
         }
+    }
+
+    private static bool TryParseEndChatToolResult(
+        JsonElement messages, out string? resultCallId, out string error)
+    {
+        resultCallId = null;
+        error = string.Empty;
+        string? functionCallId = null;
+        var resultCount = 0;
+
+        foreach (var message in messages.EnumerateArray())
+        {
+            if (message.ValueKind != JsonValueKind.Object
+                || !message.TryGetProperty("role", out var role)
+                || role.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            if (role.ValueEquals("assistant")
+                && message.TryGetProperty("tool_calls", out var calls))
+            {
+                if (calls.ValueKind != JsonValueKind.Array || calls.GetArrayLength() != 1)
+                {
+                    error = "The end-chat function request must contain exactly one tool call.";
+                    return false;
+                }
+
+                var call = calls[0];
+                var function = call.ValueKind == JsonValueKind.Object
+                    && call.TryGetProperty("function", out var parsedFunction)
+                    ? parsedFunction
+                    : default;
+                if (function.ValueKind != JsonValueKind.Object
+                    || !function.TryGetProperty("name", out var functionName)
+                    || functionName.ValueKind != JsonValueKind.String
+                    || !StringComparer.Ordinal.Equals(functionName.GetString(), ConciergeEndChat.FunctionName))
+                {
+                    error = "Only the end-chat function is supported.";
+                    return false;
+                }
+
+                if (!call.TryGetProperty("id", out var id)
+                    || id.ValueKind != JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(id.GetString())
+                    || id.GetString()!.Length > 128
+                    || !function.TryGetProperty("arguments", out var arguments)
+                    || !IsEmptyObjectArguments(arguments))
+                {
+                    error = "The end-chat function call is malformed.";
+                    return false;
+                }
+
+                functionCallId = id.GetString();
+            }
+            else if (role.ValueEquals("tool"))
+            {
+                if (!message.TryGetProperty("tool_call_id", out var id)
+                    || id.ValueKind != JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(id.GetString())
+                    || !message.TryGetProperty("name", out var name)
+                    || name.ValueKind != JsonValueKind.String
+                    || !StringComparer.Ordinal.Equals(name.GetString(), ConciergeEndChat.FunctionName)
+                    || !message.TryGetProperty("content", out var content)
+                    || content.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                resultCallId = id.GetString();
+                resultCount++;
+            }
+        }
+
+        if (functionCallId is null && resultCount == 0)
+        {
+            return true;
+        }
+
+        if (functionCallId is null || resultCount != 1
+            || !StringComparer.Ordinal.Equals(functionCallId, resultCallId))
+        {
+            error = "The end-chat function result must match its assistant tool call.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsEmptyObjectArguments(JsonElement arguments)
+    {
+        if (arguments.ValueKind == JsonValueKind.String)
+        {
+            try
+            {
+                using var parsed = JsonDocument.Parse(arguments.GetString()!);
+                arguments = parsed.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        return arguments.ValueKind == JsonValueKind.Object
+            && !arguments.EnumerateObject().Any();
     }
 
     /// <summary>
@@ -253,6 +434,38 @@ internal sealed record ThinkRequest(string UserMessage, int UserOrdinal, string 
         return Frame(new { role = "assistant" }, null)
             + Frame(new { content = answer }, null)
             + Frame(new { }, "stop")
+            + "data: [DONE]\n\n";
+    }
+
+    /// <summary>Streams the actual model-generated end-chat tool call for Deepgram's client handler.</summary>
+    public static string SseFunctionCallFrames(
+        string id, string model, long created, ConciergeEndChatFunctionCall functionCall)
+    {
+        string Frame(object delta, string? finishReason) =>
+            "data: " + JsonSerializer.Serialize(new
+            {
+                id,
+                @object = "chat.completion.chunk",
+                created,
+                model,
+                choices = new[] { new { index = 0, delta, finish_reason = finishReason } },
+            }) + "\n\n";
+
+        return Frame(new { role = "assistant" }, null)
+            + Frame(new
+            {
+                tool_calls = new[]
+                {
+                    new
+                    {
+                        index = 0,
+                        id = functionCall.Id,
+                        type = "function",
+                        function = new { name = functionCall.Name, arguments = functionCall.Arguments },
+                    },
+                },
+            }, null)
+            + Frame(new { }, "tool_calls")
             + "data: [DONE]\n\n";
     }
 }

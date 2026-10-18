@@ -342,7 +342,8 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         /// <inheritdoc/>
         public Task<ConciergeTurnResult> SubmitVoiceTurnAsync(
             ConciergeSessionContext session, string turnId, string userMessage,
-            CancellationToken cancellationToken = default) => throw Failure();
+            CancellationToken cancellationToken = default,
+            bool enableEndChatFunction = false) => throw Failure();
     }
 
     private static WebApplicationFactory<ConciergeService> CreateFactory(

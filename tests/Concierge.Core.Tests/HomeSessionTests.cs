@@ -2,15 +2,51 @@ using System.Reflection;
 using Concierge.Contracts;
 using Concierge.Web.Components.Pages;
 using Concierge.Web.Services;
+using Concierge.Web.Voice;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.RenderTree;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using Microsoft.JSInterop;
 
 namespace Concierge.Core.Tests;
 
 public sealed class HomeSessionTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task VoiceEndCallbackDistinguishesCompletedAndFailedInteraction(bool failure)
+    {
+        using var traces = new EndChatTraceCapture();
+        using var logs = new CapturedLogs();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddProvider(logs));
+        await using var harness = new Harness();
+        var voiceSessionId = Guid.NewGuid();
+        harness.SetSession("private-credential", Guid.NewGuid());
+        harness.Set("Logger", loggerFactory.CreateLogger<Home>());
+        harness.Set("voiceMode", true);
+        harness.Set("voiceSessionId", voiceSessionId.ToString());
+        if (failure)
+        {
+            harness.Service.End = _ => throw new ConciergeApiException("unavailable", "private-error", 503);
+        }
+
+        await harness.VoiceEndRequested();
+
+        traces.AssertEvent("concierge.voice.end_chat.browser_callback_received", voiceSessionId);
+        var eventName = failure ? "completion_failed" : "completed";
+        var activity = traces.AssertEvent("concierge.voice.end_chat." + eventName, voiceSessionId);
+        Assert.Equal(failure ? System.Diagnostics.ActivityStatusCode.Error : System.Diagnostics.ActivityStatusCode.Unset,
+            activity.Status);
+        Assert.Equal(!failure, harness.Get<bool>("chatEnded"));
+        Assert.Contains(logs.Entries, entry =>
+            Equals(entry.Values.GetValueOrDefault("EndChatEvent"), "concierge.voice.end_chat." + eventName));
+        Assert.DoesNotContain(logs.Entries, entry =>
+            entry.Message.Contains("private-credential", StringComparison.Ordinal)
+            || entry.Message.Contains("private-error", StringComparison.Ordinal));
+    }
+
     /// <summary>Preserves retry IDs and drafts only for the verified original stay.</summary>
     [Theory]
     [InlineData(false)]
@@ -287,6 +323,71 @@ public sealed class HomeSessionTests
         Assert.DoesNotContain(markup, content => content.Contains("<b>", StringComparison.Ordinal) || content.Contains("**x**", StringComparison.Ordinal) || content.Contains("**p**", StringComparison.Ordinal));
     }
 
+    /// <summary>Shows Reconnect when the relay closes while the browser's report was lost.</summary>
+    [Fact]
+    public async Task ServerRelayClosureDisconnectsVoiceWhenTheBrowserReportWasLost()
+    {
+        using var logs = new CapturedLogs();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddProvider(logs));
+        await using var harness = new Harness();
+        harness.Set("Logger", loggerFactory.CreateLogger<Home>());
+        var connection = harness.StartListening();
+        await harness.VoiceSession(connection.Session.Id.ToString());
+
+        harness.Voice.Close(connection);
+        await harness.WaitUntil(() => harness.Get<string>("voiceState") == "disconnected");
+
+        Assert.Equal("Voice disconnected.", harness.Get<string>("voiceMessage"));
+        await harness.Call("StateHasChanged");
+        var (text, markup) = harness.RenderedContent();
+        var content = text.Concat(markup).ToList();
+        Assert.Contains(content, item => item.Contains("Reconnect", StringComparison.Ordinal));
+        Assert.Contains(content, item => item.Contains("Voice disconnected.", StringComparison.Ordinal));
+        Assert.Contains(content, item => item.Contains("End chat", StringComparison.Ordinal));
+        Assert.Contains(logs.Entries, entry =>
+            entry.Message.StartsWith("Voice relay closure applied by server", StringComparison.Ordinal)
+            && Equals(entry.Values.GetValueOrDefault("VoiceState"), "listening")
+            && Equals(entry.Values.GetValueOrDefault("ConnectionNumber"), 1));
+        Assert.DoesNotContain("conciergeVoice.stop", harness.JavaScript.Calls);
+
+        // The browser's late report of the same closure still applies cleanly.
+        await harness.VoiceState("disconnected", "Voice disconnected.", 4000);
+        Assert.Equal("disconnected", harness.Get<string>("voiceState"));
+    }
+
+    /// <summary>Ignores closures for a voice session the page no longer shows.</summary>
+    [Fact]
+    public async Task ServerRelayClosureForAnotherVoiceSessionIsIgnored()
+    {
+        await using var harness = new Harness();
+        var stale = harness.StartListening();
+        await harness.VoiceSession(stale.Session.Id.ToString());
+        var current = harness.Voice.Open(new ConciergeSessionContext(Guid.NewGuid(), Guid.NewGuid(), DateTimeOffset.UtcNow.AddDays(1)), null);
+        await harness.VoiceSession(current.Session.Id.ToString());
+
+        harness.Voice.Close(stale);
+        await harness.Call("ApplyVoiceRelayClosedAsync", stale.Session.Id.ToString(), 1);
+
+        Assert.Equal("listening", harness.Get<string>("voiceState"));
+        Assert.Null(harness.Get<string?>("voiceMessage"));
+    }
+
+    /// <summary>Keeps the browser's more specific disconnect message.</summary>
+    [Fact]
+    public async Task ServerRelayClosureDoesNotOverwriteABrowserDisconnect()
+    {
+        await using var harness = new Harness();
+        var connection = harness.StartListening();
+        await harness.VoiceSession(connection.Session.Id.ToString());
+        await harness.VoiceState("disconnected", "Voice service is unavailable.", 1011);
+
+        harness.Voice.Close(connection);
+        await harness.Call("ApplyVoiceRelayClosedAsync", connection.Session.Id.ToString(), 1);
+
+        Assert.Equal("disconnected", harness.Get<string>("voiceState"));
+        Assert.Equal("Voice service is unavailable.", harness.Get<string>("voiceMessage"));
+    }
+
     private static ConciergeSessionResponse SessionResponse(string credential, Guid stay)
         => new(credential, DateTimeOffset.UtcNow.AddHours(1), stay);
 
@@ -301,12 +402,15 @@ public sealed class HomeSessionTests
         private readonly int componentId;
         public FakeService Service { get; } = new();
         public FakeJavaScript JavaScript { get; } = new();
+        public VoiceSessionRegistry Voice { get; } = new(TimeProvider.System);
 
         /// <summary>Attaches Home without triggering implicit browser callbacks.</summary>
         public Harness()
         {
             Set("Concierge", Service);
             Set("JavaScript", JavaScript);
+            Set("Logger", NullLogger<Home>.Instance);
+            Set("VoiceSessions", Voice);
             Set("ready", true);
             componentId = renderer.Attach(home);
         }
@@ -374,6 +478,33 @@ public sealed class HomeSessionTests
                 var result = typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(home, args);
                 if (result is Task task) await task;
             }).WaitAsync(TimeSpan.FromSeconds(10));
+
+        public Task VoiceEndRequested() => renderer.Dispatcher.InvokeAsync(home.OnVoiceEndRequested);
+
+        /// <summary>Seeds a verified chat in voice mode with an open relay connection.</summary>
+        public VoiceConnection StartListening()
+        {
+            SetSession("credential", Guid.NewGuid());
+            Set("voiceMode", true);
+            Set("voiceState", "listening");
+            return Voice.Open(new ConciergeSessionContext(Guid.NewGuid(), Guid.NewGuid(), DateTimeOffset.UtcNow.AddDays(1)), null);
+        }
+
+        public Task VoiceState(string state, string? message, int closeCode) =>
+            renderer.Dispatcher.InvokeAsync(() => home.OnVoiceState(state, message, closeCode));
+
+        public Task VoiceSession(string id) => renderer.Dispatcher.InvokeAsync(() => home.OnVoiceSession(id));
+
+        /// <summary>Waits for work queued onto the component dispatcher from another thread.</summary>
+        public async Task WaitUntil(Func<bool> condition)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (!await renderer.Dispatcher.InvokeAsync(condition))
+            {
+                if (DateTime.UtcNow > deadline) throw new TimeoutException("Condition was not met.");
+                await Task.Delay(10);
+            }
+        }
 
         /// <summary>Disposes the attached component and renderer.</summary>
         public ValueTask DisposeAsync() => renderer.DisposeAsync();
@@ -450,7 +581,12 @@ public sealed class HomeSessionTests
         public Task<ConciergeVoiceAuthorization> AuthorizeVoiceAsync(string? bearerCredential, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
         /// <summary>Voice is outside these component tests.</summary>
-        public Task<ConciergeTurnResult> SubmitVoiceTurnAsync(ConciergeSessionContext session, string turnId, string userMessage, CancellationToken cancellationToken = default) =>
+        public Task<ConciergeTurnResult> SubmitVoiceTurnAsync(
+            ConciergeSessionContext session,
+            string turnId,
+            string userMessage,
+            CancellationToken cancellationToken = default,
+            bool enableEndChatFunction = false) =>
             throw new NotSupportedException();
     }
 }

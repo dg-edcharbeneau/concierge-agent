@@ -55,7 +55,11 @@ builder.Services.AddOptions<ConciergePersistenceOptions>()
     .ValidateOnStart();
 
 builder.Services.AddOptions<DeepgramVoiceOptions>()
-    .Bind(builder.Configuration.GetSection(DeepgramVoiceOptions.SectionName));
+    .Bind(builder.Configuration.GetSection(DeepgramVoiceOptions.SectionName))
+    .Validate(
+        options => options.IdleTimeoutMinutes is >= 1 and <= 60,
+        $"{DeepgramVoiceOptions.SectionName}:IdleTimeoutMinutes must be between 1 and 60.")
+    .ValidateOnStart();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<VoiceSessionRegistry>();
 builder.Services.AddScoped<IConciergeService, ConciergeService>();

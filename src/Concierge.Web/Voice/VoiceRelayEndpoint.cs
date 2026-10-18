@@ -82,7 +82,13 @@ internal static class VoiceRelayEndpoint
                 WebSocketMessageType.Text, true, context.RequestAborted);
 
             var settings = VoiceAgentSettings.Build(options, thinkUrl, connection.Bearer, authorization.HasTurns);
-            await new VoiceRelay(browser, connection, logger).RunAsync(options.ApiKey, settings, context.RequestAborted);
+            await new VoiceRelay(
+                browser,
+                connection,
+                logger,
+                services.GetRequiredService<TimeProvider>(),
+                TimeSpan.FromMinutes(options.IdleTimeoutMinutes))
+                .RunAsync(options.ApiKey, settings, context.RequestAborted);
         }
         catch (Exception exception) when (exception is WebSocketException or OperationCanceledException)
         {

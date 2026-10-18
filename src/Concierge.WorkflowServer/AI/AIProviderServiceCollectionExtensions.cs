@@ -1,5 +1,6 @@
 using Azure.AI.OpenAI;
 using Azure.Identity;
+using Concierge.Contracts;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
 using OllamaSharp;
@@ -8,6 +9,7 @@ using OpenAI;
 using OpenAI.Responses;
 using System.ClientModel;
 using System.ClientModel.Primitives;
+using System.Text.Json;
 
 namespace Concierge.WorkflowServer.AI;
 
@@ -203,6 +205,7 @@ internal sealed class BoundedChatClient(
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        options = PrepareEndChatFunction(options);
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
         await ConciergeAITelemetry.WaitForSlotAsync(gate, "chat", timeoutSource.Token);
@@ -224,6 +227,7 @@ internal sealed class BoundedChatClient(
         [System.Runtime.CompilerServices.EnumeratorCancellation]
         CancellationToken cancellationToken = default)
     {
+        options = PrepareEndChatFunction(options);
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
         await ConciergeAITelemetry.WaitForSlotAsync(gate, "chat", timeoutSource.Token);
@@ -241,6 +245,43 @@ internal sealed class BoundedChatClient(
             gate.Release();
         }
     }
+
+    /// <summary>
+    /// Restores the voice-only function declaration after Temporal's durable activity serializer
+    /// carried its marker in AdditionalProperties. The function is exposed to the model only; the
+    /// activity does not execute it, so the workflow can return the client-side call to Deepgram.
+    /// </summary>
+    internal static ChatOptions? PrepareEndChatFunction(ChatOptions? options)
+    {
+        if (options?.AdditionalProperties is not { } properties
+            || !properties.TryGetValue(ConciergeEndChat.ModelOptionKey, out var enabled)
+            || !IsEndChatFunctionMarker(enabled))
+        {
+            return options;
+        }
+
+        properties.Remove(ConciergeEndChat.ModelOptionKey);
+        options.Tools =
+        [
+            AIFunctionFactory.Create(
+                (Func<Task>)(static () => Task.CompletedTask),
+                new AIFunctionFactoryOptions
+                {
+                    Name = ConciergeEndChat.FunctionName,
+                    Description = "End the guest's chat only when they clearly and explicitly ask to end the conversation.",
+                }),
+        ];
+        return options;
+    }
+
+    private static bool IsEndChatFunctionMarker(object? marker) =>
+        marker switch
+        {
+            string value => StringComparer.Ordinal.Equals(value, "true"),
+            JsonElement { ValueKind: JsonValueKind.String } value =>
+                StringComparer.Ordinal.Equals(value.GetString(), "true"),
+            _ => false,
+        };
 }
 
 internal sealed class BoundedEmbeddingGenerator(

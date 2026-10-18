@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using Concierge.Contracts;
 using Concierge.Web.Services;
+using Concierge.Web.Voice;
 using Microsoft.AspNetCore.Components;
 using Microsoft.JSInterop;
 
@@ -25,6 +26,12 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     [Inject]
     private IConciergeService Concierge { get; set; } = default!;
+
+    [Inject]
+    private ILogger<Home> Logger { get; set; } = default!;
+
+    [Inject]
+    private VoiceSessionRegistry VoiceSessions { get; set; } = default!;
 
     private ChatSessionModel model = ChatSessionModel.Initial;
     private ElementReference transcriptElement;
@@ -65,6 +72,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private string? voiceMessage;
     private string? voiceSessionId;
     private DotNetObjectReference<Home>? voiceReference;
+    private IDisposable? voiceClosedSubscription;
 
     private bool IsCurrentSession(int version) => !disposed && model.IsCurrent(version);
 
@@ -448,6 +456,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
         voiceMode = false;
         voiceSessionId = null;
+        StopWatchingVoiceRelay();
         model = model.MarkExpired();
         isWorking = false;
         isVerifying = false;
@@ -520,16 +529,34 @@ public partial class Home : ComponentBase, IAsyncDisposable
         model = model.BeginEnd();
         var currentVersion = sessionVersion;
         var credential = session.Credential;
+        var endingVoiceSessionId = voiceSessionId;
         isWorking = false;
         StateHasChanged();
         try
         {
+            if (endingVoiceSessionId is not null)
+            {
+                VoiceTelemetry.RecordEndChat(Logger, "interaction_started", endingVoiceSessionId, "end_interaction_requested");
+            }
             await Concierge.EndAsync(credential);
+            if (endingVoiceSessionId is not null)
+            {
+                VoiceTelemetry.RecordEndChat(Logger, "interaction_completed", endingVoiceSessionId, "end_interaction_succeeded");
+            }
             if (!IsCurrentSession(currentVersion)) return;
             await CompleteEndAsync();
+            if (endingVoiceSessionId is not null)
+            {
+                VoiceTelemetry.RecordEndChat(Logger, "completed", endingVoiceSessionId, "session_cleared");
+            }
         }
         catch (ConciergeApiException exception)
         {
+            if (endingVoiceSessionId is not null)
+            {
+                VoiceTelemetry.RecordEndChat(Logger, "completion_failed", endingVoiceSessionId,
+                    IsUnauthorized(exception) ? "unauthorized" : "api_failure");
+            }
             if (!IsCurrentSession(currentVersion)) return;
             if (IsUnauthorized(exception))
             {
@@ -542,8 +569,20 @@ public partial class Home : ComponentBase, IAsyncDisposable
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            if (endingVoiceSessionId is not null)
+            {
+                VoiceTelemetry.RecordEndChat(Logger, "completion_failed", endingVoiceSessionId, "service_or_browser_failure");
+            }
             if (!IsCurrentSession(currentVersion)) return;
             model = model.EndFailed("The chat could not be ended because the concierge service is unavailable.");
+        }
+        catch (OperationCanceledException)
+        {
+            if (endingVoiceSessionId is not null)
+            {
+                VoiceTelemetry.RecordEndChat(Logger, "completion_failed", endingVoiceSessionId, "cancelled");
+            }
+            throw;
         }
         finally
         {
@@ -561,6 +600,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     {
         voiceMode = false;
         voiceSessionId = null;
+        StopWatchingVoiceRelay();
         model = model.CompleteEnd();
         verificationError = null;
         suggestionsExpanded = false;
@@ -593,6 +633,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
         voiceMode = true;
         voiceSessionId = null;
+        StopWatchingVoiceRelay();
         await ConnectVoiceAsync();
     }
 
@@ -605,6 +646,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
         }
 
         voiceReference ??= DotNetObjectReference.Create(this);
+        // The previous connection's closure is no longer news; OnVoiceSession watches the new one.
+        StopWatchingVoiceRelay();
         voiceState = "connecting";
         voiceMessage = null;
         await JavaScript.InvokeVoidAsync("conciergeVoice.start", session.Credential, voiceSessionId, voiceReference);
@@ -626,6 +669,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             return;
         }
 
+        StopWatchingVoiceRelay();
         await JavaScript.InvokeVoidAsync("conciergeVoice.stop");
         voiceState = "disconnected";
         voiceMessage = message;
@@ -634,7 +678,83 @@ public partial class Home : ComponentBase, IAsyncDisposable
     /// <summary>Called from <c>voice.js</c> with the server's voice session ID, which Reconnect reuses.</summary>
     [JSInvokable]
     public Task OnVoiceSession(string id) =>
-        InvokeAsync(() => voiceSessionId = voiceMode ? id : null);
+        InvokeAsync(() =>
+        {
+            voiceSessionId = voiceMode ? id : null;
+            WatchVoiceRelay(voiceSessionId);
+        });
+
+    /// <summary>
+    /// Subscribes to server-side relay closure for <paramref name="id"/>. The browser also reports
+    /// closure through <see cref="OnVoiceState"/>, but that JS call is lost if the Blazor circuit is
+    /// disconnected when the voice socket drops; the relay runs in this process, so the server
+    /// pushes the closure itself.
+    /// </summary>
+    private void WatchVoiceRelay(string? id)
+    {
+        StopWatchingVoiceRelay();
+        if (disposed || id is null || !Guid.TryParse(id, out var voiceSession))
+        {
+            return;
+        }
+
+        voiceClosedSubscription = VoiceSessions.SubscribeConnectionClosed(
+            voiceSession,
+            // Runs on the relay's thread; queue onto the circuit without blocking it.
+            connectionNumber => _ = InvokeAsync(() => ApplyVoiceRelayClosedAsync(id, connectionNumber))
+                .ContinueWith(
+                    task => Logger.LogWarning(task.Exception,
+                        "Applying voice relay closure failed for session {VoiceSessionId} (connection {ConnectionNumber}).",
+                        id, connectionNumber),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default));
+    }
+
+    private void StopWatchingVoiceRelay()
+    {
+        voiceClosedSubscription?.Dispose();
+        voiceClosedSubscription = null;
+    }
+
+    private async Task ApplyVoiceRelayClosedAsync(string id, int connectionNumber)
+    {
+        if (disposed || !voiceMode || !StringComparer.Ordinal.Equals(voiceSessionId, id))
+        {
+            return;
+        }
+
+        // The browser's own report is more specific (e.g. 4401 expiry); keep it.
+        if (voiceState == "disconnected")
+        {
+            return;
+        }
+
+        Logger.LogInformation(
+            "Voice relay closure applied by server for session {VoiceSessionId} (connection {ConnectionNumber}); browser last reported {VoiceState}.",
+            id, connectionNumber, voiceState);
+        voiceState = "disconnected";
+        voiceMessage = "Voice disconnected.";
+        // No JS here: the circuit may be down. Reconnect's conciergeVoice.start ends any stale browser voice.
+        await LoadHistoryAndReconcileAsync(replayPending: false);
+        StateHasChanged();
+    }
+
+    /// <summary>Runs the existing End Chat flow after a confirmed spoken or idle voice ending.</summary>
+    [JSInvokable]
+    public Task OnVoiceEndRequested() =>
+        InvokeAsync(async () =>
+        {
+            VoiceTelemetry.RecordEndChat(Logger, "browser_callback_received", voiceSessionId, "browser_end_requested");
+            if (voiceMode && session?.Credential is not null && !isEnding)
+            {
+                await EndInteractionAsync();
+            }
+            else
+            {
+                VoiceTelemetry.RecordEndChat(Logger, "browser_callback_ignored", voiceSessionId, "inactive_or_already_ending");
+            }
+        });
 
     /// <summary>Called from <c>voice.js</c> when the relay changes state or closes.</summary>
     [JSInvokable]
@@ -688,6 +808,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         disposed = true;
+        StopWatchingVoiceRelay();
         model = model.InvalidateOutstandingWork();
         if (voiceReference is not null)
         {

@@ -123,7 +123,8 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<Concierge.Web.Voice.VoiceSessionRegistry>();
         builder.Services.AddScoped<IConciergeService, ConciergeService>();
-        builder.Services.AddSingleton<IChatClient>(chatClient);
+        builder.Services.AddSingleton<IChatClient>(
+            new BoundedChatClient(chatClient, TimeSpan.FromMinutes(2), maxConcurrency: 4));
         builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
             new ZeroEmbeddingGenerator());
         builder.Services.AddSingleton<IOptions<EmbeddingProviderOptions>>(
@@ -271,6 +272,9 @@ internal sealed class ScriptedChatClient : IChatClient
     /// <summary>Fails summary calls while still allowing guest answers to succeed.</summary>
     public bool FailSummary { get; set; }
 
+    /// <summary>Returns a model-generated end_chat call for a guest answer when enabled.</summary>
+    public bool ReturnEndChatFunctionCall { get; set; }
+
     /// <summary>Overrides the deterministic answer text for isolation tests.</summary>
     public Func<IReadOnlyList<ChatMessage>, string>? AnswerFactory { get; set; }
 
@@ -288,7 +292,12 @@ internal sealed class ScriptedChatClient : IChatClient
         var isSummary = snapshot.FirstOrDefault()?.Text.StartsWith(
             "You maintain a short continuity summary",
             StringComparison.Ordinal) == true;
-        requests.Enqueue(new RecordedChatRequest(snapshot, options?.MaxOutputTokens, isSummary));
+        requests.Enqueue(new RecordedChatRequest(
+            snapshot,
+            options?.MaxOutputTokens,
+            isSummary,
+            options?.Tools?.OfType<AIFunction>().Select(tool => tool.Name).ToArray() ?? [],
+            options?.AdditionalProperties?.ContainsKey(ConciergeEndChat.ModelOptionKey) == true));
         firstCall.TrySetResult();
         if (isSummary && SummaryGate is { } summaryGate)
         {
@@ -308,6 +317,23 @@ internal sealed class ScriptedChatClient : IChatClient
             ? $"Summary {Interlocked.Increment(ref summaryCount)}"
             : AnswerFactory?.Invoke(snapshot)
                 ?? $"Answer: {snapshot.Last(message => message.Role == ChatRole.User).Text}";
+        if (!isSummary && ReturnEndChatFunctionCall)
+        {
+            return new ChatResponse(
+                [
+                    new ChatMessage(ChatRole.Assistant,
+                    [
+                        new FunctionCallContent(
+                            "call_end_chat_test",
+                            ConciergeEndChat.FunctionName,
+                            new Dictionary<string, object?>()),
+                    ]),
+                ])
+            {
+                FinishReason = ChatFinishReason.ToolCalls,
+            };
+        }
+
         return new ChatResponse([new ChatMessage(ChatRole.Assistant, text)])
         {
             FinishReason = isSummary ? ChatFinishReason.Stop : AnswerFinishReason ?? ChatFinishReason.Stop,
@@ -340,7 +366,9 @@ internal sealed class ScriptedChatClient : IChatClient
 internal sealed record RecordedChatRequest(
     IReadOnlyList<ChatMessage> Messages,
     int? MaxOutputTokens,
-    bool IsSummary)
+    bool IsSummary,
+    IReadOnlyList<string> Tools,
+    bool HasEndChatMarker)
 {
     public string LastUserText => Messages.Last(message => message.Role == ChatRole.User).Text;
 

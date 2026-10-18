@@ -114,6 +114,37 @@ public sealed class AuthenticatedGuestContextTests(PostgreSqlFixture postgreSql)
     }
 
     [Fact]
+    public async Task VoiceEndChatFunctionIsMaterializedInsideTheDurableModelActivity()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var today = ConciergeTestHost.HotelToday;
+        var stayId = await host.SeedStayAsync("Phillip", "112", today, today.AddDays(1));
+        var verified = await host.Http.PostAsJsonAsync(
+            "/api/concierge/sessions", new ConciergeVerificationRequest("Phillip", "112"));
+        verified.EnsureSuccessStatusCode();
+        var credential = (await verified.Content.ReadFromJsonAsync<ConciergeSessionResponse>())!.Credential;
+        using var scope = host.App.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IConciergeService>();
+        var authorization = await service.AuthorizeVoiceAsync(credential);
+        Assert.Equal(stayId, authorization.Session.StayId);
+
+        host.ChatClient.ReturnEndChatFunctionCall = true;
+        var result = await service.SubmitVoiceTurnAsync(
+            authorization.Session,
+            "voice-end-chat",
+            "Please end this chat.",
+            enableEndChatFunction: true);
+
+        var functionCall = Assert.IsType<ConciergeEndChatFunctionCall>(result.EndChatFunctionCall);
+        Assert.Equal("call_end_chat_test", functionCall.Id);
+        Assert.Equal(ConciergeEndChat.FunctionName, functionCall.Name);
+        Assert.Equal("{}", functionCall.Arguments);
+        Assert.Equal(ConciergeEndChat.Farewell, result.AssistantMessage);
+        Assert.False(host.ChatClient.AnswerRequests[^1].HasEndChatMarker);
+        Assert.Contains(ConciergeEndChat.FunctionName, host.ChatClient.AnswerRequests[^1].Tools);
+    }
+
+    [Fact]
     public async Task HistoryWithAnAdmittedGuestlessTurnStillReplays()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);

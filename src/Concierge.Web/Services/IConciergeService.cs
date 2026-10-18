@@ -61,7 +61,8 @@ public interface IConciergeService
         ConciergeSessionContext session,
         string turnId,
         string userMessage,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        bool enableEndChatFunction = false);
 }
 
 /// <summary>A chat session authorized for voice; <paramref name="HasTurns"/> selects the greeting.</summary>

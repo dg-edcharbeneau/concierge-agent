@@ -185,7 +185,13 @@ user-secrets store. For example, for chat:
 aspire secret set "AI:Chat:Provider" "Foundry" --apphost src/Concierge.AppHost
 aspire secret set "AI:Chat:Endpoint" "https://<resource>.openai.azure.com/" --apphost src/Concierge.AppHost
 aspire secret set "AI:Chat:Model" "<deployment>" --apphost src/Concierge.AppHost
+aspire secret set "AI:Chat:RequestTimeoutSeconds" "15" --apphost src/Concierge.AppHost
 ```
+
+The Development timeout (`180`) is sized for local Ollama. Foundry chat calls
+normally finish in 2–4 seconds but occasionally stall for about 30 seconds. A
+15-second timeout fails the stalled attempt so Temporal retries the model
+activity (up to 5 attempts) instead of holding the voice turn.
 
 With Ollama, the AppHost creates no Foundry parameters, so none appear on the
 dashboard. Ollama does not use `ApiKey` or Azure credentials.
@@ -206,8 +212,8 @@ AppHost user-secret overrides the empty default.
 | `Parameters:deepgram-api-key` | `Deepgram:ApiKey` in `Concierge.Web` | Optional for text-only use; required when browser voice is implemented. |
 
 The AppHost's base `appsettings.json` selects Foundry, uses `768` embedding
-dimensions, a `32768` chat context window, `60`-second timeouts, and concurrency
-`4`. Its endpoints and models are deliberately empty: outside `Development`,
+dimensions, a `32768` chat context window, a `15`-second chat timeout, a
+`60`-second embeddings timeout, and concurrency `4`. Its endpoints and models are deliberately empty: outside `Development`,
 configure `AI:Chat:Endpoint`, `AI:Chat:Model`, `AI:Embeddings:Endpoint`, and
 `AI:Embeddings:Model`. "Missing endpoint or model" means the service URL or
 deployment name has not been supplied, not that the deployed model is missing.

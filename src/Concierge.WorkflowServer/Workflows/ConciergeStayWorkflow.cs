@@ -352,7 +352,7 @@ public sealed class ConciergeStayWorkflow
     [WorkflowUpdate(ConciergeWorkflowNames.SubmitTurnUpdate)]
     public async Task<ConciergeTurnResult> SubmitTurnAsync(ConciergeTurnSubmission request)
     {
-        var fingerprint = Fingerprint(request.Channel, request.UserMessage);
+        var fingerprint = Fingerprint(request.Channel, request.UserMessage, request.EnableEndChatFunction);
         if (acceptedTurns.TryGetValue(request.TurnId, out var accepted))
         {
             return MatchOrReject(accepted, fingerprint);
@@ -446,10 +446,52 @@ public sealed class ConciergeStayWorkflow
                 ? BuildMemoryTurnMessages(
                     request.UserMessage, retrieval, nextStayMemory!, out includedRecentTurns)
                 : BuildLegacyTurnMessages(request.UserMessage, retrieval);
+            var chatOptions = new ChatOptions { MaxOutputTokens = AnswerMaxOutputTokens };
+            if (request.EnableEndChatFunction)
+            {
+                // The durable client rejects ChatOptions.Tools in workflow code. This serializable
+                // marker is materialized as the single MEAI function inside the model activity.
+                chatOptions.AdditionalProperties ??= [];
+                chatOptions.AdditionalProperties[ConciergeEndChat.ModelOptionKey] = "true";
+            }
+
             var response = await chatClient.GetResponseAsync(
                 answerMessages,
-                new ChatOptions { MaxOutputTokens = AnswerMaxOutputTokens });
-            var answer = response.Text;
+                chatOptions);
+            var calls = response.Messages
+                .SelectMany(message => message.Contents)
+                .OfType<FunctionCallContent>()
+                .ToArray();
+            ConciergeEndChatFunctionCall? endChatCall = null;
+            string answer;
+            if (calls.Length > 0)
+            {
+                if (!request.EnableEndChatFunction
+                    || calls.Length != 1
+                    || !StringComparer.Ordinal.Equals(calls[0].Name, ConciergeEndChat.FunctionName)
+                    || string.IsNullOrWhiteSpace(calls[0].CallId)
+                    || calls[0].CallId.Length > 128
+                    || calls[0].Arguments is not { Count: 0 })
+                {
+                    throw new ApplicationFailureException(
+                        "The model returned an unsupported function call.",
+                        errorType: UnavailableErrorType,
+                        nonRetryable: true);
+                }
+
+                endChatCall = new ConciergeEndChatFunctionCall(
+                    calls[0].CallId,
+                    calls[0].Name,
+                    "{}");
+                // Store the completion text with the accepted user turn; Deepgram first receives
+                // the function call, then receives this farewell after the client-side result POST.
+                answer = ConciergeEndChat.Farewell;
+            }
+            else
+            {
+                answer = response.Text;
+            }
+
             if (string.IsNullOrWhiteSpace(answer))
             {
                 throw new ApplicationFailureException(
@@ -481,7 +523,7 @@ public sealed class ConciergeStayWorkflow
                 TrimRecentTurnsToStorageBudget();
             }
 
-            var result = new ConciergeTurnResult(turn.TurnId, answer, turn.Sequence);
+            var result = new ConciergeTurnResult(turn.TurnId, answer, turn.Sequence, endChatCall);
             acceptedTurns.Add(turn.TurnId, new AcceptedTurn(fingerprint, result));
             runTurns.Add(turn);
             if (!useStayMemory)
@@ -543,8 +585,11 @@ public sealed class ConciergeStayWorkflow
         }
     }
 
-    internal static string Fingerprint(string channel, string userMessage) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{channel}\n{userMessage}")));
+    internal static string Fingerprint(string channel, string userMessage, bool enableEndChatFunction = false) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            enableEndChatFunction
+                ? $"{channel}\n{userMessage}\nend-chat-function"
+                : $"{channel}\n{userMessage}")));
 
     private List<ChatMessage> BuildLegacyTurnMessages(
         string userMessage,
