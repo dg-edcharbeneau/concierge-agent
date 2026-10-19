@@ -145,6 +145,53 @@ public sealed class ThinkEndpointTests : IDisposable
         Assert.True(submission.EnableEndChatFunction);
         // Admitted Temporal work must not depend on the HTTP request's lifetime.
         Assert.False(submission.CancellationToken.CanBeCanceled);
+
+        // The relay binds this completed Think response to the next assistant playback event.
+        connection.Session.StartReplyPlayback();
+        var interruptionNumber = connection.Session.BeginPlaybackInterruption();
+        Assert.True(connection.Session.TryCompletePlaybackInterruption(
+            interruptionNumber, true, turnId, out var playbackTurnId));
+        Assert.Equal(turnId, playbackTurnId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedOrCanceledSseWriteRemovesItsPlaybackRegistration(bool cancelRequest)
+    {
+        var connection = registry.Open(Stay, null);
+        var failedContext = new DefaultHttpContext();
+        if (cancelRequest)
+        {
+            failedContext.RequestAborted = new CancellationToken(canceled: true);
+        }
+        else
+        {
+            failedContext.Response.Body = new FailedFlushStream();
+        }
+
+        if (cancelRequest)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                ThinkEndpoint.WriteRegisteredSseAsync(
+                    failedContext, connection.Session, "stale-turn", "model", 1, "Stale answer"));
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() =>
+                ThinkEndpoint.WriteRegisteredSseAsync(
+                    failedContext, connection.Session, "stale-turn", "model", 1, "Stale answer"));
+        }
+
+        using var nextResponse = await PostAsync(Json(Chat(("user", "Next question"))), connection.Bearer);
+        Assert.Equal(HttpStatusCode.OK, nextResponse.StatusCode);
+        var nextTurnId = ThinkRequest.TurnId(connection.Session.Id, connection.Number, 1, "Next question");
+        connection.Session.StartReplyPlayback();
+        var interruptionNumber = connection.Session.BeginPlaybackInterruption();
+
+        Assert.True(connection.Session.TryCompletePlaybackInterruption(
+            interruptionNumber, true, nextTurnId, out var playbackTurnId));
+        Assert.Equal(nextTurnId, playbackTurnId);
     }
 
     [Fact]
@@ -465,6 +512,10 @@ public sealed class ThinkEndpointTests : IDisposable
         /// <summary>Not used by the Think handler.</summary>
         public Task EndAsync(string? bearerCredential, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+        /// <summary>Not used by the Think handler.</summary>
+        public Task MarkVoiceTurnInterruptedAsync(
+            ConciergeSessionContext session, string turnId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     private sealed class BodyTracker
@@ -474,6 +525,12 @@ public sealed class ThinkEndpointTests : IDisposable
         public long BytesRead => Interlocked.Read(ref bytesRead);
 
         public void Add(int count) => Interlocked.Add(ref bytesRead, count);
+    }
+
+    private sealed class FailedFlushStream : MemoryStream
+    {
+        public override Task FlushAsync(CancellationToken cancellationToken) =>
+            Task.FromException(new IOException("SSE flush failed."));
     }
 
     // TestServer has no real listener: set the server-observed port and observe body reads.

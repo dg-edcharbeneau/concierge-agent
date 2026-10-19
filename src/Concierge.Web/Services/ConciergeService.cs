@@ -113,6 +113,35 @@ public sealed class ConciergeService(
         return await ExecuteTurnAsync(session, request, updateId: turnId, cancellationToken, enableEndChatFunction);
     }
 
+    /// <inheritdoc/>
+    public async Task MarkVoiceTurnInterruptedAsync(
+        ConciergeSessionContext session,
+        string turnId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (string.IsNullOrWhiteSpace(turnId) || turnId.Length > ConciergeTurnLimits.MaxTurnIdLength)
+        {
+            throw new ConciergeApiException(
+                "invalid_request",
+                $"Provide a nonblank TurnId of at most {ConciergeTurnLimits.MaxTurnIdLength} characters.",
+                StatusCodes.Status400BadRequest);
+        }
+
+        try
+        {
+            var workflow = await GetStayWorkflowAsync(session, cancellationToken);
+            await workflow.ExecuteUpdateAsync(
+                ConciergeWorkflowNames.MarkTurnInterruptedUpdate,
+                [new ConciergeTurnInterruption(turnId)],
+                UpdateOptions(cancellationToken));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            throw MapTemporalFailure(exception, nameof(MarkVoiceTurnInterruptedAsync));
+        }
+    }
+
     private async Task<ConciergeTurnResult> ExecuteTurnAsync(
         ConciergeSessionContext session,
         ConciergeTurnRequest request,

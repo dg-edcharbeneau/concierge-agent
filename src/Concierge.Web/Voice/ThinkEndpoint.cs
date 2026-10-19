@@ -69,9 +69,12 @@ internal static class ThinkEndpoint
 
             VoiceTelemetry.RecordEndChat(logger, "tool_result_accepted", connection, "confirmed_call", callId);
             var createdAt = services.GetRequiredService<TimeProvider>().GetUtcNow().ToUnixTimeSeconds();
-            await WriteSseAsync(
+            var farewellTurnId = ThinkRequest.TurnId(
+                session.Id, connection.Number, request.UserOrdinal, request.UserMessage);
+            await WriteRegisteredSseAsync(
                 context,
-                ThinkRequest.TurnId(session.Id, connection.Number, request.UserOrdinal, request.UserMessage),
+                session,
+                farewellTurnId,
                 request.Model,
                 createdAt,
                 ConciergeEndChat.Farewell);
@@ -159,8 +162,34 @@ internal static class ThinkEndpoint
             return;
         }
 
-        await WriteSseAsync(context, turnId, request.Model, created, result.AssistantMessage);
+        // Register before Deepgram can receive the response, so the subsequent assistant event
+        // binds playback to this accepted Temporal turn rather than inferring from its ordinal.
+        await WriteRegisteredSseAsync(context, session, turnId, request.Model, created, result.AssistantMessage);
         VoiceTelemetry.RecordThink(requestStarted, "answered");
+    }
+
+    internal static async Task WriteRegisteredSseAsync(
+        HttpContext context,
+        VoiceSession session,
+        string turnId,
+        string model,
+        long created,
+        string answer)
+    {
+        var registration = session.RegisterReplyForPlayback(turnId);
+        var writeCompleted = false;
+        try
+        {
+            await WriteSseAsync(context, turnId, model, created, answer);
+            writeCompleted = true;
+        }
+        finally
+        {
+            if (!writeCompleted)
+            {
+                session.CancelReplyForPlayback(registration);
+            }
+        }
     }
 
     private static async Task WriteSseAsync(

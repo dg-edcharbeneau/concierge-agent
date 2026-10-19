@@ -344,6 +344,10 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
             ConciergeSessionContext session, string turnId, string userMessage,
             CancellationToken cancellationToken = default,
             bool enableEndChatFunction = false) => throw Failure();
+        /// <inheritdoc/>
+        public Task MarkVoiceTurnInterruptedAsync(
+            ConciergeSessionContext session, string turnId,
+            CancellationToken cancellationToken = default) => throw Failure();
     }
 
     private static WebApplicationFactory<ConciergeService> CreateFactory(

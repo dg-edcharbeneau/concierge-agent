@@ -32,30 +32,35 @@ public sealed class VoiceInterruptionTimingTests
     public void ReadsOnlyPositiveInterruptionSilenceAcknowledgements()
     {
         Assert.True(VoiceRelay.TryReadInterruptionSilenced(
-            Encoding.UTF8.GetBytes("""{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":true}"""),
-            out var number, out var bargeIn));
+            Encoding.UTF8.GetBytes("""{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":true,"playbackToken":"turn-7"}"""),
+            out var number, out var bargeIn, out var playbackToken));
         Assert.Equal(7, number);
         Assert.True(bargeIn);
+        Assert.Equal("turn-7", playbackToken);
         Assert.True(VoiceRelay.TryReadInterruptionSilenced(
-            Encoding.UTF8.GetBytes("""{"type":"InterruptionSilenced","interruptionNumber":8,"bargeIn":false}"""),
-            out _, out bargeIn));
+            Encoding.UTF8.GetBytes("""{"type":"InterruptionSilenced","interruptionNumber":8,"bargeIn":false,"playbackToken":null}"""),
+            out _, out bargeIn, out playbackToken));
         Assert.False(bargeIn);
+        Assert.Null(playbackToken);
 
         foreach (var message in new[]
         {
             """{"type":"PlaybackAck","interruptionNumber":7}""",
             """{"type":"InterruptionSilenced","interruptionNumber":0}""",
             """{"type":"InterruptionSilenced","interruptionNumber":"7"}""",
-            """{"type":"InterruptionSilenced","interruptionNumber":7}""",
-            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":"true"}""",
-            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":1}""",
-            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":null}""",
-            """{"type":"InterruptionSilenced","interruptionNumber":0,"bargeIn":true}""",
+            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":true}""",
+            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":"true","playbackToken":null}""",
+            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":1,"playbackToken":null}""",
+            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":null,"playbackToken":null}""",
+            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":true,"playbackToken":""}""",
+            """{"type":"InterruptionSilenced","interruptionNumber":7,"bargeIn":true,"playbackToken":42}""",
+            """{"type":"InterruptionSilenced","interruptionNumber":0,"bargeIn":true,"playbackToken":null}""",
             "[]",
             "{not json",
         })
         {
-            Assert.False(VoiceRelay.TryReadInterruptionSilenced(Encoding.UTF8.GetBytes(message), out _, out _));
+            Assert.False(VoiceRelay.TryReadInterruptionSilenced(
+                Encoding.UTF8.GetBytes(message), out _, out _, out _));
         }
     }
 

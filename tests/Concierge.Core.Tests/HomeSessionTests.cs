@@ -323,6 +323,32 @@ public sealed class HomeSessionTests
         Assert.DoesNotContain(markup, content => content.Contains("<b>", StringComparison.Ordinal) || content.Contains("**x**", StringComparison.Ordinal) || content.Contains("**p**", StringComparison.Ordinal));
     }
 
+    /// <summary>Shows the interruption marker only on interrupted assistant replies.</summary>
+    [Fact]
+    public async Task InterruptedTranscriptMarkerAppearsOnlyForInterruptedAssistantReplies()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        harness.Set("turns", new List<ConciergeTranscriptTurn>
+        {
+            new("interrupted-turn", 1, "voice", "Interrupted guest", "Interrupted answer", DateTimeOffset.UtcNow, Interrupted: true),
+            new("ordinary-turn", 2, "web", "Ordinary guest", "Ordinary answer", DateTimeOffset.UtcNow)
+        });
+
+        await harness.Call("StateHasChanged");
+        var (text, markup) = harness.RenderedContent();
+        var messages = harness.Get<IEnumerable<object>>("Messages").ToArray();
+        var interruptedFlags = messages
+            .Select(message => (bool)message.GetType().GetProperty("Interrupted")!.GetValue(message)!)
+            .ToArray();
+        const string indicator = "<span class=\"interrupted-indicator\">Interrupted</span>";
+        var indicatorCount = text.Count(item => item == "Interrupted")
+            + markup.Sum(item => item.Split(indicator, StringSplitOptions.None).Length - 1);
+
+        Assert.Equal(new[] { false, true, false, false }, interruptedFlags);
+        Assert.Equal(1, indicatorCount);
+    }
+
     /// <summary>Shows Reconnect when the relay closes while the browser's report was lost.</summary>
     [Fact]
     public async Task ServerRelayClosureDisconnectsVoiceWhenTheBrowserReportWasLost()
@@ -587,6 +613,12 @@ public sealed class HomeSessionTests
             string userMessage,
             CancellationToken cancellationToken = default,
             bool enableEndChatFunction = false) =>
+            throw new NotSupportedException();
+        /// <summary>Voice is outside these component tests.</summary>
+        public Task MarkVoiceTurnInterruptedAsync(
+            ConciergeSessionContext session,
+            string turnId,
+            CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
     }
 }

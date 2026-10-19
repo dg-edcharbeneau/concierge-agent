@@ -73,6 +73,7 @@
                         type: "InterruptionSilenced",
                         interruptionNumber: message.interruptionNumber,
                         bargeIn: message.bargeIn,
+                        playbackToken: message.playbackToken,
                     }));
                 }
                 break;
@@ -90,14 +91,24 @@
     function onSocketMessage(voice, event) {
         if (typeof event.data !== "string") {
             voice.playbackActive = true;
+            const playbackToken = voice.pendingPlaybackToken ?? null;
+            voice.pendingPlaybackToken = null;
             const pcm = new Int16Array(event.data);
             const samples = new Float32Array(pcm.length);
             for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 0x8000;
-            voice.playNode.port.postMessage({ type: "audio", samples }, [samples.buffer]);
+            voice.playNode.port.postMessage({ type: "audio", samples, playbackToken }, [samples.buffer]);
             return;
         }
 
         const message = JSON.parse(event.data);
+        if (message.type === "PlaybackSegment") {
+            voice.pendingPlaybackToken = typeof message.playbackToken === "string" && message.playbackToken.length > 0
+                ? message.playbackToken
+                : null;
+            return;
+        }
+        // A segment token applies only to the immediately following binary PCM message.
+        voice.pendingPlaybackToken = null;
         switch (message.type) {
             case "VoiceSession":
                 voice.dotNet.invokeMethodAsync("OnVoiceSession", message.voiceSessionId).catch(() => {});

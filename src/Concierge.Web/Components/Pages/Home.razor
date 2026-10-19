@@ -202,6 +202,10 @@
                                             else
                                             {
                                                 <AssistantResponse Text="@message.Text" />
+                                                @if (message.Interrupted)
+                                                {
+                                                    <span class="interrupted-indicator">Interrupted</span>
+                                                }
                                             }
                                         </div>
                                     </div>

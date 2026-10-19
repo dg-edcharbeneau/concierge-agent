@@ -51,10 +51,10 @@ internal static class VoiceRelayEndpoint
         }
 
         ConciergeVoiceAuthorization authorization;
+        var concierge = services.GetRequiredService<IConciergeService>();
         try
         {
-            authorization = await services.GetRequiredService<IConciergeService>()
-                .AuthorizeVoiceAsync(credential, context.RequestAborted);
+            authorization = await concierge.AuthorizeVoiceAsync(credential, context.RequestAborted);
         }
         catch (ConciergeApiException exception) when (exception.StatusCode == StatusCodes.Status401Unauthorized)
         {
@@ -87,7 +87,9 @@ internal static class VoiceRelayEndpoint
                 connection,
                 logger,
                 services.GetRequiredService<TimeProvider>(),
-                TimeSpan.FromMinutes(options.IdleTimeoutMinutes))
+                TimeSpan.FromMinutes(options.IdleTimeoutMinutes),
+                (turnId, cancellationToken) =>
+                    concierge.MarkVoiceTurnInterruptedAsync(connection.Session.Stay, turnId, cancellationToken))
                 .RunAsync(options.ApiKey, settings, context.RequestAborted);
         }
         catch (Exception exception) when (exception is WebSocketException or OperationCanceledException)

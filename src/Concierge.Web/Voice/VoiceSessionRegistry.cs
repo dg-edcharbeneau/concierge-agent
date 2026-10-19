@@ -280,9 +280,14 @@ public sealed class VoiceSessionRegistry(
 public sealed class VoiceSession
 {
     private readonly Dictionary<string, Task<ConciergeTurnResult>> inFlight = new(StringComparer.Ordinal);
+    private readonly LinkedList<ReplyRegistration> repliesAwaitingPlayback = [];
+    private readonly HashSet<string> playbackTurnIds = new(StringComparer.Ordinal);
+    private readonly HashSet<int> playbackInterruptions = [];
     private readonly object activityGate = new();
     private DateTimeOffset lastSpeechUtc;
     private bool replyInProgress;
+    private string? activePlaybackTurnId;
+    private int playbackInterruptionNumber;
 
     public VoiceSession(Guid id, ConciergeSessionContext stay)
         : this(id, stay, DateTimeOffset.UtcNow)
@@ -396,6 +401,103 @@ public sealed class VoiceSession
     }
 
     /// <summary>
+    /// Registers the completed Think reply before it is returned to Deepgram. The assistant's
+    /// ConversationText event binds that exact turn ID to subsequent browser playback.
+    /// </summary>
+    internal ReplyRegistration RegisterReplyForPlayback(string turnId)
+    {
+        lock (activityGate)
+        {
+            var registration = new ReplyRegistration(turnId);
+            registration.PendingNode = repliesAwaitingPlayback.AddLast(registration);
+            return registration;
+        }
+    }
+
+    /// <summary>Removes an unwritten reply without disturbing a registration already bound to playback.</summary>
+    internal void CancelReplyForPlayback(ReplyRegistration registration)
+    {
+        lock (activityGate)
+        {
+            if (registration.PendingNode is { List: var list } node
+                && ReferenceEquals(list, repliesAwaitingPlayback))
+            {
+                repliesAwaitingPlayback.Remove(node);
+                registration.PendingNode = null;
+            }
+        }
+    }
+
+    /// <summary>Binds the next completed Think reply to the assistant response starting playback.</summary>
+    internal void StartReplyPlayback()
+    {
+        lock (activityGate)
+        {
+            if (repliesAwaitingPlayback.First is { } first)
+            {
+                repliesAwaitingPlayback.RemoveFirst();
+                first.Value.PendingNode = null;
+                activePlaybackTurnId = first.Value.TurnId;
+                playbackTurnIds.Add(first.Value.TurnId);
+            }
+            else
+            {
+                activePlaybackTurnId = null;
+            }
+        }
+    }
+
+    /// <summary>The turn token attached to audio currently being received from Deepgram.</summary>
+    internal string? ActiveReplyPlaybackToken
+    {
+        get
+        {
+            lock (activityGate)
+            {
+                return activePlaybackTurnId;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Creates a session-wide interruption number, unique across reconnects. The browser later
+    /// identifies the rendered reply by the token attached to its audio.
+    /// </summary>
+    internal int BeginPlaybackInterruption()
+    {
+        lock (activityGate)
+        {
+            var interruptionNumber = checked(++playbackInterruptionNumber);
+            playbackInterruptions.Add(interruptionNumber);
+            activePlaybackTurnId = null;
+            return interruptionNumber;
+        }
+    }
+
+    /// <summary>Consumes one worklet acknowledgement and validates its rendered turn token.</summary>
+    internal bool TryCompletePlaybackInterruption(
+        int interruptionNumber,
+        bool bargeIn,
+        string? playbackToken,
+        out string? turnId)
+    {
+        lock (activityGate)
+        {
+            if (playbackInterruptions.Remove(interruptionNumber)
+                && bargeIn
+                && playbackToken is not null
+                && playbackTurnIds.Contains(playbackToken))
+            {
+                turnId = playbackToken;
+                return true;
+            }
+
+            turnId = null;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Joins the in-flight turn with <paramref name="turnId"/> or starts it with <paramref name="submit"/>.
     /// Deepgram can retry a Think call with the same history, so one ID must not submit twice.
     /// </summary>
@@ -431,6 +533,13 @@ public sealed class VoiceSession
                 inFlight.Remove(turnId);
             }
         }
+    }
+
+    internal sealed class ReplyRegistration(string turnId)
+    {
+        internal string TurnId { get; } = turnId;
+
+        internal LinkedListNode<ReplyRegistration>? PendingNode { get; set; }
     }
 }
 

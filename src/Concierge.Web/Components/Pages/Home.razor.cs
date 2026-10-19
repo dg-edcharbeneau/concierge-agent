@@ -92,7 +92,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
                 return new[]
                 {
                     new ChatMessage(turn.TurnId, turn.GuestMessage, true, timestamp, day),
-                    new ChatMessage(turn.TurnId, turn.AssistantMessage, false, timestamp, day)
+                    new ChatMessage(turn.TurnId, turn.AssistantMessage, false, timestamp, day, turn.Interrupted)
                 };
             }).ToList();
 
@@ -882,5 +882,6 @@ public partial class Home : ComponentBase, IAsyncDisposable
         string Text,
         bool IsGuest,
         DateTimeOffset Timestamp,
-        DateOnly HotelDay);
+        DateOnly HotelDay,
+        bool Interrupted = false);
 }

@@ -4,6 +4,7 @@ using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading.Channels;
 using Concierge.Contracts;
+using Concierge.Web.Services;
 
 namespace Concierge.Web.Voice;
 
@@ -31,7 +32,8 @@ internal sealed class VoiceRelay(
     VoiceConnection connection,
     ILogger logger,
     TimeProvider? timeProvider = null,
-    TimeSpan? idleTimeout = null)
+    TimeSpan? idleTimeout = null,
+    Func<string, CancellationToken, Task>? markVoiceTurnInterrupted = null)
 {
     public static readonly Uri AgentUri = new("wss://agent.deepgram.com/v1/agent/converse");
 
@@ -59,11 +61,11 @@ internal sealed class VoiceRelay(
     private readonly object endChatRequestGate = new();
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly TimeSpan idleLimit = idleTimeout ?? TimeSpan.FromMinutes(2);
+    private readonly Func<string, CancellationToken, Task>? markInterrupted = markVoiceTurnInterrupted;
     private int end = -1;
     private int endChatRequested;
     private int queuedMicFrames;
     private int interruptions;
-    private int interruptionSequence;
     private int activeInterruptionNumber;
     // Agent audio between UserStartedSpeaking and the user's final transcript belongs to a superseded reply.
     private bool suppressAgentAudio;
@@ -72,6 +74,8 @@ internal sealed class VoiceRelay(
     private bool endChatAfterPlaybackRequested;
 
     internal bool EndChatFlowRequested => Volatile.Read(ref endChatRequested) != 0;
+
+    internal int ActiveInterruptionNumber => activeInterruptionNumber;
 
     internal bool EndChatAfterPlaybackRequested
     {
@@ -208,19 +212,9 @@ internal sealed class VoiceRelay(
                 continue;
             }
 
-            if (TryReadInterruptionSilenced(data, out var interruptionNumber, out var bargeIn))
+            if (TryReadInterruptionSilenced(data, out var interruptionNumber, out var bargeIn, out var playbackToken))
             {
-                if (interruptionTimings.TryComplete(interruptionNumber, out var durationMilliseconds))
-                {
-                    logger.LogInformation(
-                        "Voice worklet silence acknowledged after {InterruptionDurationMilliseconds:F1} ms "
-                        + "(connection {ConnectionNumber}, interruption {InterruptionNumber}, browser-rendered barge-in {BargeIn}).",
-                        durationMilliseconds, connection.Number, interruptionNumber, bargeIn);
-                    VoiceTelemetry.InterruptionSilenced.Record(
-                        durationMilliseconds / 1000,
-                        new KeyValuePair<string, object?>("barge_in", bargeIn));
-                }
-
+                await HandleInterruptionSilencedAsync(interruptionNumber, bargeIn, playbackToken);
                 continue;
             }
 
@@ -339,10 +333,14 @@ internal sealed class VoiceRelay(
         }
 
         // Bound each send quantum so one large Deepgram message cannot exceed the playback lead.
+        var playbackToken = connection.Session.ActiveReplyPlaybackToken;
         for (var offset = 0; offset < data.Length; offset += PlaybackFrameBytes)
         {
             var length = Math.Min(PlaybackFrameBytes, data.Length - offset);
-            if (!toBrowser.TryEnqueue(new PlaybackItem(false, data.AsSpan(offset, length).ToArray())))
+            if (!toBrowser.TryEnqueue(new PlaybackItem(
+                false,
+                data.AsSpan(offset, length).ToArray(),
+                PlaybackToken: playbackToken)))
             {
                 Stop(VoiceRelayEnd.PlaybackBacklog);
                 return;
@@ -421,7 +419,7 @@ internal sealed class VoiceRelay(
                 toBrowser.FlushAudio();
                 if (!suppressAgentAudio)
                 {
-                    activeInterruptionNumber = Interlocked.Increment(ref interruptionSequence);
+                    activeInterruptionNumber = connection.Session.BeginPlaybackInterruption();
                     interruptionTimings.Begin(activeInterruptionNumber);
                 }
 
@@ -467,6 +465,10 @@ internal sealed class VoiceRelay(
                 {
                     farewellResponseStarted = true;
                     CompleteFarewellIfReady();
+                }
+                if (role == "assistant")
+                {
+                    connection.Session.StartReplyPlayback();
                 }
                 Forward(type, role);
                 break;
@@ -541,6 +543,47 @@ internal sealed class VoiceRelay(
         }
     }
 
+    internal async Task HandleInterruptionSilencedAsync(
+        int interruptionNumber,
+        bool bargeIn,
+        string? playbackToken = null)
+    {
+        if (interruptionTimings.TryComplete(interruptionNumber, out var durationMilliseconds))
+        {
+            logger.LogInformation(
+                "Voice worklet silence acknowledged after {InterruptionDurationMilliseconds:F1} ms "
+                + "(connection {ConnectionNumber}, interruption {InterruptionNumber}, browser-rendered barge-in {BargeIn}).",
+                durationMilliseconds, connection.Number, interruptionNumber, bargeIn);
+            VoiceTelemetry.InterruptionSilenced.Record(
+                durationMilliseconds / 1000,
+                new KeyValuePair<string, object?>("barge_in", bargeIn));
+        }
+
+        if (!connection.Session.TryCompletePlaybackInterruption(
+            interruptionNumber, bargeIn, playbackToken, out var turnId))
+        {
+            return;
+        }
+
+        if (markInterrupted is null)
+        {
+            throw new InvalidOperationException(
+                "A confirmed browser-rendered voice interruption has no Temporal reporting handler.");
+        }
+
+        try
+        {
+            await markInterrupted(turnId!, CancellationToken.None);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(
+                "Confirmed voice interruption could not be recorded in the stay workflow. Cause types: {CauseTypes}.",
+                ConciergeDiagnostics.ExceptionTypeChain(exception));
+            throw;
+        }
+    }
+
     private static string? ReadString(JsonElement root, string name) =>
         root.ValueKind == JsonValueKind.Object
         && root.TryGetProperty(name, out var value)
@@ -602,6 +645,14 @@ internal sealed class VoiceRelay(
         while (!stopping.IsCancellationRequested)
         {
             var item = await toBrowser.DequeueAsync(pacer, stopping.Token);
+            if (!item.IsText && item.PlaybackToken is { } playbackToken)
+            {
+                await browser.SendAsync(
+                    JsonSerializer.SerializeToUtf8Bytes(new { type = "PlaybackSegment", playbackToken }),
+                    WebSocketMessageType.Text,
+                    true,
+                    stopping.Token);
+            }
             await browser.SendAsync(
                 item.Data,
                 item.IsText ? WebSocketMessageType.Text : WebSocketMessageType.Binary,
@@ -694,10 +745,15 @@ internal sealed class VoiceRelay(
         }
     }
 
-    internal static bool TryReadInterruptionSilenced(byte[] data, out int interruptionNumber, out bool bargeIn)
+    internal static bool TryReadInterruptionSilenced(
+        byte[] data,
+        out int interruptionNumber,
+        out bool bargeIn,
+        out string? playbackToken)
     {
         interruptionNumber = 0;
         bargeIn = false;
+        playbackToken = null;
         try
         {
             using var document = JsonDocument.Parse(data);
@@ -711,10 +767,17 @@ internal sealed class VoiceRelay(
                 && number.TryGetInt32(out interruptionNumber)
                 && interruptionNumber > 0
                 && root.TryGetProperty("bargeIn", out var playback)
-                && playback.ValueKind is JsonValueKind.True or JsonValueKind.False;
+                && playback.ValueKind is JsonValueKind.True or JsonValueKind.False
+                && root.TryGetProperty("playbackToken", out var token)
+                && (token.ValueKind == JsonValueKind.Null
+                    || token.ValueKind == JsonValueKind.String
+                    && token.GetString() is { Length: > 0 and <= 512 });
             if (valid)
             {
                 bargeIn = root.GetProperty("bargeIn").GetBoolean();
+                playbackToken = root.GetProperty("playbackToken").ValueKind == JsonValueKind.String
+                    ? root.GetProperty("playbackToken").GetString()
+                    : null;
             }
             return valid;
         }
@@ -774,7 +837,12 @@ internal static class VoiceCloseCodes
     }
 }
 
-internal sealed record PlaybackItem(bool IsText, byte[] Data, string? EndChatReason = null, string? FunctionCallId = null);
+internal sealed record PlaybackItem(
+    bool IsText,
+    byte[] Data,
+    string? EndChatReason = null,
+    string? FunctionCallId = null,
+    string? PlaybackToken = null);
 
 /// <summary>Bounded FIFO whose interrupt flush removes queued agent audio but keeps JSON events.</summary>
 internal sealed class PlaybackQueue(int capacity)

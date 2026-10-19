@@ -63,6 +63,15 @@ public interface IConciergeService
         string userMessage,
         CancellationToken cancellationToken = default,
         bool enableEndChatFunction = false);
+
+    /// <summary>
+    /// Marks a confirmed browser-rendered voice interruption through the stay workflow.
+    /// The operation is idempotent and never cancels the admitted turn.
+    /// </summary>
+    Task MarkVoiceTurnInterruptedAsync(
+        ConciergeSessionContext session,
+        string turnId,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>A chat session authorized for voice; <paramref name="HasTurns"/> selects the greeting.</summary>
