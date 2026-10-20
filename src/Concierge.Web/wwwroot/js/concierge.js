@@ -3,6 +3,24 @@
     const themeKey = "hotel-zgy-theme";
     let transcriptListener;
 
+    document.addEventListener("keydown", (event) => {
+        const textarea = event.target;
+        if (textarea?.id !== "message-draft"
+            || event.key !== "Enter"
+            || event.shiftKey
+            || event.isComposing
+            || event.keyCode === 229) {
+            return;
+        }
+
+        const form = textarea.closest("form");
+        const sendButton = form?.querySelector('button[type="submit"]');
+        if (!sendButton || sendButton.disabled) return;
+
+        event.preventDefault();
+        form.requestSubmit(sendButton);
+    });
+
     window.conciergeChat = {
         loadSession() {
             try {

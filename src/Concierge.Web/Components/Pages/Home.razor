@@ -68,31 +68,100 @@
     }
     else
     {
-        <header class="site-header">
+        <header class="site-header @(session?.Credential is not null ? "voice-site-header" : "")">
             <a class="hotel-brand" href="/" aria-label="Hotel ZGY Miami">
                 <strong>Hotel ZGY</strong><span>/ Miami</span>
             </a>
-            <div class="header-actions">
-                <label class="theme-picker compact-theme-picker">
-                    <span class="visually-hidden">Theme</span>
-                    <select aria-label="Color theme" value="@theme" @onchange="ChangeThemeAsync">
-                        <option value="system">System</option>
-                        <option value="light">Light</option>
-                        <option value="dark">Dark</option>
-                    </select>
-                </label>
-                @if (session?.Credential is not null && !hasExpired && !voiceMode)
+            <div class="header-actions voice-header-actions">
+                @if (voiceMode)
                 {
-                    <button class="start-voice-button" type="button" @onclick="StartVoiceAsync" disabled="@(!CanStartVoice)">
-                        Start voice
-                    </button>
+                    <div class="voice-status voice-@voiceState @(voiceMuted ? "is-muted" : "")"
+                         role="status" aria-live="polite" title="@voiceMessage">
+                        <span class="voice-indicator" aria-hidden="true"></span>
+                        <strong>@(voiceMuted ? "Muted" : VoiceStateLabel)</strong>
+                    </div>
                 }
-                @if (session?.Credential is not null)
-                {
-                    <button class="end-chat-button" type="button" @onclick="EndChatAsync" disabled="@isEnding">
-                        End chat
-                    </button>
-                }
+                <div class="voice-header-controls" role="group" aria-label="Chat controls">
+                    @if (voiceMode)
+                    {
+                        if (VoiceActive)
+                        {
+                            <button class="voice-control-button" type="button"
+                                    aria-label="Mute microphone" aria-pressed="@(voiceMuted ? "true" : "false")"
+                                    @onclick="ToggleVoiceMuteAsync">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <rect x="9" y="2" width="6" height="12" rx="3" />
+                                    <path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" />
+                                    @if (voiceMuted)
+                                    {
+                                        <path d="m3 3 18 18" />
+                                    }
+                                </svg>
+                                <span>@(voiceMuted ? "Unmute" : "Mute")</span>
+                            </button>
+                        }
+                        else if (voiceState == "paused")
+                        {
+                            <button class="voice-control-button" type="button" aria-label="Resume voice" @onclick="ResumeVoiceAsync">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="m8 4 12 8-12 8Z" />
+                                </svg>
+                                <span>Resume</span>
+                            </button>
+                        }
+                        else
+                        {
+                            <button class="voice-control-button" type="button" aria-label="Reconnect voice" @onclick="ConnectVoiceAsync">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5M20 7l-3-3" />
+                                </svg>
+                                <span>Reconnect</span>
+                            </button>
+                        }
+                    }
+                    else if (session?.Credential is not null && !hasExpired)
+                    {
+                        <button class="voice-control-button" type="button" @onclick="StartVoiceAsync" disabled="@(!CanStartVoice)">
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                <rect x="9" y="2" width="6" height="12" rx="3" />
+                                <path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" />
+                            </svg>
+                            <span>Start voice</span>
+                        </button>
+                    }
+                    @if (session?.Credential is not null)
+                    {
+                        @if (voiceMode)
+                        {
+                            <button class="voice-end-voice-button" type="button" aria-label="End voice"
+                                    @onclick="EndVoiceAsync">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="M12 3v18M5 8v8M19 8v8M2 10v4M22 10v4" />
+                                </svg>
+                                <span>End voice</span>
+                            </button>
+                        }
+                        <button class="end-chat-button voice-end-chat-button" type="button" aria-label="End chat"
+                                @onclick="EndChatAsync" disabled="@isEnding">
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                <path d="m6 6 12 12M18 6 6 18" />
+                            </svg>
+                            <span>End chat</span>
+                        </button>
+                    }
+                    <label class="theme-picker compact-theme-picker">
+                        <span class="visually-hidden">Theme</span>
+                        <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <circle cx="12" cy="12" r="4" />
+                            <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5l1.5 1.5M5 19l1.5-1.5M17.5 6.5 19 5" />
+                        </svg>
+                        <select aria-label="Color theme" value="@theme" @onchange="ChangeThemeAsync">
+                            <option value="system">System</option>
+                            <option value="light">Light</option>
+                            <option value="dark">Dark</option>
+                        </select>
+                    </label>
+                </div>
             </div>
         </header>
 
@@ -268,36 +337,6 @@
                         </div>
                     }
 
-                    @if (voiceMode)
-                    {
-                        <section class="voice-panel voice-@voiceState" aria-label="Voice conversation">
-                            <div class="voice-status" role="status" aria-live="polite">
-                                <span class="voice-indicator" aria-hidden="true"></span>
-                                <strong>@VoiceStateLabel</strong>
-                                @if (!string.IsNullOrWhiteSpace(voiceMessage))
-                                {
-                                    <span class="voice-message">@voiceMessage</span>
-                                }
-                                else if (voiceState == "paused")
-                                {
-                                    <span class="voice-message">Voice paused while this page was hidden.</span>
-                                }
-                            </div>
-                            <div class="voice-actions">
-                                @if (voiceState == "paused")
-                                {
-                                    <button class="primary-button" type="button" @onclick="ResumeVoiceAsync">Resume voice</button>
-                                }
-                                else if (voiceState == "disconnected")
-                                {
-                                    <button class="primary-button" type="button" @onclick="ConnectVoiceAsync">Reconnect</button>
-                                }
-                                <button class="secondary-button" type="button" @onclick="UseTextChatAsync">Use text chat</button>
-                            </div>
-                        </section>
-                    }
-                    else
-                    {
                     <form class="composer" @onsubmit="SendDraftAsync" @onsubmit:preventDefault>
                         <label class="message-label" for="message-draft">MESSAGE</label>
                         <div class="compose-box">
@@ -311,8 +350,9 @@
                                     <span class="composer-hint">Sign in again before sending.</span>
                                 }
                                 <button class="primary-button send-button" type="submit"
+                                        aria-label="Send message"
                                         disabled="@(isWorking || pending is not null || hasExpired || string.IsNullOrWhiteSpace(draft))">
-                                    Send
+                                    <span>Send</span>
                                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                                         <path d="m4 4 17 8-17 8 3-8-3-8Zm3 8h14" />
                                     </svg>
@@ -320,7 +360,6 @@
                             </div>
                         </div>
                     </form>
-                    }
                 </section>
             }
         </main>

@@ -177,6 +177,28 @@ public sealed class HomeSessionTests
         Assert.Equal(2, harness.JavaScript.Calls.Count(call => call == "conciergeChat.unwireTranscript"));
     }
 
+    [Theory]
+    [InlineData("listening")]
+    [InlineData("paused")]
+    [InlineData("disconnected")]
+    public async Task EndVoiceStopsVoiceAndKeepsTheChat(string state)
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        harness.Set("voiceState", state);
+        harness.Set("voiceSessionId", "voice-session");
+        harness.Service.History = _ => Task.FromResult(History("latest-voice-turn"));
+
+        await harness.Call("EndVoiceAsync");
+
+        Assert.False(harness.Get<bool>("voiceMode"));
+        Assert.Null(harness.Get<string?>("voiceSessionId"));
+        Assert.False(harness.Get<bool>("chatEnded"));
+        Assert.NotNull(harness.Get<ChatSessionState?>("session"));
+        Assert.Contains("conciergeVoice.stop", harness.JavaScript.Calls);
+        Assert.Equal("latest-voice-turn", Assert.Single(harness.Get<List<ConciergeTranscriptTurn>>("turns")).TurnId);
+    }
+
     /// <summary>Does not accept verification or end responses after another sign-in starts.</summary>
     [Theory]
     [InlineData(false)]
@@ -323,6 +345,140 @@ public sealed class HomeSessionTests
         Assert.DoesNotContain(markup, content => content.Contains("<b>", StringComparison.Ordinal) || content.Contains("**x**", StringComparison.Ordinal) || content.Contains("**p**", StringComparison.Ordinal));
     }
 
+    /// <summary>Places voice actions and status in the header while retaining the chat composer.</summary>
+    [Fact]
+    public async Task ActiveVoiceControlsStayInHeaderInKeyboardOrderAndComposerRemainsAvailable()
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        await harness.Call("StateHasChanged");
+
+        var elements = harness.RenderedElements();
+        var header = Assert.Single(elements, element => element.Tag == "header");
+        var controls = elements
+            .Where(element => element.Index > header.Index && element.Index < header.EndIndex)
+            .Where(element => element.Tag == "button")
+            .ToArray();
+
+        Assert.Equal(3, controls.Length);
+        Assert.Equal(
+            ["Mute microphone", "End voice", "End chat"],
+            controls.Select(element => element.Attributes.GetValueOrDefault("aria-label")));
+        Assert.Equal("false", controls[0].Attributes["aria-pressed"]);
+        Assert.All(controls, element => Assert.False(element.Attributes.ContainsKey("tabindex")));
+        Assert.Contains(elements, element =>
+            element.Tag == "div"
+            && element.Index > header.Index && element.Index < header.EndIndex
+            && Equals(element.Attributes.GetValueOrDefault("role"), "status")
+            && Equals(element.Attributes.GetValueOrDefault("aria-live"), "polite"));
+        Assert.Contains(elements, element => element.Tag == "textarea");
+        Assert.DoesNotContain(elements, element =>
+            element.Tag == "section"
+            && Equals(element.Attributes.GetValueOrDefault("aria-label"), "Voice conversation"));
+        Assert.DoesNotContain(elements, element =>
+            Equals(element.Attributes.GetValueOrDefault("aria-label"), "Disconnect voice"));
+        // Razor can coalesce static SVGs into markup frames instead of element frames.
+        var (_, markup) = harness.RenderedContent();
+        Assert.Contains(markup, item =>
+            item.Contains("<svg", StringComparison.Ordinal)
+            && item.Contains("aria-hidden=\"true\"", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("disconnected", "Voice stopped.", "Disconnected")]
+    [InlineData("disconnected", "Voice service is unavailable.", "Disconnected")]
+    [InlineData("paused", "Voice paused while this page was hidden.", "Paused")]
+    [InlineData("listening", "Microphone ready.", "Listening")]
+    public async Task VoiceStatusShowsOnlyTheConciseState(string state, string diagnostic, string label)
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        await harness.VoiceState(state, diagnostic, 0);
+        await harness.Call("StateHasChanged");
+
+        var (text, markup) = harness.RenderedContent();
+        var content = string.Concat(text.Concat(markup));
+        Assert.Contains(label, content);
+        Assert.DoesNotContain(diagnostic, content);
+        Assert.Contains(harness.RenderedElements(), element =>
+            element.Tag == "textarea" && !element.Attributes.ContainsKey("disabled"));
+    }
+
+    [Fact]
+    public async Task MutedVoiceControlExposesItsPressedState()
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        harness.Set("voiceMuted", true);
+        await harness.Call("StateHasChanged");
+
+        var elements = harness.RenderedElements();
+        var header = Assert.Single(elements, element => element.Tag == "header");
+        var muteButton = Assert.Single(elements, element =>
+            element.Tag == "button"
+            && element.Index > header.Index && element.Index < header.EndIndex
+            && Equals(element.Attributes.GetValueOrDefault("aria-label"), "Mute microphone"));
+
+        Assert.Equal("true", muteButton.Attributes["aria-pressed"]);
+    }
+
+    [Theory]
+    [InlineData("listening")]
+    [InlineData("paused")]
+    [InlineData("disconnected")]
+    public async Task VoiceToolbarRetainsTheThemePickerAfterTheSessionActions(string state)
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        harness.Set("voiceState", state);
+        await harness.Call("StateHasChanged");
+
+        var elements = harness.RenderedElements();
+        var header = Assert.Single(elements, element => element.Tag == "header");
+        var themePicker = Assert.Single(elements, element =>
+            element.Tag == "select"
+            && Equals(element.Attributes.GetValueOrDefault("aria-label"), "Color theme"));
+        var endChat = Assert.Single(elements, element =>
+            element.Tag == "button"
+            && Equals(element.Attributes.GetValueOrDefault("aria-label"), "End chat"));
+        var endVoice = Assert.Single(elements, element =>
+            element.Tag == "button"
+            && Equals(element.Attributes.GetValueOrDefault("aria-label"), "End voice"));
+        Assert.True(endVoice.Index < endChat.Index);
+        Assert.Equal(endChat.Index, endVoice.EndIndex);
+        Assert.True(themePicker.Index > endChat.EndIndex && themePicker.Index < header.EndIndex);
+        Assert.False(themePicker.Attributes.ContainsKey("disabled"));
+        var options = elements
+            .Where(element => element.Tag == "option"
+                && element.Index > themePicker.Index && element.Index < themePicker.EndIndex)
+            .Select(element => element.Attributes.GetValueOrDefault("value"));
+        Assert.Equal(["system", "light", "dark"], options);
+    }
+
+    [Theory]
+    [InlineData("paused", "Resume voice")]
+    [InlineData("disconnected", "Reconnect voice")]
+    public async Task PausedAndDisconnectedVoiceExposeOnlyTheApplicableReconnectAction(string state, string action)
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        harness.Set("voiceState", state);
+        await harness.Call("StateHasChanged");
+
+        var elements = harness.RenderedElements();
+        var header = Assert.Single(elements, element => element.Tag == "header");
+        var controls = elements
+            .Where(element => element.Index > header.Index && element.Index < header.EndIndex)
+            .Where(element => element.Tag == "button")
+            .ToArray();
+
+        Assert.Equal(3, controls.Length);
+        Assert.Equal(
+            [action, "End voice", "End chat"],
+            controls.Select(element => element.Attributes.GetValueOrDefault("aria-label")));
+        Assert.DoesNotContain(controls, element => Equals(element.Attributes.GetValueOrDefault("aria-label"), "Mute microphone"));
+    }
+
     /// <summary>Shows the interruption marker only on interrupted assistant replies.</summary>
     [Fact]
     public async Task InterruptedTranscriptMarkerAppearsOnlyForInterruptedAssistantReplies()
@@ -368,7 +524,8 @@ public sealed class HomeSessionTests
         var (text, markup) = harness.RenderedContent();
         var content = text.Concat(markup).ToList();
         Assert.Contains(content, item => item.Contains("Reconnect", StringComparison.Ordinal));
-        Assert.Contains(content, item => item.Contains("Voice disconnected.", StringComparison.Ordinal));
+        Assert.Contains(content, item => item.Contains("Disconnected", StringComparison.Ordinal));
+        Assert.DoesNotContain(content, item => item.Contains("Voice disconnected.", StringComparison.Ordinal));
         Assert.Contains(content, item => item.Contains("End chat", StringComparison.Ordinal));
         Assert.Contains(logs.Entries, entry =>
             entry.Message.StartsWith("Voice relay closure applied by server", StringComparison.Ordinal)
@@ -450,12 +607,46 @@ public sealed class HomeSessionTests
                 frames.Where(frame => frame.FrameType == RenderTreeFrameType.Markup).Select(frame => frame.MarkupContent).ToList());
         }
 
+        /// <summary>Returns elements in document order with their rendered attributes and text.</summary>
+        public List<RenderedElement> RenderedElements()
+        {
+            var frames = renderer.Frames(componentId);
+            var elements = new List<RenderedElement>();
+            for (var index = 0; index < frames.Count; index++)
+            {
+                var frame = frames[index];
+                if (frame.FrameType != RenderTreeFrameType.Element)
+                {
+                    continue;
+                }
+
+                var endIndex = index + frame.ElementSubtreeLength;
+                var attributes = new Dictionary<string, object>();
+                foreach (var attribute in frames
+                    .Skip(index + 1)
+                    .Take(endIndex - index - 1)
+                    .Where(child => child.FrameType == RenderTreeFrameType.Attribute))
+                {
+                    attributes[attribute.AttributeName] = attribute.AttributeValue;
+                }
+                elements.Add(new RenderedElement(frame.ElementName, attributes, index, endIndex));
+            }
+
+            return elements;
+        }
+
         /// <summary>Seeds a verified session for the test.</summary>
         public void SetSession(string credential, Guid stay)
         {
             var session = new ChatSessionState { Credential = credential, StayId = stay, ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1) };
             Set("session", session);
         }
+
+        public sealed record RenderedElement(
+            string Tag,
+            Dictionary<string, object> Attributes,
+            int Index,
+            int EndIndex);
 
         /// <summary>Sets private component state without adding production test surfaces.</summary>
         public void Set(string name, object value)

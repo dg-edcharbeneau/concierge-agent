@@ -43,6 +43,7 @@
 
         const node = new AudioWorkletNode(context, "concierge-mic");
         node.port.onmessage = (event) => {
+            if (voice.muted) return;
             const socket = voice.socket;
             if (!socket || socket.readyState !== WebSocket.OPEN) return;
             // Never drop speech silently: a stalled uplink ends voice so the guest can reconnect.
@@ -52,6 +53,7 @@
             }
             socket.send(event.data);
         };
+        voice.micStream.getTracks().forEach((track) => { track.enabled = !voice.muted; });
         context.createMediaStreamSource(voice.micStream).connect(node);
         await context.resume();
         notify(voice, "listening");
@@ -221,8 +223,21 @@
             if (!voice || voice.stopped) return;
             await voice.playContext?.resume();
             await voice.micContext?.resume();
-            voice.micStream?.getTracks().forEach((track) => { track.enabled = true; });
+            voice.micStream?.getTracks().forEach((track) => {
+                track.enabled = !voice.muted && document.visibilityState !== "hidden";
+            });
             notify(voice, "listening");
+        },
+
+        /** Stops microphone frames while the relay's existing KeepAlive maintains Deepgram's connection. */
+        setMuted(muted) {
+            const voice = current;
+            if (!voice || voice.stopped) return false;
+            voice.muted = Boolean(muted);
+            voice.micStream?.getTracks().forEach((track) => {
+                track.enabled = !voice.muted && document.visibilityState !== "hidden";
+            });
+            return voice.muted;
         },
 
         stop() {

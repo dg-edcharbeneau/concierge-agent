@@ -68,6 +68,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private int wiredVersion = -1;
     private bool disposed;
     private bool voiceMode;
+    private bool voiceMuted;
     private string voiceState = "disconnected";
     private string? voiceMessage;
     private string? voiceSessionId;
@@ -513,6 +514,20 @@ public partial class Home : ComponentBase, IAsyncDisposable
         model = model.RequestEndConfirmation();
     }
 
+    private async Task EndVoiceAsync()
+    {
+        if (!voiceMode)
+        {
+            return;
+        }
+
+        await StopVoiceAsync("Voice stopped.");
+        voiceMode = false;
+        voiceSessionId = null;
+        StopWatchingVoiceRelay();
+        await LoadHistoryAndReconcileAsync(replayPending: false);
+    }
+
     private void CancelEndChat()
     {
         model = model.CancelEnd();
@@ -599,6 +614,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private async Task CompleteEndAsync()
     {
         voiceMode = false;
+        voiceMuted = false;
         voiceSessionId = null;
         StopWatchingVoiceRelay();
         model = model.CompleteEnd();
@@ -645,6 +661,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             return;
         }
 
+        voiceMuted = false;
         voiceReference ??= DotNetObjectReference.Create(this);
         // The previous connection's closure is no longer news; OnVoiceSession watches the new one.
         StopWatchingVoiceRelay();
@@ -655,11 +672,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private Task ResumeVoiceAsync() => JavaScript.InvokeVoidAsync("conciergeVoice.resume").AsTask();
 
-    private async Task UseTextChatAsync()
+    private async Task ToggleVoiceMuteAsync()
     {
-        await StopVoiceAsync(null);
-        voiceMode = false;
-        await LoadHistoryAndReconcileAsync(replayPending: false);
+        voiceMuted = await JavaScript.InvokeAsync<bool>("conciergeVoice.setMuted", !voiceMuted);
     }
 
     private async Task StopVoiceAsync(string? message)
@@ -669,6 +684,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             return;
         }
 
+        voiceMuted = false;
         StopWatchingVoiceRelay();
         await JavaScript.InvokeVoidAsync("conciergeVoice.stop");
         voiceState = "disconnected";
@@ -734,6 +750,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             "Voice relay closure applied by server for session {VoiceSessionId} (connection {ConnectionNumber}); browser last reported {VoiceState}.",
             id, connectionNumber, voiceState);
         voiceState = "disconnected";
+        voiceMuted = false;
         voiceMessage = "Voice disconnected.";
         // No JS here: the circuit may be down. Reconnect's conciergeVoice.start ends any stale browser voice.
         await LoadHistoryAndReconcileAsync(replayPending: false);
@@ -768,6 +785,10 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
             voiceState = state;
             voiceMessage = message;
+            if (state == "disconnected")
+            {
+                voiceMuted = false;
+            }
             if (state == "disconnected" && closeCode == (int)Voice.VoiceCloseCodes.Unauthorized)
             {
                 MarkExpired();

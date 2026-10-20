@@ -131,13 +131,140 @@ a:focus-visible {
 .site-header {
     z-index: 1;
     display: flex;
-    flex: 0 0 76px;
+    flex: 0 0 64px;
     align-items: center;
     justify-content: space-between;
     gap: 20px;
     padding: 0 max(24px, calc((100vw - 1500px) / 2));
     background: var(--surface-background);
     border-bottom: 1px solid var(--border-color);
+}
+
+.header-actions.voice-header-actions {
+    gap: 12px;
+}
+
+.voice-status {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 8px;
+    color: var(--suggestion-text);
+    padding: 6px 12px;
+    background: var(--suggestion-background);
+    border: 1px solid var(--suggestion-border);
+    border-radius: 999px;
+    font-size: 12px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.voice-status strong {
+    font-weight: 700;
+}
+
+.voice-header-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    background: var(--transcript-background);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    box-shadow: 0 1px 2px rgb(0 0 0 / .04);
+}
+
+.voice-control-button,
+.voice-header-controls .voice-end-chat-button,
+.voice-header-controls .voice-end-voice-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 6px 12px;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 0;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* Stitch separates the session-ending action from the voice actions with a short rule. */
+.voice-header-controls .voice-end-chat-button::before {
+    content: "";
+    width: 1px;
+    height: 16px;
+    margin: 0 8px 0 -10px;
+    background: var(--border-color);
+}
+
+.voice-control-button:hover,
+.voice-control-button[aria-pressed="true"],
+.voice-header-controls .voice-end-chat-button:hover,
+.voice-header-controls .voice-end-voice-button:hover {
+    color: var(--text-primary);
+    background: var(--surface-background);
+}
+
+.voice-control-button[aria-pressed="true"] {
+    color: var(--accent-color);
+}
+
+.voice-header-controls svg {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2;
+}
+
+.theme-icon {
+    display: none;
+}
+
+.voice-header-controls .theme-picker {
+    position: relative;
+    gap: 0;
+}
+
+.voice-header-controls .theme-icon {
+    position: absolute;
+    left: 12px;
+    display: block;
+    pointer-events: none;
+}
+
+.voice-header-controls .compact-theme-picker select {
+    min-width: 0;
+    min-height: 30px;
+    padding: 6px 28px 6px 32px;
+    color: var(--text-secondary);
+    background-color: transparent;
+    border: 0;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.voice-header-controls .compact-theme-picker select:hover {
+    color: var(--text-primary);
+    background-color: var(--surface-background);
+}
+
+@media (pointer: coarse) {
+    .voice-control-button,
+    .voice-header-controls .voice-end-chat-button,
+    .voice-header-controls .voice-end-voice-button,
+    .voice-header-controls .compact-theme-picker select {
+        min-height: 44px;
+    }
 }
 
 .hotel-brand {
@@ -186,8 +313,6 @@ a:focus-visible {
     min-width: 88px;
 }
 
-.start-voice-button,
-.end-chat-button,
 .secondary-button {
     min-height: 42px;
     padding: 0 22px;
@@ -199,8 +324,6 @@ a:focus-visible {
     font-weight: 550;
 }
 
-.start-voice-button:hover,
-.end-chat-button:hover,
 .secondary-button:hover {
     background: var(--transcript-background);
 }
@@ -236,7 +359,7 @@ a:focus-visible {
     flex: 0 0 auto;
     align-items: center;
     gap: 16px;
-    min-height: 82px;
+    min-height: 64px;
     padding: 0 28px;
     color: var(--text-primary);
     text-align: left;
@@ -361,8 +484,9 @@ a:focus-visible {
 .suggestion-send:disabled,
 .primary-button:disabled,
 .secondary-button:disabled,
-.start-voice-button:disabled,
-.end-chat-button:disabled {
+.voice-control-button:disabled,
+.voice-header-controls .voice-end-chat-button:disabled,
+.voice-header-controls .voice-end-voice-button:disabled {
     cursor: not-allowed;
     opacity: .55;
 }
@@ -1045,19 +1169,158 @@ a:focus-visible {
         padding: 0 14px 0 17px;
     }
 
-    .hotel-brand {
+    .site-header.voice-site-header {
+        flex: 0 0 auto;
         display: grid;
-        align-items: start;
-        gap: 0;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px 8px;
+        padding: 12px;
+        background: var(--transcript-background);
+    }
+
+    .voice-site-header .header-actions {
+        display: contents;
+    }
+
+    .voice-site-header .hotel-brand {
+        grid-row: 1;
+        grid-column: 1;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+        min-width: 0;
+    }
+
+    .voice-site-header .hotel-brand strong {
+        font-size: 16px;
+    }
+
+    .voice-site-header .hotel-brand span {
+        font-size: 11px;
+    }
+
+    .voice-site-header .voice-status {
+        grid-row: 1;
+        grid-column: 2;
+        justify-self: end;
+        gap: 6px;
+        padding: 4px 10px;
+        font-size: 10px;
+    }
+
+    /* Stitch rules off the brand row from the action row. */
+    .voice-site-header::after {
+        content: "";
+        grid-row: 1;
+        grid-column: 1 / -1;
+        align-self: end;
+        height: 1px;
+        margin: 0 0 -6px;
+        background: var(--border-color);
+    }
+
+    .voice-site-header .voice-indicator {
+        width: 7px;
+        height: 7px;
+    }
+
+    .voice-site-header .voice-header-controls {
+        display: grid;
+        grid-row: 2;
+        grid-column: 1 / -1;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        padding: 0;
+        background: none;
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+    }
+
+    .voice-site-header .voice-control-button,
+    .voice-site-header .voice-end-chat-button,
+    .voice-site-header .voice-end-voice-button {
+        min-height: 50px;
+        flex-direction: column;
+        gap: 4px;
+        padding: 6px 4px;
+        color: var(--text-primary);
+        background: var(--surface-background);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        font-size: 11px;
+    }
+
+    .voice-site-header .voice-end-chat-button::before {
+        content: none;
+    }
+
+    .voice-site-header .voice-header-controls svg {
+        width: 18px;
+        height: 18px;
+    }
+
+    .voice-site-header .voice-control-button svg {
+        color: var(--accent-color);
+    }
+
+    .voice-site-header .voice-end-chat-button svg {
+        color: var(--text-secondary);
+    }
+
+    .voice-site-header .voice-header-controls .theme-picker {
+        position: relative;
+        min-width: 0;
+        min-height: 50px;
+        background: var(--surface-background);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+    }
+
+    .voice-site-header .voice-header-controls .theme-icon {
+        position: absolute;
+        top: 6px;
+        left: calc(50% - 9px);
+        display: block;
+        color: var(--accent-color);
+        pointer-events: none;
+    }
+
+    .voice-site-header .voice-header-controls .compact-theme-picker select {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        min-width: 0;
+        min-height: 44px;
+        padding: 25px 4px 4px;
+        color: var(--text-primary);
+        border-radius: 0;
+        text-align: center;
+        font-size: 11px;
+        appearance: none;
+    }
+
+    .voice-site-header .voice-header-controls select:focus-visible {
+        outline: 0;
+    }
+
+    .voice-site-header .voice-header-controls .theme-picker:focus-within {
+        outline: 3px solid var(--focus-ring);
+        outline-offset: 2px;
+    }
+
+    .hotel-brand {
+        gap: 6px;
     }
 
     .hotel-brand strong {
-        font-size: 19px;
-        line-height: 1.06;
+        font-size: 17px;
+        line-height: 1.2;
     }
 
     .hotel-brand span {
-        font-size: 14px;
+        font-size: 12px;
         line-height: 1.2;
     }
 
@@ -1073,10 +1336,9 @@ a:focus-visible {
         font-size: 11px;
     }
 
-    .end-chat-button {
-        min-height: 38px;
-        padding: 0 10px;
-        font-size: 12px;
+    .voice-header-controls .compact-theme-picker select {
+        width: auto;
+        min-width: 0;
     }
 
     .main-content {
@@ -1093,13 +1355,13 @@ a:focus-visible {
     }
 
     .questions-heading {
-        min-height: 76px;
-        gap: 13px;
-        margin: 13px 16px 14px;
-        padding: 0 17px;
+        min-height: 64px;
+        gap: 10px;
+        margin: 14px 16px;
+        padding: 0 14px;
         border: 1px solid var(--border-color);
-        border-radius: 20px;
-        font-size: 19px;
+        border-radius: 12px;
+        font-size: 17px;
     }
 
     .suggestions {
@@ -1137,13 +1399,13 @@ a:focus-visible {
 
     .conversation-heading {
         min-height: 39px;
-        padding: 0 31px;
+        padding: 0 16px;
         border: 0;
         font-size: 13px;
     }
 
     .transcript {
-        padding: 15px 32px 20px;
+        padding: 15px 16px 20px;
     }
 
     .message-content {
@@ -1212,16 +1474,49 @@ a:focus-visible {
     }
 
     .compose-box {
-        min-height: 122px;
-        padding: 10px 10px 9px 12px;
-        border-radius: 15px;
+        min-height: 64px;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 8px;
+        padding: 8px 8px 8px 12px;
+        border-radius: 12px;
     }
 
     .compose-box textarea {
-        min-height: 48px;
+        width: 0;
+        height: 44px;
+        min-height: 44px;
         max-height: 68px;
-        padding-top: 1px;
+        padding: 10px 0;
         font-size: 16px;
+    }
+
+    .compose-footer {
+        flex: 0 0 auto;
+    }
+
+    .compose-footer .send-button {
+        width: 44px;
+        min-height: 44px;
+        padding: 0;
+        border-radius: 8px;
+    }
+
+    .send-button > span {
+        display: none;
+    }
+
+    .composer:has(.composer-hint) .compose-box {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .composer:has(.composer-hint) textarea {
+        width: 100%;
+    }
+
+    .composer:has(.composer-hint) .compose-footer {
+        flex: 0 0 auto;
     }
 
     .primary-button {
@@ -1319,44 +1614,9 @@ a:focus-visible {
     }
 }
 
-.voice-panel {
-    display: flex;
-    flex: 0 0 auto;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    padding: 18px;
-    background: var(--composer-background);
-    border-top: 1px solid var(--border-color);
-}
-
-.voice-status {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-primary);
-}
-
-.voice-message {
-    color: var(--text-secondary);
-    font-size: 14px;
-}
-
-.voice-actions {
-    display: flex;
-    gap: 10px;
-}
-
-.voice-actions .primary-button {
-    min-height: 42px;
-    padding: 0 22px;
-}
-
 .voice-indicator {
-    width: 14px;
-    height: 14px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     background: var(--text-muted);
 }
@@ -1375,6 +1635,11 @@ a:focus-visible {
 
 .voice-disconnected .voice-indicator {
     background: var(--error-text);
+}
+
+.voice-status.is-muted .voice-indicator {
+    background: var(--text-muted);
+    animation: none;
 }
 
 @keyframes voice-pulse {
