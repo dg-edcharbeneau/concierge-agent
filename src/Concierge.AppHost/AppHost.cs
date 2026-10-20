@@ -19,13 +19,28 @@ var temporal = builder.AddTemporalDevContainer("temporal", options =>
 // The string-value overload bypasses configuration, so preserve user-secrets explicitly.
 var deepgramApiKey = builder.AddParameter(
     "deepgram-api-key", secret: true, value: builder.Configuration["Parameters:deepgram-api-key"] ?? "");
+var geoapifyApiKey = builder.AddParameter(
+    "geoapify-api-key", secret: true, value: builder.Configuration["Parameters:geoapify-api-key"] ?? "");
 
 var workflowServer = builder.AddProject<Projects.Concierge_WorkflowServer>("workflow-server")
     .WithReference(temporal)
     .WithReference(concierge)
+    .WithEnvironment("Geoapify__ApiKey", geoapifyApiKey)
     .WaitFor(temporal)
     .WaitFor(concierge)
     .WithHttpHealthCheck("/health/ready");
+
+foreach (var key in new[] { "Latitude", "Longitude", "TimeZoneId" })
+{
+    var value = builder.Configuration[$"Hotel:{key}"];
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        throw new InvalidOperationException(
+            $"AppHost setting Hotel:{key} is required in src/Concierge.AppHost/appsettings.json.");
+    }
+
+    workflowServer.WithEnvironment($"Hotel__{key}", value);
+}
 
 ConfigureAIProvider(builder, workflowServer, "Chat", "foundry-chat-api-key");
 ConfigureAIProvider(builder, workflowServer, "Embeddings", "foundry-embeddings-api-key");

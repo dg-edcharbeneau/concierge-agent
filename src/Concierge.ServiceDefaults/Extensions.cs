@@ -80,7 +80,14 @@ public static class Extensions
                     )
                     // Uncomment the following line to enable gRPC instrumentation (requires the OpenTelemetry.Instrumentation.GrpcNetClient package)
                     //.AddGrpcClientInstrumentation()
-                    .AddHttpClientInstrumentation();
+                    .AddHttpClientInstrumentation(options =>
+                        // Geoapify requires its secret key in the query string. Do not export
+                        // request spans whose URL could contain that credential.
+                        options.FilterHttpRequestMessage = request =>
+                            !string.Equals(
+                                request.RequestUri?.Host,
+                                "api.geoapify.com",
+                                StringComparison.OrdinalIgnoreCase));
             });
 
         builder.AddOpenTelemetryExporters();

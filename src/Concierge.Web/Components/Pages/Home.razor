@@ -87,7 +87,7 @@
                         if (VoiceActive)
                         {
                             <button class="voice-control-button" type="button"
-                                    aria-label="Mute microphone" aria-pressed="@(voiceMuted ? "true" : "false")"
+                                    aria-label="@(voiceMuted ? "Unmute microphone" : "Mute microphone")"
                                     @onclick="ToggleVoiceMuteAsync">
                                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                                     <rect x="9" y="2" width="6" height="12" rx="3" />

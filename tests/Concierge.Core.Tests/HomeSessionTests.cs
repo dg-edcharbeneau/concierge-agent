@@ -364,7 +364,8 @@ public sealed class HomeSessionTests
         Assert.Equal(
             ["Mute microphone", "End voice", "End chat"],
             controls.Select(element => element.Attributes.GetValueOrDefault("aria-label")));
-        Assert.Equal("false", controls[0].Attributes["aria-pressed"]);
+        // The visible label switches Mute/Unmute, so the name carries state; aria-pressed would double it.
+        Assert.False(controls[0].Attributes.ContainsKey("aria-pressed"));
         Assert.All(controls, element => Assert.False(element.Attributes.ContainsKey("tabindex")));
         Assert.Contains(elements, element =>
             element.Tag == "div"
@@ -405,7 +406,7 @@ public sealed class HomeSessionTests
     }
 
     [Fact]
-    public async Task MutedVoiceControlExposesItsPressedState()
+    public async Task MutedVoiceControlNamesTheUnmuteAction()
     {
         await using var harness = new Harness();
         harness.StartListening();
@@ -417,9 +418,11 @@ public sealed class HomeSessionTests
         var muteButton = Assert.Single(elements, element =>
             element.Tag == "button"
             && element.Index > header.Index && element.Index < header.EndIndex
-            && Equals(element.Attributes.GetValueOrDefault("aria-label"), "Mute microphone"));
+            && Equals(element.Attributes.GetValueOrDefault("aria-label"), "Unmute microphone"));
 
-        Assert.Equal("true", muteButton.Attributes["aria-pressed"]);
+        Assert.False(muteButton.Attributes.ContainsKey("aria-pressed"));
+        Assert.DoesNotContain(elements, element =>
+            Equals(element.Attributes.GetValueOrDefault("aria-label"), "Mute microphone"));
     }
 
     [Theory]

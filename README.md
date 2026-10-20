@@ -132,6 +132,17 @@ just test
 
 Docker must be running for the integration tests.
 
+To live-check place resolution and weather against Geoapify and Open-Meteo
+(opt-in; uses the AppHost `Parameters:geoapify-api-key` secret and never prints it):
+
+```bash
+just live-place-weather
+```
+
+It passes when "Miami" and "South Beach" each resolve to exactly one
+Miami-Dade result and the South Beach forecast is in °F and mph for the
+hotel-local day.
+
 ## Configuration
 
 The AppHost owns all AI configuration defaults, separately for chat and
@@ -145,6 +156,7 @@ user-secrets store and passed only to the service that needs them.
 aspire secret set "Parameters:foundry-chat-api-key" "<key>" --apphost src/Concierge.AppHost
 aspire secret set "Parameters:foundry-embeddings-api-key" "<key>" --apphost src/Concierge.AppHost
 aspire secret set "Parameters:deepgram-api-key" "<key>" --apphost src/Concierge.AppHost
+aspire secret set "Parameters:geoapify-api-key" "<key>" --apphost src/Concierge.AppHost
 aspire secret list --apphost src/Concierge.AppHost
 ```
 
@@ -240,6 +252,10 @@ To reproduce Aspire Development's request limits, explicitly set each
 capability's `RequestTimeoutSeconds=180` and `MaxConcurrentRequests=2`.
 Standalone execution also requires the normal database and Temporal connection
 configuration. WorkflowServer has no separate user-secrets store.
+The worker does not load AppHost settings outside Aspire, so standalone
+WorkflowServer must also receive `Geoapify__ApiKey` from secure deployment
+configuration and `Hotel__Latitude`, `Hotel__Longitude`, and `Hotel__TimeZoneId`
+as configuration values.
 
 Other settings:
 
@@ -249,6 +265,39 @@ Other settings:
 | `Concierge:Persistence:FlushBatchSize` | `Concierge.Web` | `5` | Completed turns that trigger an early transcript write; whichever of batch size or interval comes first wins. 1–100. It applies to stays started after the change. |
 | `Setup:KnowledgeDirectory` | `Concierge.WorkflowServer` | `knowledge/hotel-zgy` | Markdown folder to ingest at startup. |
 | `Setup:OverwriteExistingSeedRecords` | `Concierge.WorkflowServer` | `false` | Updates existing demo guest and stay records on startup. |
+| `Hotel:Latitude` | AppHost → `Concierge.WorkflowServer` | `25.7984634` degrees | Hotel ZGY's configured location anchor; must be finite and between −90 and 90. Used to bias Geoapify and as the no-place weather location. |
+| `Hotel:Longitude` | AppHost → `Concierge.WorkflowServer` | `−80.1956016` degrees | Hotel ZGY's configured location anchor; must be finite and between −180 and 180. Used to bias Geoapify and as the no-place weather location. |
+| `Hotel:TimeZoneId` | AppHost → `Concierge.WorkflowServer` | `America/New_York` | Must be a time zone available on the host. Open-Meteo forecasts and today/tonight/tomorrow dates use this hotel-local zone. |
+| `Geoapify:ApiKey` | AppHost secret parameter → `Concierge.WorkflowServer` | no default; required | Set `Parameters:geoapify-api-key` in AppHost user-secrets. The key is passed only to WorkflowServer and is not included in application logs or outbound HTTP traces. |
+
+Geoapify place searches use the configured hotel coordinates as a proximity
+bias. A result is eligible only when it is in the United States and Florida,
+and either belongs to Miami-Dade County or is within 60 km of the hotel; results
+below provider confidence `0.5` are ignored. A single eligible match resolves;
+zero or multiple eligible matches return a clarification-needed result rather
+than selecting a potentially wrong place. The Geoapify API key is required at
+WorkflowServer startup even though hotel-coordinate weather requests do not
+need geocoding.
+
+Weather requests use Open-Meteo's read-only forecast API without an API key.
+The service requests daily high/low temperature in Fahrenheit and maximum wind
+speed in mph, with the configured hotel time zone. `Today` and `Tonight` select
+the current hotel-local date; `Tomorrow` selects the next hotel-local date.
+When a place is given, Geoapify must resolve it before Open-Meteo is called;
+without a place, the configured hotel coordinates are used. Provider HTTP
+requests have a fixed 20-second client timeout; this is code-defined, not an
+application setting.
+
+To configure the required Geoapify secret under Aspire:
+
+```bash
+aspire secret set "Parameters:geoapify-api-key" "<key>" --apphost src/Concierge.AppHost
+```
+
+Never put the key in checked-in configuration or include its value in logs.
+The hotel's base defaults live in
+`src/Concierge.AppHost/appsettings.json`; AppHost configuration overrides may
+use `Hotel__Latitude`, `Hotel__Longitude`, and `Hotel__TimeZoneId`.
 
 Aspire supplies `ConnectionStrings:concierge` to `Concierge.WorkflowServer` and
 Temporal settings to both `Concierge.WorkflowServer` and `Concierge.Web`.

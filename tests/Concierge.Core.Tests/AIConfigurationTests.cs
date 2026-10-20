@@ -99,6 +99,12 @@ public sealed class AIConfigurationTests
         Assert.Equal(0, exitCode);
         var resources = manifest!["resources"]!;
         var environment = resources["workflow-server"]!["env"]!;
+        Assert.Equal("25.7984634", environment["Hotel__Latitude"]!.GetValue<string>());
+        Assert.Equal("-80.1956016", environment["Hotel__Longitude"]!.GetValue<string>());
+        Assert.Equal("America/New_York", environment["Hotel__TimeZoneId"]!.GetValue<string>());
+        Assert.Equal("{geoapify-api-key.value}", environment["Geoapify__ApiKey"]!.GetValue<string>());
+        Assert.NotNull(resources["geoapify-api-key"]);
+        Assert.Null(resources["web"]!["env"]!["Geoapify__ApiKey"]);
         foreach (var (key, value) in values)
         {
             Assert.Equal(value, environment[key.Replace(":", "__")]!.GetValue<string>());

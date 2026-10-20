@@ -3,6 +3,7 @@ using Concierge.WorkflowServer.Activities;
 using Concierge.WorkflowServer.AI;
 using Concierge.WorkflowServer.Data;
 using Concierge.WorkflowServer.Health;
+using Concierge.WorkflowServer.Location;
 using Concierge.WorkflowServer.Setup;
 using Concierge.WorkflowServer.Workflows;
 using Concierge.Contracts;
@@ -18,6 +19,27 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();
 builder.Services.AddConciergeAIProviders(builder.Configuration);
+builder.Services.AddSingleton<LocationOptionsValidator>();
+builder.Services.AddSingleton<IValidateOptions<HotelLocationOptions>>(
+    services => services.GetRequiredService<LocationOptionsValidator>());
+builder.Services.AddSingleton<IValidateOptions<GeoapifyOptions>>(
+    services => services.GetRequiredService<LocationOptionsValidator>());
+builder.Services.AddOptions<HotelLocationOptions>()
+    .Bind(builder.Configuration.GetSection(HotelLocationOptions.SectionName))
+    .ValidateOnStart();
+builder.Services.AddOptions<GeoapifyOptions>()
+    .Bind(builder.Configuration.GetSection(GeoapifyOptions.SectionName))
+    .ValidateOnStart();
+// Geoapify requires its key in the query string. A directly owned client avoids
+// HttpClientFactory request logging; Geoapify spans are filtered in ServiceDefaults.
+builder.Services.AddSingleton(_ => new HttpClient
+{
+    Timeout = TimeSpan.FromSeconds(20),
+});
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<GeoapifyPlaceResolver>();
+builder.Services.AddSingleton<OpenMeteoWeatherService>();
+builder.Services.AddSingleton<GeoapifyDrivingRouteService>();
 
 var conciergeConnectionString = builder.Configuration.GetConnectionString("concierge")
     ?? throw new InvalidOperationException(
@@ -69,7 +91,9 @@ builder.Services.AddHostedTemporalWorker(TemporalWorkerConnection.TaskQueue)
     .AddScopedActivities<HotelKnowledgeActivities>()
     // Session activities run as Standalone Activities started directly by Web.
     .AddScopedActivities<ConciergeSessionActivities>()
-    .AddScopedActivities<SetupActivities>();
+    .AddScopedActivities<SetupActivities>()
+    .AddScopedActivities<WeatherActivities>()
+    .AddScopedActivities<DrivingRouteActivities>();
 builder.Services.AddHostedService<SetupWorkflowStarter>();
 // Ollama only (no-op for Foundry): load the embedding model before the first guest question.
 builder.Services.AddHostedService<OllamaEmbeddingWarmup>();
@@ -97,6 +121,8 @@ _ = app.Services.GetRequiredService<IOptions<ChatProviderOptions>>().Value;
 _ = app.Services
     .GetRequiredService<IOptions<EmbeddingProviderOptions>>()
     .Value;
+_ = app.Services.GetRequiredService<IOptions<HotelLocationOptions>>().Value;
+_ = app.Services.GetRequiredService<IOptions<GeoapifyOptions>>().Value;
 
 // Schema ownership stays in this process and completes before Temporal workers start.
 await app.Services.GetRequiredService<DatabaseMigrator>()

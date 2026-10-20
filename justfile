@@ -13,6 +13,14 @@ run:
 test:
     dotnet test Concierge.slnx
 
+# Live-check Geoapify place resolution and Open-Meteo weather (uses AppHost user-secrets)
+live-place-weather:
+    dotnet run --file tests/Concierge.LiveChecks/place-weather-smoke.cs
+
+# Live-check a Geoapify driving route from the hotel to South Beach (uses AppHost user-secrets)
+live-driving-route:
+    dotnet run --file tests/Concierge.LiveChecks/driving-route-smoke.cs
+
 # Validate the retrieval evaluation package against its schema
 eval-validate:
     dotnet run --file {{eval_dir}}/validate.cs {{eval_dir}}/hotel-zgy-eval.json {{eval_dir}}/hotel-zgy-eval.schema.json
