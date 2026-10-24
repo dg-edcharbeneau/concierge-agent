@@ -9,12 +9,13 @@ var postgres = builder.AddPostgres("postgres")
     .WithVolume("concierge-postgres-data", "/var/lib/postgresql");
 
 var concierge = postgres.AddDatabase("concierge");
+var rides = postgres.AddDatabase("rides");
 
 var temporal = builder.AddTemporalDevContainer("temporal", options =>
 {
     options.Namespace = "default";
 })
-.WithDataVolume("temporal-data");
+.WithDataVolume("concierge-temporal-data");
 
 // The string-value overload bypasses configuration, so preserve user-secrets explicitly.
 var deepgramApiKey = builder.AddParameter(
@@ -30,17 +31,37 @@ var workflowServer = builder.AddProject<Projects.Concierge_WorkflowServer>("work
     .WaitFor(concierge)
     .WithHttpHealthCheck("/health/ready");
 
-foreach (var key in new[] { "Latitude", "Longitude", "TimeZoneId" })
-{
-    var value = builder.Configuration[$"Hotel:{key}"];
-    if (string.IsNullOrWhiteSpace(value))
-    {
-        throw new InvalidOperationException(
-            $"AppHost setting Hotel:{key} is required in src/Concierge.AppHost/appsettings.json.");
-    }
+var rideService = builder.AddProject<Projects.Concierge_RideService>("ride-service")
+    .WithReference(temporal)
+    .WithReference(rides)
+    .WaitFor(temporal)
+    .WaitFor(rides)
+    .WithHttpEndpoint(name: "http")
+    .WithHttpHealthCheck("/health/ready");
 
-    workflowServer.WithEnvironment($"Hotel__{key}", value);
+workflowServer
+    .WithReference(rideService)
+    .WaitFor(rideService);
+
+var hotelTimeZone = builder.Configuration["Hotel:TimeZoneId"];
+if (string.IsNullOrWhiteSpace(hotelTimeZone))
+{
+    throw new InvalidOperationException(
+        "AppHost setting Hotel:TimeZoneId is required in src/Concierge.AppHost/appsettings.json.");
 }
+
+workflowServer.WithEnvironment("Hotel__TimeZoneId", hotelTimeZone);
+rideService.WithEnvironment("Hotel__TimeZoneId", hotelTimeZone);
+
+// The fictional hotel's real demo anchor; weather, routes, and ride pickups use it for "Hotel ZGY".
+var hotelAddress = builder.Configuration["Hotel:Address"];
+if (string.IsNullOrWhiteSpace(hotelAddress))
+{
+    throw new InvalidOperationException(
+        "AppHost setting Hotel:Address is required in src/Concierge.AppHost/appsettings.json.");
+}
+
+workflowServer.WithEnvironment("Hotel__Address", hotelAddress);
 
 ConfigureAIProvider(builder, workflowServer, "Chat", "foundry-chat-api-key");
 ConfigureAIProvider(builder, workflowServer, "Embeddings", "foundry-embeddings-api-key");
@@ -103,6 +124,10 @@ static void ConfigureAIProvider(
         "Provider", "Endpoint", "Model", "RequestTimeoutSeconds", "MaxConcurrentRequests",
         capability == "Chat" ? "ContextWindowTokens" : "Dimensions",
     };
+    if (capability == "Embeddings")
+    {
+        forwardedKeys.Add("IngestionRequestTimeoutSeconds");
+    }
     if (capability == "Chat")
     {
         forwardedKeys.Add("ReasoningEffort");

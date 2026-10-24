@@ -11,6 +11,7 @@
 
     <ItemGroup>
         <ProjectReference Include="..\Concierge.Web\Concierge.Web.csproj" />
+        <ProjectReference Include="..\Concierge.RideService\Concierge.RideService.csproj" />
         <ProjectReference Include="..\Concierge.WorkflowServer\Concierge.WorkflowServer.csproj" />
     </ItemGroup>
 

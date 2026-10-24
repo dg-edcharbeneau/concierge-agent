@@ -31,3 +31,8 @@ concierge can explain the policy but cannot arrange storage.
 A hotel shuttle is available at Hotel ZGY. No shuttle schedule or pickup
 location is provided in the hotel information; guests should ask hotel staff
 for those details.
+
+## Rides
+
+Hotel ZGY arranges complimentary car rides for current guests through the
+concierge. There is no charge for these rides.

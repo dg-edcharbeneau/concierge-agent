@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <PackageReference Include="Temporalio" Version="1.20.0" />
+    <PackageReference Include="Temporalio.Extensions.WorkflowStreams" Version="1.20.0" />
     <PackageReference Include="Temporalio.Extensions.DiagnosticSource" Version="1.20.0" />
     <PackageReference Include="Temporalio.Extensions.OpenTelemetry" Version="1.20.0" />
   </ItemGroup>

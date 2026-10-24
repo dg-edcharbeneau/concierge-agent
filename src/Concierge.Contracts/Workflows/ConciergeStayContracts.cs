@@ -1,3 +1,5 @@
+using Temporalio.Extensions.WorkflowStreams;
+
 namespace Concierge.Contracts;
 
 /// <summary>Stable contract values for the one voice-only end-chat function.</summary>
@@ -17,11 +19,58 @@ public sealed record ConciergeStayWorkflowInput(
     DateTimeOffset EligibilityDeadlineUtc,
     int TranscriptFlushIntervalSeconds,
     long NextSequence = 0,
-    string? ContinuitySummary = null,
     IReadOnlyList<ConciergeTranscriptTurn>? RecentTurns = null,
     int TranscriptFlushBatchSize = ConciergePersistenceOptions.DefaultFlushBatchSize,
     IReadOnlyList<ConciergeStayMemoryItem>? StayMemory = null,
-    ConciergeVerifiedGuest? VerifiedGuest = null);
+    ConciergeVerifiedGuest? VerifiedGuest = null,
+    WorkflowStreamState? RideStreamState = null,
+    long RideReadOffset = 0,
+    ConciergeRideProposal? PendingRideProposal = null,
+    ConciergeRideCancellationProposal? PendingRideCancellationProposal = null,
+    ConciergeRideCancellationOutcome? LastConfirmedCancellation = null,
+    ConciergeRideProposal? ConsumedRideOffer = null,
+    long ConsumedRideOfferSequence = -1);
+
+/// <summary>
+/// A route-reviewed ride offer that stays open for the next two guest turns, so one pause does not
+/// expire it. All fields come from trusted session state and the route activity, not confirmation arguments.
+/// </summary>
+public sealed record ConciergeRideProposal(
+    Guid ProposalId,
+    long ProposedSequence,
+    ConciergeRidePlace Pickup,
+    ConciergeRidePlace Dropoff,
+    bool Immediate,
+    DateTimeOffset? PickupAtUtc,
+    double RouteDurationSeconds);
+
+/// <summary>
+/// A specific, verified ride offered for cancellation. The workflow keeps it open for the next two
+/// guest turns; model arguments cannot substitute another ride.
+/// </summary>
+public sealed record ConciergeRideCancellationProposal(
+    Guid RideId,
+    long ProposedSequence,
+    string Status,
+    string Pickup,
+    string Dropoff,
+    DateTimeOffset PickupAt);
+
+/// <summary>
+/// One confirmed, terminal cancellation retained for this stay. Turn provenance is for durable
+/// bookkeeping, not evidence that two voice callbacks belong to the same utterance.
+/// </summary>
+public sealed record ConciergeRideCancellationOutcome(
+    Guid RideId,
+    string Dropoff,
+    DateTimeOffset PickupAt,
+    string TurnId,
+    long Sequence);
+
+public sealed record ConciergeRidePlace(
+    string Name,
+    double Latitude,
+    double Longitude);
 
 /// <summary>
 /// A bounded, guest-reported statement retained for one stay. It is linked to the stable

@@ -53,8 +53,17 @@ public sealed record ConciergeVerifiedGuest(
     Guid StayId,
     string GivenName,
     string FamilyName,
-    string RoomNumber)
+    string RoomNumber,
+    Guid GuestId = default,
+    DateOnly CheckoutDate = default,
+    DateOnly CheckInDate = default)
 {
+    /// <summary>
+    /// Longest given or family name, in characters. Verification input and seeded guests share it,
+    /// and the action-turn prompt budget is sized for both names at this length.
+    /// </summary>
+    public const int MaxNameLength = 100;
+
     /// <summary>Hotel room convention; short or invalid room numbers have no inferred floor.</summary>
     public int? Floor => RoomNumberFormat.IsValid(RoomNumber)
         ? RoomNumber.Length switch
@@ -63,6 +72,11 @@ public sealed record ConciergeVerifiedGuest(
             4 => (RoomNumber[0] - '0') * 10 + RoomNumber[1] - '0',
             _ => null,
         }
+        : null;
+
+    /// <summary>Nights booked, from hotel-local check-in and checkout dates; null when either is unknown.</summary>
+    public int? Nights => CheckInDate != default && CheckoutDate > CheckInDate
+        ? CheckoutDate.DayNumber - CheckInDate.DayNumber
         : null;
 }
 
