@@ -27,9 +27,9 @@ public sealed class ConciergeService(
             throw InvalidRequest("Provide a verification request with LastName and RoomNumber.");
         }
 
-        if (string.IsNullOrWhiteSpace(request.LastName) || request.LastName.Trim().Length > 100)
+        if (string.IsNullOrWhiteSpace(request.LastName) || request.LastName.Trim().Length > ConciergeVerifiedGuest.MaxNameLength)
         {
-            throw InvalidRequest("Enter LastName (up to 100 characters).");
+            throw InvalidRequest($"Enter LastName (up to {ConciergeVerifiedGuest.MaxNameLength} characters).");
         }
 
         if (!RoomNumberFormat.IsValid(request.RoomNumber))
@@ -171,9 +171,7 @@ public sealed class ConciergeService(
     }
 
     /// <summary>
-    /// Every turn is answered for the verified guest. A session without the guest profile (for
-    /// example, one authenticated by an older WorkflowServer) must sign in again; it is never
-    /// answered anonymously.
+    /// Every turn requires a verified guest profile before the stay workflow is called.
     /// </summary>
     private static void RequireVerifiedGuest(ConciergeSessionContext session)
     {

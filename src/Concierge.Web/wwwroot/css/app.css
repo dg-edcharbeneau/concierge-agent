@@ -647,6 +647,14 @@ a:focus-visible {
     padding-left: 1.4em;
 }
 
+.assistant-response img {
+    display: block;
+    width: 52px;
+    height: 52px;
+    margin: 0 0 .5em;
+    object-fit: contain;
+}
+
 .assistant-response li + li {
     margin-top: .25em;
 }

@@ -190,7 +190,7 @@
                     <form class="verification-form" @onsubmit="VerifyAsync" @onsubmit:preventDefault>
                         <label for="last-name">Last name</label>
                         <input id="last-name" type="text" placeholder="Last name"
-                               autocomplete="family-name" maxlength="100" @bind="lastName" />
+                               autocomplete="family-name" maxlength="@(global::Concierge.Contracts.ConciergeVerifiedGuest.MaxNameLength)" @bind="lastName" />
                         <label for="room-number">Room number</label>
                         <input id="room-number" type="text" placeholder="Room number"
                                inputmode="numeric" autocomplete="off" maxlength="4" @bind="roomNumber" />

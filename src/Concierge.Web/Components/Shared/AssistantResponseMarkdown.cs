@@ -12,7 +12,7 @@ internal static class AssistantResponseMarkdown
     private static readonly string[] AllowedTags =
     [
         "p", "br", "strong", "em", "ul", "ol", "li", "blockquote", "code", "pre",
-        "table", "thead", "tbody", "tr", "th", "td", "a"
+        "table", "thead", "tbody", "tr", "th", "td", "a", "img"
     ];
 
     // Raw HTML stays literal text; only the extensions the chat needs are enabled.
@@ -43,7 +43,7 @@ internal static class AssistantResponseMarkdown
         }
     }
 
-    /// <summary>Keeps absolute HTTPS links; images and other links become their text.</summary>
+    /// <summary>Keeps HTTPS links and same-origin weather images; other links become their text.</summary>
     private static void RestrictLinks(MarkdownDocument document)
     {
         foreach (var autolink in document.Descendants<AutolinkInline>().ToList())
@@ -56,6 +56,7 @@ internal static class AssistantResponseMarkdown
 
         foreach (var link in document.Descendants<LinkInline>().ToList())
         {
+            if (link.IsImage && IsAllowedImageUrl(link.Url)) continue;
             if (!link.IsImage && IsAllowedUrl(link.Url)) continue;
 
             while (link.FirstChild is { } child)
@@ -75,6 +76,23 @@ internal static class AssistantResponseMarkdown
         && uri.Scheme == Uri.UriSchemeHttps
         && !string.IsNullOrEmpty(uri.Host);
 
+    private static bool IsAllowedImageUrl(string? url)
+    {
+        if (url is null
+            || !url.StartsWith("/images/", StringComparison.Ordinal)
+            || url.Contains('\\')
+            || url.Contains('%')
+            || url.Contains('?')
+            || url.Contains('#')
+            || url.Any(character => !(char.IsAsciiLetterOrDigit(character)
+                || character is '/' or '-' or '_' or '.')))
+        {
+            return false;
+        }
+
+        return url.Split('/').All(segment => segment is not ("." or ".."));
+    }
+
     // Created per render so no shared mutable sanitizer state crosses circuits; the component caches output.
     private static HtmlSanitizer CreateSanitizer()
     {
@@ -86,7 +104,7 @@ internal static class AssistantResponseMarkdown
         sanitizer.AllowedTags.Clear();
         sanitizer.AllowedTags.UnionWith(AllowedTags);
         sanitizer.AllowedAttributes.Clear();
-        sanitizer.AllowedAttributes.Add("href");
+        sanitizer.AllowedAttributes.UnionWith(["href", "src", "alt"]);
         sanitizer.AllowedCssProperties.Clear();
         sanitizer.AllowedAtRules.Clear();
         sanitizer.AllowedClasses.Clear();
@@ -94,6 +112,7 @@ internal static class AssistantResponseMarkdown
         sanitizer.AllowedSchemes.Add(Uri.UriSchemeHttps);
         sanitizer.UriAttributes.Clear();
         sanitizer.UriAttributes.Add("href");
+        sanitizer.UriAttributes.Add("src");
         sanitizer.PostProcessNode += (_, e) =>
         {
             if (e.Node is not IElement { LocalName: "a" } anchor) return;
