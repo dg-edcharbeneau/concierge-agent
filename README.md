@@ -28,6 +28,7 @@ From the repository root:
 
 ```bash
 just run      # or: aspire run
+just reset    # stop the AppHost and delete its Postgres and Temporal data volumes
 ```
 
 The AppHost creates an anonymous Dev Tunnel for Web's dedicated Think endpoint
@@ -66,16 +67,19 @@ Verify a demo stay with a last name and room number:
 | Rivera | 412 |
 | Morgan | 812 |
 
-Room numbers are 1–4 digits and can't start with `0`.
+Room numbers are 1–4 digits and can't start with `0`. Given and family names are at most 100
+characters (`ConciergeVerifiedGuest.MaxNameLength`): Setup rejects longer seeded names, and
+verification rejects a longer last name.
 
 ### Stay memory and answer context
 
 A turn makes no summary model call. Each answer gets an estimated 8,000-token
-working context: instructions, verified guest answer context, current hotel
+working context (21,000 on turns that offer weather, route, nearby-place and ride tools,
+which also counts their schemas and tool results): instructions, verified guest answer context, current hotel
 evidence, a bounded stay memory, and the newest complete recent turns that fit.
 
 Sign-in and subsequent authentication forward the database guest's given name,
-family name and room number, bound to the authorized stay. Web and browser voice
+family name, room number and stay dates, bound to the authorized stay. Web and browser voice
 send that profile with each admitted turn, including turns on already-running
 stay workflows. It is a separate answer-context message, not hotel evidence or
 guest-reported memory; the main concierge instructions are unchanged. This
@@ -84,9 +88,14 @@ Client-supplied last names and conversation claims cannot replace this identity.
 
 The server computes the room floor from the authoritative room number: `112`
 is floor 1, `412` floor 4, `812` floor 8, and `1212` floor 12. One- and two-digit
-rooms remain valid but have no inferred floor. The complete JSON-escaped profile
+rooms remain valid but have no inferred floor. The profile also carries the stay's
+hotel-local check-in and checkout dates (with weekday, e.g. `Thu 2026-10-22`) and a
+server-computed number of nights, so stay-length and checkout questions are
+answered from verified data. The complete JSON-escaped profile
 and its message overhead count against the working budget, rather than being
-hidden in the fixed instruction allowance. If the required context cannot fit,
+hidden in the fixed instruction allowance. On action turns, when tool results
+need room, the profile is replaced by name-free stay facts (room, floor, dates,
+nights) that stay for the rest of the turn. If the required context cannot fit,
 the turn fails safely instead of truncating identity or exceeding the budget.
 Raw profile strings are data, not instructions. No extra guest lookup Activity,
 tool, or model call is added to an answer.
@@ -172,7 +181,8 @@ Keys under `AI:Chat:*` and `AI:Embeddings:*`:
 | `Model` | AppHost → `Concierge.WorkflowServer` | `concierge-chat` / `embeddinggemma-2:740m` | The Ollama chat model is created from the checked-in Modelfile below. For Foundry, use the deployment name. |
 | `AI:Chat:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | not created | Created only when `AI:Chat:Provider` is `Foundry`, from `Parameters:foundry-chat-api-key`. If unset, Foundry uses `DefaultAzureCredential`; Aspire does not prompt. |
 | `AI:Embeddings:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | not created | Created only when `AI:Embeddings:Provider` is `Foundry`, from `Parameters:foundry-embeddings-api-key`. If unset, Foundry uses `DefaultAzureCredential`; Aspire does not prompt. |
-| `RequestTimeoutSeconds` | AppHost → `Concierge.WorkflowServer` | `180` | Must be positive. Options default `60`. |
+| `RequestTimeoutSeconds` | AppHost → `Concierge.WorkflowServer` | `18` (chat) / `8` (embeddings) | Chat: 1–18; embeddings: 1–8. The call, including its concurrency-slot wait, must finish inside the Temporal activity attempt that retries it (20 s model, 10 s retrieval, less a 2 s margin). Options defaults are the maximums. Provisional; see [Step 6 timeouts](docs/step-6-concierge-actions.md#implemented-bounds-timeout-and-retry-policy-2026-10-23). |
+| `AI:Embeddings:IngestionRequestTimeoutSeconds` | AppHost → `Concierge.WorkflowServer` | not set (`60`) | 1–298. Bounds each hotel-setup section embedding inside the 5-minute setup activity attempt. Retrieval keeps `RequestTimeoutSeconds`. |
 | `MaxConcurrentRequests` | AppHost → `Concierge.WorkflowServer` | `2` | Must be positive. Options default `4`. |
 | `AI:Chat:ContextWindowTokens` | AppHost → `Concierge.WorkflowServer` | `32768` | Validates that the configured chat context covers the worst-case prompt budget. Ollama's actual `num_ctx` is set by the derived model's Modelfile. |
 | `AI:Chat:ReasoningEffort` | AppHost → `Concierge.WorkflowServer` | `low` | Responses API effort; accepts `low` or `none`. Both Ollama and Foundry use `low` by default; `none` may be selected explicitly for supported models. |
@@ -200,10 +210,20 @@ aspire secret set "AI:Chat:Model" "<deployment>" --apphost src/Concierge.AppHost
 aspire secret set "AI:Chat:RequestTimeoutSeconds" "15" --apphost src/Concierge.AppHost
 ```
 
-The Development timeout (`180`) is sized for local Ollama. Foundry chat calls
-normally finish in 2–4 seconds but occasionally stall for about 30 seconds. A
-15-second timeout fails the stalled attempt so Temporal retries the model
-activity (up to 5 attempts) instead of holding the voice turn.
+Temporal owns model and embedding retries; the SDK clients send each request
+once. On 2026-10-23, Foundry `gpt-5-mini` chat attempts had a 5.2-second P95
+and a 12.9-second slowest success. A 15-second timeout fails a stalled attempt
+so Temporal retries the model activity (3 attempts within the 180-second turn)
+instead of holding the turn. The Development limit (`18`) has not been measured
+against local Ollama; load the model before use rather than raising the limit.
+
+Startup validation rejects a value above the maximum and names the key and
+limit. If an older user secret sets `AI:Embeddings:RequestTimeoutSeconds` above
+`8` (for example `60`), the worker stops at startup; lower or remove it:
+
+```bash
+aspire secret set "AI:Embeddings:RequestTimeoutSeconds" "8" --apphost src/Concierge.AppHost
+```
 
 With Ollama, the AppHost creates no Foundry parameters, so none appear on the
 dashboard. Ollama does not use `ApiKey` or Azure credentials.
@@ -224,8 +244,8 @@ AppHost user-secret overrides the empty default.
 | `Parameters:deepgram-api-key` | `Deepgram:ApiKey` in `Concierge.Web` | Optional for text-only use; required when browser voice is implemented. |
 
 The AppHost's base `appsettings.json` selects Foundry, uses `768` embedding
-dimensions, a `32768` chat context window, a `15`-second chat timeout, a
-`60`-second embeddings timeout, and concurrency `4`. Its endpoints and models are deliberately empty: outside `Development`,
+dimensions, a `32768` chat context window, a `15`-second chat timeout, an
+`8`-second embeddings timeout, and concurrency `4`. Its endpoints and models are deliberately empty: outside `Development`,
 configure `AI:Chat:Endpoint`, `AI:Chat:Model`, `AI:Embeddings:Endpoint`, and
 `AI:Embeddings:Model`. "Missing endpoint or model" means the service URL or
 deployment name has not been supplied, not that the deployed model is missing.
@@ -247,15 +267,17 @@ omitting them uses `DefaultAzureCredential`.
 For Ollama, also set both `Provider` values to `Ollama`, with the local service
 URL and model names from the table above. Create `concierge-chat` using the
 command above before running the chat workflow. Timeout, concurrency, and
-context window are optional: the options defaults are `60`, `4`, and `32768`.
-To reproduce Aspire Development's request limits, explicitly set each
-capability's `RequestTimeoutSeconds=180` and `MaxConcurrentRequests=2`.
+context window are optional: the options defaults are `18` (chat) / `8`
+(embeddings) seconds, `60` seconds for ingestion embeddings, concurrency `4`,
+and `32768`. To reproduce Aspire Development's request limits, set each
+capability's `MaxConcurrentRequests=2`; the Development timeouts equal the
+defaults.
 Standalone execution also requires the normal database and Temporal connection
 configuration. WorkflowServer has no separate user-secrets store.
 The worker does not load AppHost settings outside Aspire, so standalone
 WorkflowServer must also receive `Geoapify__ApiKey` from secure deployment
-configuration and `Hotel__Latitude`, `Hotel__Longitude`, and `Hotel__TimeZoneId`
-as configuration values.
+configuration and `Hotel__Address` and `Hotel__TimeZoneId` as configuration
+values.
 
 Other settings:
 
@@ -265,27 +287,62 @@ Other settings:
 | `Concierge:Persistence:FlushBatchSize` | `Concierge.Web` | `5` | Completed turns that trigger an early transcript write; whichever of batch size or interval comes first wins. 1–100. It applies to stays started after the change. |
 | `Setup:KnowledgeDirectory` | `Concierge.WorkflowServer` | `knowledge/hotel-zgy` | Markdown folder to ingest at startup. |
 | `Setup:OverwriteExistingSeedRecords` | `Concierge.WorkflowServer` | `false` | Updates existing demo guest and stay records on startup. |
-| `Hotel:Latitude` | AppHost → `Concierge.WorkflowServer` | `25.7984634` degrees | Hotel ZGY's configured location anchor; must be finite and between −90 and 90. Used to bias Geoapify and as the no-place weather location. |
-| `Hotel:Longitude` | AppHost → `Concierge.WorkflowServer` | `−80.1956016` degrees | Hotel ZGY's configured location anchor; must be finite and between −180 and 180. Used to bias Geoapify and as the no-place weather location. |
-| `Hotel:TimeZoneId` | AppHost → `Concierge.WorkflowServer` | `America/New_York` | Must be a time zone available on the host. Open-Meteo forecasts and today/tonight/tomorrow dates use this hotel-local zone. |
+| `Hotel:Address` | AppHost → `Concierge.WorkflowServer` | `2217 NW Miami Court, Miami, FL 33127` | Real address the fictional Hotel ZGY is pinned to. Required. Geocoded once at WorkflowServer startup (see below) and shown to guests as "Hotel ZGY, <address>". To re-pin the hotel, change this and `Hotel:TimeZoneId` and restart. |
+| `Hotel:TimeZoneId` | AppHost → `Concierge.WorkflowServer`, `Concierge.RideService` | `America/New_York` | Must be a time zone available on the host. Open-Meteo forecasts and today/tonight/tomorrow dates use this hotel-local zone. |
 | `Geoapify:ApiKey` | AppHost secret parameter → `Concierge.WorkflowServer` | no default; required | Set `Parameters:geoapify-api-key` in AppHost user-secrets. The key is passed only to WorkflowServer and is not included in application logs or outbound HTTP traces. |
 
-Geoapify place searches use the configured hotel coordinates as a proximity
+Hotel coordinates are not configured. After migrations and before Temporal
+workers start, WorkflowServer geocodes `Hotel:Address` with an unbiased,
+US-only Geoapify search and accepts exactly one `building` or `amenity` match
+with confidence ≥ 0.9. The lookup uses the standard Aspire HTTP resilience
+policy (retries on 5xx/429, not on 401/403). If it fails, startup stops with an
+error naming `Hotel:Address` and the reason. Geoapify's own name for the
+address is never shown to guests.
+
+Geoapify place searches use the resolved hotel coordinates as a proximity
 bias. A result is eligible only when it is in the United States and Florida,
 and either belongs to Miami-Dade County or is within 60 km of the hotel; results
-below provider confidence `0.5` are ignored. A single eligible match resolves;
-zero or multiple eligible matches return a clarification-needed result rather
-than selecting a potentially wrong place. The Geoapify API key is required at
-WorkflowServer startup even though hotel-coordinate weather requests do not
-need geocoding.
+below provider confidence `0.5` are ignored. Geoapify scores "name, street address"
+text without a city (for example "Walgreens, 3103 Biscayne Boulevard") at confidence
+`0` even when it matches. For a `full_match` the building-level confidence is used
+instead, but only when the query itself names that result's venue and its house
+number and street (street abbreviations such as "NW" and "St" are expanded).
+Geoapify documents building-level confidence as building-position accuracy, not
+a venue match ([forward geocoding](https://apidocs.geoapify.com/docs/geocoding/forward-geocoding/)).
+A single eligible match resolves. Geoapify can also return nameless building
+records alongside the named venue for one address, with no shared provider id.
+They merge into one place only when every eligible match has the same house
+number and street, all lie within 75 m, and the query names the identity they
+share: either a venue name that every named record carries (the merged place is
+that venue), or, when the query names no venue, the house number and street (the
+merged place is the address record). Zero matches, or nearby venues and branches
+the query does not identify, return a clarification-needed result rather than
+selecting a potentially wrong place. The Geoapify API key is required at
+WorkflowServer startup, which geocodes the hotel address.
+
+Nearby-place questions ("What is the nearest pharmacy?") use the `FindNearbyPlaces`
+tool. The model picks one category from a fixed list (pharmacy, grocery, restaurant,
+cafe, bar, ATM, hospital, and others); each maps to
+[Geoapify Places categories](https://apidocs.geoapify.com/docs/places/#categories).
+One Geoapify Places request searches within 8 km of the resolved hotel coordinates,
+sorted by proximity to the hotel. The workflow replies with the three closest named
+places, giving addresses and distances in miles. The search always starts at the
+hotel. The tool activity runs once, with a 15-second limit.
 
 Weather requests use Open-Meteo's read-only forecast API without an API key.
 The service requests daily high/low temperature in Fahrenheit and maximum wind
 speed in mph, with the configured hotel time zone. `Today` and `Tonight` select
 the current hotel-local date; `Tomorrow` selects the next hotel-local date.
+For "the next N days" (2–7, "few", "couple", "N-day forecast") the workflow
+ignores the model's chosen periods and fetches one day each, starting today
+(or tomorrow when the guest says "starting", "beginning", or "from tomorrow"), in
+parallel, never past day+6; days 2–6 use workflow-only `day+N` periods and are reported by weekday.
+A weekday start ("starting Friday") uses workflow-only `{weekday}+N` periods that the
+weather activity resolves against the hotel-local date; days past day+6 are reported
+as not yet forecast. Unmapped starts ("starting next Friday") are not rewritten.
 When a place is given, Geoapify must resolve it before Open-Meteo is called;
-without a place, the configured hotel coordinates are used. Provider HTTP
-requests have a fixed 20-second client timeout; this is code-defined, not an
+without a place, the resolved hotel coordinates are used. Provider HTTP
+requests have a fixed 5-second client timeout; this is code-defined, not an
 application setting.
 
 To configure the required Geoapify secret under Aspire:
@@ -297,7 +354,7 @@ aspire secret set "Parameters:geoapify-api-key" "<key>" --apphost src/Concierge.
 Never put the key in checked-in configuration or include its value in logs.
 The hotel's base defaults live in
 `src/Concierge.AppHost/appsettings.json`; AppHost configuration overrides may
-use `Hotel__Latitude`, `Hotel__Longitude`, and `Hotel__TimeZoneId`.
+use `Hotel__Address` and `Hotel__TimeZoneId`.
 
 Aspire supplies `ConnectionStrings:concierge` to `Concierge.WorkflowServer` and
 Temporal settings to both `Concierge.WorkflowServer` and `Concierge.Web`.
