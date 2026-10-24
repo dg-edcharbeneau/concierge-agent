@@ -23,13 +23,13 @@
     "recallAtK": {
       "k": 5,
       "threshold": 0.9,
-      "plannedDenominator": 19,
+      "plannedDenominator": 20,
       "minimumPassingCount": 18
     },
     "answerSupport": {
       "threshold": 1.0,
-      "plannedDenominator": 17,
-      "minimumPassingCount": 17
+      "plannedDenominator": 18,
+      "minimumPassingCount": 18
     },
     "noEvidenceBehavior": {
       "threshold": 1.0,
@@ -51,13 +51,14 @@
   "humanReview": {
     "status": "approved",
     "reviewedBy": "Cecil Phillip",
-    "reviewedOn": "2026-10-16",
+    "reviewedOn": "2026-10-20",
     "reviewChecklist": [
       "Questions sound like realistic guest questions.",
       "Expected evidence is necessary and sufficient.",
       "Step 4 fictional facts are approved before dependent cases activate.",
       "No-evidence requests are intentionally absent from the seed corpus.",
-      "Initial gates and scoring math are accepted."
+      "Initial gates and scoring math are accepted.",
+      "Complimentary rides for current guests are approved."
     ]
   },
   "provenance": [
@@ -129,11 +130,12 @@
         "room-service",
         "contacting-hotel-staff",
         "luggage-storage",
-        "hotel-shuttle"
+        "hotel-shuttle",
+        "rides"
       ],
       "contentStatus": "approved",
       "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
-      "notes": "knowledge/hotel-zgy/services.md records room service from 6:00 a.m. to 10:00 a.m. and 7:00 p.m. to 1:00 a.m. Eastern Time (concierge cannot order; guests can call the front desk and ask for room service), a 24-hour front desk reached by dialing 0 from the room phone, tagged-luggage holding until 8:00 p.m. on checkout day (not overnight), and shuttle availability with no approved schedule or pickup location. Approved by Cecil Phillip on 2026-10-09 per user handoff; staff-contact facts approved by Cecil Phillip on 2026-10-14."
+      "notes": "knowledge/hotel-zgy/services.md records room service from 6:00 a.m. to 10:00 a.m. and 7:00 p.m. to 1:00 a.m. Eastern Time (concierge cannot order; guests can call the front desk and ask for room service), a 24-hour front desk reached by dialing 0 from the room phone, tagged-luggage holding until 8:00 p.m. on checkout day (not overnight), shuttle availability with no approved schedule or pickup location, and complimentary car rides for current guests. Ride cost approved by Cecil Phillip on 2026-10-20; prior service facts were approved in earlier handoffs."
     },
     {
       "sourceId": "zgy-connectivity",
@@ -172,8 +174,8 @@
     "repositoryRootFromPackage": "../..",
     "includePattern": "**/*.md",
     "hashAlgorithm": "sha256",
-    "capturedOn": "2026-10-16",
-    "rule": "Every Markdown file under the root is listed with its repository-relative path, front-matter sourceId, SHA-256 of the exact file bytes, and byte length. Captured after the 2026-10-16 user-approved pool-hours and convenience-store updates and before comparison runs against this snapshot.",
+    "capturedOn": "2026-10-20",
+    "rule": "Every Markdown file under the root is listed with its repository-relative path, front-matter sourceId, SHA-256 of the exact file bytes, and byte length. Captured after the user-approved complimentary rides fact on 2026-10-20.",
     "files": [
       {
         "path": "knowledge/hotel-zgy/amenities.md",
@@ -220,8 +222,8 @@
       {
         "path": "knowledge/hotel-zgy/services.md",
         "sourceId": "zgy-services",
-        "sha256": "42f7ffc58428953f167e4268ee3ddaaa3160d39a8b05ad1c8b58c0bcda22f0a8",
-        "byteLength": 1085
+        "sha256": "cf45a9934d98e0c0ebd761c512ca1356502f2a25ca0986eaa5fe03c42450ff62",
+        "byteLength": 1217
       }
     ]
   },
@@ -542,6 +544,24 @@
       ],
       "trace": "../../.artifacts/hotel-concierge-demo.md#evaluation-and-success-criteria",
       "seedAuthoringNotes": "Checkout and luggage storage are authored in zgy-policies#checkout and zgy-services#luggage-storage. Approved and active as of 2026-10-09."
+    },
+    {
+      "id": "ZGY-EXACT-011",
+      "category": "exact_term",
+      "status": "active",
+      "question": "How much is a ride?",
+      "expectedEvidence": [
+        {
+          "sourceId": "zgy-services",
+          "sectionId": "rides"
+        }
+      ],
+      "answerSupportLabel": "supported",
+      "expectedClaims": [
+        "Concierge-arranged car rides are complimentary for current Hotel ZGY guests."
+      ],
+      "trace": "../../.artifacts/hotel-concierge-demo.md#purpose",
+      "seedAuthoringNotes": "Current guests pay no charge for concierge-arranged car rides, as approved by Cecil Phillip on 2026-10-20."
     },
     {
       "id": "ZGY-NONE-006",

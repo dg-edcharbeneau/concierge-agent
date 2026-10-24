@@ -6,6 +6,7 @@
 using System.Runtime.CompilerServices;
 using Concierge.WorkflowServer.Location;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 const string AppHostUserSecretsId = "4712ad72-9c78-4c3e-9cde-48b4a755764a";
@@ -30,12 +31,24 @@ foreach (var validation in new[] { validator.Validate(null, hotel), validator.Va
     }
 }
 
-using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-var resolver = new GeoapifyPlaceResolver(httpClient, Options.Create(hotel), Options.Create(geoapify));
+// Same startup geocode the WorkflowServer runs before its workers start.
+var services = new ServiceCollection();
+services.AddSingleton(Options.Create(hotel));
+services.AddSingleton(Options.Create(geoapify));
+services.AddHotelLocation();
+await using var provider = services.BuildServiceProvider();
+var hotelLocation = provider.GetRequiredService<HotelLocation>();
+hotelLocation.Initialize(await provider.GetRequiredService<HotelAddressGeocoder>().ResolveAsync());
+Console.WriteLine($"Hotel:Address resolved to {hotelLocation.Coordinates.Latitude}, {hotelLocation.Coordinates.Longitude}");
+
+// The production named client: no HTTP retries and a whole-request time bound.
+var httpClient = provider.GetRequiredService<IHttpClientFactory>();
+var resolver = new GeoapifyPlaceResolver(httpClient, hotelLocation, Options.Create(geoapify));
 var routeService = new GeoapifyDrivingRouteService(
     httpClient,
     resolver,
     Options.Create(hotel),
+    hotelLocation,
     Options.Create(geoapify));
 var result = await routeService.GetRouteAsync(new DrivingRouteRequest(["South Beach"]));
 var route = result.Route;

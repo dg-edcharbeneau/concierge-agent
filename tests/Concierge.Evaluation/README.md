@@ -27,7 +27,8 @@ and `corpusSnapshot.repositoryRootFromPackage` differ. Schemas are byte-identica
   staff-contact facts in `zgy-services`, the room-service ordering route, and
   case ZGY-PARA-004. On 2026-10-16 Cecil approved pool hours and convenience-store
   location, hours, stock categories, and referral for specific brands and sizes.
-- All 8 planned sources are `approved`. All 22 cases are `active`.
+  On 2026-10-20 Cecil approved complimentary concierge-arranged rides for current guests.
+- All 8 planned sources are `approved`. All 23 cases are `active`.
 - Corpus absence for the 5 no-evidence cases was confirmed against the full
   recorded snapshot. The corpus contains related passages but no evidence for
   front-desk charger lending, parking prices or non-guest parking terms, or a
@@ -43,7 +44,7 @@ This package records no retrieval or answer results.
 
 | Category | Cases | Expected evidence keys |
 | --- | --- | --- |
-| `exact_term` | 10 | 10 |
+| `exact_term` | 11 | 11 |
 | `paraphrase` | 5 | 5 |
 | `multi_source` | 2 | 4 |
 | `no_evidence` | 5 | 0 |
@@ -51,11 +52,11 @@ This package records no retrieval or answer results.
 The package uses these initial demo gates. They are package-specific and are
 not universal benchmarks. The count-based minimums are authoritative:
 
-- Recall@5: at least 18 of 19 expected evidence keys (`threshold` 0.90;
-  ceiling(0.90 × 19) = 18). Only the combined (production) retrieval arm is
+- Recall@5: at least 18 of 20 expected evidence keys (`threshold` 0.90;
+  ceiling(0.90 × 20) = 18). Only the combined (production) retrieval arm is
   gated. Lexical-only and vector-only Recall@5 are comparison numbers, not
   pass/fail.
-- Answer support: 17 of 17 answerable cases.
+- Answer support: 18 of 18 answerable cases.
 - No-evidence behavior: 5 of 5 cases.
 
 Case IDs ZGY-NONE-001 and ZGY-NONE-002 were removed because approved facts now
@@ -70,12 +71,14 @@ guest rooms and conference rooms do not establish front-desk charger lending.
 ## Corpus snapshot
 
 The evaluation corpus is every Markdown file under `knowledge/hotel-zgy/`
-(8 sources, 16 sections/chunks in the 2026-10-16 setup run).
+(8 sources, 17 sections/chunks after the complimentary-rides fact approved on
+2026-10-20).
 `corpusSnapshot` records the repository-relative path, `sourceId`, SHA-256 of
 the exact file bytes, and byte length of each file. The snapshot was captured
 on 2026-10-09 after the approved corpus updates and before any comparison. It
 was recaptured on 2026-10-14 after the approved staff-contact update to
-`services.md`, and on 2026-10-16 after the approved pool/store additions.
+`services.md`, on 2026-10-16 after the approved pool/store additions, and on
+2026-10-20 after the complimentary-rides update.
 Older runs used smaller snapshots (initially 14 evidence keys / 12 answerable
 cases, then 15 / 13) and are not comparable gate-for-gate.
 The validator fails in any of these cases:
@@ -96,7 +99,7 @@ The validator fails in any of these cases:
 | `knowledge/hotel-zgy/parking.md` | `zgy-parking` | `0bad9f1b48beda2f8c30ecd04aecdf2d5e903fac9673a6c3d3b6adf89536d14b` | 251 |
 | `knowledge/hotel-zgy/policies.md` | `zgy-policies` | `7a028d3b7eea34057fba7ee0120a505f08c1f57a0904f96ba6ef92719866e54a` | 427 |
 | `knowledge/hotel-zgy/property-overview.md` | `zgy-property-overview` | `15b4ce88cc164475d28c7220eb6c6e53d619c56559357c3ba75bc097c683e3c7` | 369 |
-| `knowledge/hotel-zgy/services.md` | `zgy-services` | `42f7ffc58428953f167e4268ee3ddaaa3160d39a8b05ad1c8b58c0bcda22f0a8` | 1085 |
+| `knowledge/hotel-zgy/services.md` | `zgy-services` | `cf45a9934d98e0c0ebd761c512ca1356502f2a25ca0986eaa5fe03c42450ff62` | 1217 |
 
 ## Validate
 
