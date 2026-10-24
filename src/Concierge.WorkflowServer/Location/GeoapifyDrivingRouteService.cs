@@ -24,13 +24,18 @@ public sealed record DrivingRouteResult(
     DrivingRouteStatus Status,
     string? ClarificationQuery,
     IReadOnlyList<ResolvedPlace> Candidates,
-    DrivingRoute? Route);
+    DrivingRoute? Route,
+    DrivingRouteEndpoint? Origin = null,
+    DrivingRouteEndpoint? Destination = null);
+
+public sealed record DrivingRouteEndpoint(string Name, double Latitude, double Longitude);
 
 /// <summary>Resolves route endpoints and requests server-estimated Geoapify driving directions.</summary>
 public sealed class GeoapifyDrivingRouteService(
-    HttpClient httpClient,
+    IHttpClientFactory httpClientFactory,
     GeoapifyPlaceResolver placeResolver,
     IOptions<HotelLocationOptions> hotelOptions,
+    HotelLocation hotelLocation,
     IOptions<GeoapifyOptions> geoapifyOptions)
 {
     private const string Endpoint = "https://api.geoapify.com/v1/routing";
@@ -39,6 +44,8 @@ public sealed class GeoapifyDrivingRouteService(
     // ADR 0009 D4: voice summarises the first few steps; web may show the full list.
     internal const int MaxVoiceInstructions = 3;
     internal const int MaxVoiceInstructionLength = 120;
+    internal const int MaxWebInstructions = 100;
+    internal const int MaxWebInstructionLength = 500;
 
     public async Task<DrivingRouteResult> GetRouteAsync(
         DrivingRouteRequest request,
@@ -55,9 +62,18 @@ public sealed class GeoapifyDrivingRouteService(
                 nameof(request));
         }
 
-        var resolvedPlaces = new List<ResolvedPlace>(request.Places.Count);
+        var hotel = hotelOptions.Value;
+        var coordinates = hotelLocation.Coordinates;
+        var hotelEndpoint = new DrivingRouteEndpoint(hotel.Label, coordinates.Latitude, coordinates.Longitude);
+        var endpoints = new List<DrivingRouteEndpoint>(request.Places.Count);
         foreach (var query in request.Places)
         {
+            if (HotelLocationOptions.IsHotelReference(query))
+            {
+                endpoints.Add(hotelEndpoint);
+                continue;
+            }
+
             var resolution = await placeResolver.ResolveAsync(query, cancellationToken);
             if (resolution.Status != PlaceResolutionStatus.Resolved)
             {
@@ -68,14 +84,11 @@ public sealed class GeoapifyDrivingRouteService(
                     Route: null);
             }
 
-            resolvedPlaces.Add(resolution.Place!);
+            endpoints.Add(ToEndpoint(resolution.Place!));
         }
 
-        var hotel = hotelOptions.Value;
-        var origin = request.Places.Count == 1
-            ? new RouteEndpoint(hotel.Latitude, hotel.Longitude)
-            : new RouteEndpoint(resolvedPlaces[0].Latitude, resolvedPlaces[0].Longitude);
-        var destination = new RouteEndpoint(resolvedPlaces[^1].Latitude, resolvedPlaces[^1].Longitude);
+        var origin = endpoints.Count == 1 ? hotelEndpoint : endpoints[0];
+        var destination = endpoints[^1];
 
         var key = geoapifyOptions.Value.ApiKey;
         if (string.IsNullOrWhiteSpace(key))
@@ -90,18 +103,11 @@ public sealed class GeoapifyDrivingRouteService(
         var uri = $"{Endpoint}?waypoints={Uri.EscapeDataString(waypoints)}"
             + "&mode=drive&details=instruction_details&units=metric&format=json&lang=en"
             + $"&apiKey={Uri.EscapeDataString(key)}";
-        using var routeRequest = new HttpRequestMessage(HttpMethod.Get, uri);
-        using var response = await LocationProviderHttp.SendAsync(
-            httpClient,
-            routeRequest,
-            "Geoapify",
-            cancellationToken);
-        using var document = await JsonDocument.ParseAsync(
-            await response.Content.ReadAsStreamAsync(cancellationToken),
-            cancellationToken: cancellationToken);
+        using var document = await LocationProviderHttp.GetJsonAsync(
+            httpClientFactory, uri, "Geoapify", cancellationToken);
 
         var route = ReadRoute(document.RootElement);
-        return new(DrivingRouteStatus.Available, null, [], route);
+        return new(DrivingRouteStatus.Available, null, [], route, origin, destination);
     }
 
     private static DrivingRoute ReadRoute(JsonElement root)
@@ -152,7 +158,10 @@ public sealed class GeoapifyDrivingRouteService(
                 var stepDistance = TryReadNonNegativeNumber(step, "distance", out var meters)
                     ? $" ({FormatDistance(meters)})"
                     : string.Empty;
-                steps.Add(fullText + stepDistance);
+                if (steps.Count < MaxWebInstructions)
+                {
+                    steps.Add(ShortenForWeb(fullText) + stepDistance);
+                }
                 if (voiceInstructions.Count < MaxVoiceInstructions)
                 {
                     voiceInstructions.Add(ShortenForVoice(fullText));
@@ -211,5 +220,17 @@ public sealed class GeoapifyDrivingRouteService(
         return instruction[..(cutoff > 0 ? cutoff : MaxVoiceInstructionLength)].TrimEnd() + "…";
     }
 
-    private sealed record RouteEndpoint(double Latitude, double Longitude);
+    private static DrivingRouteEndpoint ToEndpoint(ResolvedPlace place) =>
+        new(place.Formatted, place.Latitude, place.Longitude);
+
+    private static string ShortenForWeb(string instruction)
+    {
+        if (instruction.Length <= MaxWebInstructionLength)
+        {
+            return instruction;
+        }
+
+        var cutoff = instruction.LastIndexOf(' ', MaxWebInstructionLength - 1);
+        return instruction[..(cutoff > 0 ? cutoff : MaxWebInstructionLength)].TrimEnd() + "…";
+    }
 }

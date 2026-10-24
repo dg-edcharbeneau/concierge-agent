@@ -10,12 +10,13 @@ public sealed class DrivingRoutesTests
 {
     private static readonly HotelLocationOptions Hotel = new()
     {
-        Latitude = 25.7984634,
-        Longitude = -80.1956016,
         TimeZoneId = "America/New_York",
+        Address = "2217 NW Miami Court, Miami, FL 33127",
     };
 
     private static readonly GeoapifyOptions Geoapify = new() { ApiKey = "test-route-key" };
+
+    private static readonly HotelCoordinates Coordinates = new(25.7984634, -80.1956016);
 
     [Fact]
     public async Task OnePlaceRoutesFromHotelToResolvedDestination()
@@ -44,10 +45,55 @@ public sealed class DrivingRoutesTests
         Assert.Contains("mode=drive", routeUri!.Query);
         Assert.Contains("details=instruction_details", routeUri.Query);
         Assert.Contains("units=metric", routeUri.Query);
-        Assert.Contains(Uri.EscapeDataString($"{Hotel.Latitude},{Hotel.Longitude}|25.7745,-80.1329"),
+        Assert.Contains(Uri.EscapeDataString($"{Coordinates.Latitude},{Coordinates.Longitude}|25.7745,-80.1329"),
             routeUri.Query);
         Assert.DoesNotContain("traffic=", routeUri.Query, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Theory]
+    [InlineData("Hotel ZGY", "South Beach", "25.7984634,-80.1956016|25.7745,-80.1329")]
+    [InlineData("South Beach", "the hotel", "25.7745,-80.1329|25.7984634,-80.1956016")]
+    public async Task HotelNamedAsEitherEndpointUsesConfiguredAddressWithoutGeocoding(
+        string origin,
+        string destination,
+        string expectedWaypoints)
+    {
+        var resolvedQueries = new List<string>();
+        Uri? routeUri = null;
+        using var http = CreateClient(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/geocode/search", StringComparison.Ordinal))
+            {
+                resolvedQueries.Add(Uri.UnescapeDataString(request.RequestUri.Query));
+                return Geocode("South Beach, Miami-Dade County, Florida", 25.7745, -80.1329);
+            }
+
+            routeUri = request.RequestUri;
+            return RouteResponse();
+        });
+        var service = CreateService(http.Client);
+
+        var result = await service.GetRouteAsync(new DrivingRouteRequest([origin, destination]));
+
+        Assert.Equal(DrivingRouteStatus.Available, result.Status);
+        var query = Assert.Single(resolvedQueries);
+        Assert.Contains("South Beach", query);
+        Assert.Contains(Uri.EscapeDataString(expectedWaypoints), routeUri!.Query);
+        var hotelEndpoint = origin == "Hotel ZGY" ? result.Origin : result.Destination;
+        Assert.Equal("Hotel ZGY, 2217 NW Miami Court, Miami, FL 33127", hotelEndpoint!.Name);
+    }
+
+    [Theory]
+    [InlineData("Hotel ZGY", true)]
+    [InlineData("hotel zgy, Miami", true)]
+    [InlineData("The hotel", true)]
+    [InlineData("  my hotel. ", true)]
+    [InlineData("Hotel Dorado", false)]
+    [InlineData("South Beach", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void HotelReferencesAreRecognizedWithoutMatchingOtherHotels(string? place, bool expected) =>
+        Assert.Equal(expected, HotelLocationOptions.IsHotelReference(place));
 
     [Fact]
     public async Task TwoPlacesRouteInInputOrderAfterResolvingBoth()
@@ -215,12 +261,21 @@ public sealed class DrivingRoutesTests
 
     private static GeoapifyDrivingRouteService CreateService(HttpClient httpClient)
     {
-        var resolver = new GeoapifyPlaceResolver(httpClient, Options.Create(Hotel), Options.Create(Geoapify));
+        var hotelLocation = CreateHotelLocation();
+        var resolver = new GeoapifyPlaceResolver(new FixedHttpClientFactory(httpClient), hotelLocation, Options.Create(Geoapify));
         return new GeoapifyDrivingRouteService(
-            httpClient,
+            new FixedHttpClientFactory(httpClient),
             resolver,
             Options.Create(Hotel),
+            hotelLocation,
             Options.Create(Geoapify));
+    }
+
+    private static HotelLocation CreateHotelLocation()
+    {
+        var hotelLocation = new HotelLocation();
+        hotelLocation.Initialize(Coordinates);
+        return hotelLocation;
     }
 
     private static RecordingHttpClient CreateClient(Func<HttpRequestMessage, HttpResponseMessage> responder)

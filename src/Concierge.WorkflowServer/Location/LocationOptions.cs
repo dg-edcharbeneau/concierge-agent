@@ -6,11 +6,38 @@ public sealed class HotelLocationOptions
 {
     public const string SectionName = "Hotel";
 
-    public double Latitude { get; set; }
-
-    public double Longitude { get; set; }
-
     public string TimeZoneId { get; set; } = string.Empty;
+
+    public const string DisplayName = "Hotel ZGY";
+
+    /// <summary>Street address of the real location the fictional hotel is pinned to.</summary>
+    public string Address { get; set; } = string.Empty;
+
+    /// <summary>Guest-facing label that names the real address used for weather, routes, and rides.</summary>
+    public string Label => string.IsNullOrWhiteSpace(Address) ? DisplayName : $"{DisplayName}, {Address}";
+
+    // Hotel ZGY is fictional, so a geocoder cannot resolve it; the model naturally names it.
+    private static readonly HashSet<string> HotelReferences = new(StringComparer.Ordinal)
+    {
+        "hotel", "the hotel", "my hotel", "our hotel", "zgy", "hotel zgy", "the hotel zgy",
+        "hotel zgy miami", "zgy hotel",
+    };
+
+    public static bool IsHotelReference(string? place)
+    {
+        if (string.IsNullOrWhiteSpace(place))
+        {
+            return false;
+        }
+
+        var normalized = string.Join(
+            ' ',
+            new string(place.ToLowerInvariant()
+                    .Select(character => char.IsLetterOrDigit(character) ? character : ' ')
+                    .ToArray())
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        return HotelReferences.Contains(normalized);
+    }
 }
 
 public sealed class GeoapifyOptions
@@ -26,16 +53,10 @@ public sealed class LocationOptionsValidator :
 {
     public ValidateOptionsResult Validate(string? name, HotelLocationOptions options)
     {
-        if (!double.IsFinite(options.Latitude) || options.Latitude is < -90 or > 90)
+        if (string.IsNullOrWhiteSpace(options.Address))
         {
             return ValidateOptionsResult.Fail(
-                $"{HotelLocationOptions.SectionName}:Latitude must be between -90 and 90.");
-        }
-
-        if (!double.IsFinite(options.Longitude) || options.Longitude is < -180 or > 180)
-        {
-            return ValidateOptionsResult.Fail(
-                $"{HotelLocationOptions.SectionName}:Longitude must be between -180 and 180.");
+                $"{HotelLocationOptions.SectionName}:Address is required for startup geocoding.");
         }
 
         if (string.IsNullOrWhiteSpace(options.TimeZoneId))

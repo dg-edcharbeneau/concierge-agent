@@ -15,9 +15,39 @@ public enum WeatherResultStatus
 {
     Available,
     NeedsClarification,
+
+    /// <summary>The requested day is past the forecast horizon; <see cref="WeatherResult.RequestedDate"/> names it.</summary>
+    BeyondForecast,
+
+    /// <summary>
+    /// The requested weekend day has already passed (Saturday, asked on Sunday);
+    /// <see cref="WeatherResult.RequestedDate"/> names it.
+    /// </summary>
+    Elapsed,
 }
 
-public sealed record WeatherRequest(string? Place = null, WeatherDay Day = WeatherDay.Today);
+/// <param name="DaysAhead">
+/// Overrides <paramref name="Day"/> with a hotel-local day offset (0-6) for multi-day forecasts.
+/// </param>
+/// <param name="StartWeekday">
+/// Counts <paramref name="DaysAhead"/> from this weekday's next hotel-local occurrence (today
+/// included) instead of from today.
+/// </param>
+/// <param name="WeekendDay">
+/// 0 for Saturday, 1 for Sunday of the current weekend (on Saturday or Sunday) or the coming one
+/// (Monday to Friday). Overrides the other day fields.
+/// </param>
+/// <param name="AsOfUtc">
+/// The instant that defines "today". The workflow passes its turn start so every call in a turn
+/// resolves against the same hotel-local date, even across midnight.
+/// </param>
+public sealed record WeatherRequest(
+    string? Place = null,
+    WeatherDay Day = WeatherDay.Today,
+    int? DaysAhead = null,
+    DayOfWeek? StartWeekday = null,
+    int? WeekendDay = null,
+    DateTimeOffset? AsOfUtc = null);
 
 public sealed record WeatherLocation(
     string Name,
@@ -41,15 +71,20 @@ public sealed record WeatherResult(
     string? ClarificationQuery,
     IReadOnlyList<ResolvedPlace> Candidates,
     WeatherLocation? Location,
-    WeatherForecast? Forecast);
+    WeatherForecast? Forecast,
+    DateOnly? RequestedDate = null);
 
 /// <summary>Retrieves read-only forecasts from Open-Meteo at resolved or hotel coordinates.</summary>
 public sealed class OpenMeteoWeatherService(
-    HttpClient httpClient,
+    IHttpClientFactory httpClientFactory,
     GeoapifyPlaceResolver placeResolver,
     IOptions<HotelLocationOptions> hotelOptions,
+    HotelLocation hotelLocation,
     TimeProvider timeProvider)
 {
+    // forecast_days=7 covers today plus six days; past_days=1 keeps a turn anchored just before
+    // hotel-local midnight answerable when its activity runs just after.
+    public const int MaxDaysAhead = 6;
     private const string Endpoint = "https://api.open-meteo.com/v1/forecast";
     private const string DailyFields =
         "temperature_2m_max,temperature_2m_min,weather_code,wind_speed_10m_max,precipitation_probability_max";
@@ -67,19 +102,67 @@ public sealed class OpenMeteoWeatherService(
                 "Weather day must be Today, Tonight or Tomorrow.");
         }
 
+        if (request.DaysAhead is < 0 or > MaxDaysAhead)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                request.DaysAhead,
+                $"Weather days ahead must be between 0 and {MaxDaysAhead}.");
+        }
+
+        if (request.StartWeekday is { } weekday && !Enum.IsDefined(weekday))
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), weekday, "Weather start weekday is not a valid day.");
+        }
+
+        if (request.WeekendDay is < 0 or > 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request), request.WeekendDay, "Weather weekend day must be 0 (Saturday) or 1 (Sunday).");
+        }
+
         var hotel = hotelOptions.Value;
+        var hotelTimeZone = TimeZoneInfo.FindSystemTimeZoneById(hotel.TimeZoneId);
+        var asOfUtc = request.AsOfUtc ?? timeProvider.GetUtcNow();
+        var hotelLocalDate = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(asOfUtc, hotelTimeZone).DateTime);
+        if (request.WeekendDay is { } weekendDay)
+        {
+            var saturdayOffset = hotelLocalDate.DayOfWeek == DayOfWeek.Sunday
+                ? -1
+                : DayOfWeek.Saturday - hotelLocalDate.DayOfWeek;
+            var weekendOffset = saturdayOffset + weekendDay;
+            if (weekendOffset < 0)
+            {
+                return new(WeatherResultStatus.Elapsed, null, [], null, null, hotelLocalDate.AddDays(weekendOffset));
+            }
+
+            return await GetWeatherAsync(
+                request with { WeekendDay = null, StartWeekday = null, DaysAhead = weekendOffset, AsOfUtc = asOfUtc },
+                cancellationToken);
+        }
+
+        var daysAhead = request.StartWeekday is { } startWeekday
+            ? ((int)startWeekday - (int)hotelLocalDate.DayOfWeek + 7) % 7 + (request.DaysAhead ?? 0)
+            : request.DaysAhead ?? (request.Day == WeatherDay.Tomorrow ? 1 : 0);
+        var targetDate = hotelLocalDate.AddDays(daysAhead);
+        if (daysAhead > MaxDaysAhead)
+        {
+            return new(WeatherResultStatus.BeyondForecast, null, [], null, null, targetDate);
+        }
+
         WeatherLocation location;
-        if (string.IsNullOrWhiteSpace(request.Place))
+        if (string.IsNullOrWhiteSpace(request.Place)
+            || HotelLocationOptions.IsHotelReference(request.Place))
         {
             location = new WeatherLocation(
-                "Hotel ZGY, Miami",
-                hotel.Latitude,
-                hotel.Longitude,
+                hotel.Label,
+                hotelLocation.Coordinates.Latitude,
+                hotelLocation.Coordinates.Longitude,
                 IsHotel: true);
         }
         else
         {
-            var resolution = await placeResolver.ResolveAsync(request.Place, cancellationToken);
+            var resolution = await placeResolver.ResolveForWeatherAsync(request.Place, cancellationToken);
             if (resolution.Status != PlaceResolutionStatus.Resolved)
             {
                 return new(
@@ -94,26 +177,13 @@ public sealed class OpenMeteoWeatherService(
             location = new WeatherLocation(place.Formatted, place.Latitude, place.Longitude, IsHotel: false);
         }
 
-        var hotelTimeZone = TimeZoneInfo.FindSystemTimeZoneById(hotel.TimeZoneId);
-        var hotelLocalDate = DateOnly.FromDateTime(
-            TimeZoneInfo.ConvertTime(timeProvider.GetUtcNow(), hotelTimeZone).DateTime);
-        var targetDate = request.Day == WeatherDay.Tomorrow
-            ? hotelLocalDate.AddDays(1)
-            : hotelLocalDate;
         var url = $"{Endpoint}?latitude={location.Latitude.ToString(CultureInfo.InvariantCulture)}"
             + $"&longitude={location.Longitude.ToString(CultureInfo.InvariantCulture)}"
             + $"&daily={Uri.EscapeDataString(DailyFields)}"
             + "&temperature_unit=fahrenheit&wind_speed_unit=mph"
-            + $"&timezone={Uri.EscapeDataString(hotel.TimeZoneId)}&forecast_days=7";
-        using var requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
-        using var response = await LocationProviderHttp.SendAsync(
-            httpClient,
-            requestMessage,
-            "Open-Meteo",
-            cancellationToken);
-        using var document = await JsonDocument.ParseAsync(
-            await response.Content.ReadAsStreamAsync(cancellationToken),
-            cancellationToken: cancellationToken);
+            + $"&timezone={Uri.EscapeDataString(hotel.TimeZoneId)}&forecast_days=7&past_days=1";
+        using var document = await LocationProviderHttp.GetJsonAsync(
+            httpClientFactory, url, "Open-Meteo", cancellationToken);
 
         var forecast = ReadForecast(document.RootElement, targetDate, hotel.TimeZoneId);
         return new(

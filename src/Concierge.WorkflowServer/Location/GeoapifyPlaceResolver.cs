@@ -30,12 +30,12 @@ public sealed record PlaceResolutionResult(
 
 /// <summary>
 /// Resolves places consistently for location-dependent activities. Geoapify's API key is
-/// required by the provider in its query string, so requests use a bare HttpClient and are
+/// required by the provider in its query string, so requests use a logger-free client and are
 /// excluded from outbound HTTP tracing to prevent the credential entering telemetry.
 /// </summary>
 public sealed class GeoapifyPlaceResolver(
-    HttpClient httpClient,
-    IOptions<HotelLocationOptions> hotelOptions,
+    IHttpClientFactory httpClientFactory,
+    HotelLocation hotelLocation,
     IOptions<GeoapifyOptions> geoapifyOptions)
 {
     private const string Endpoint = "https://api.geoapify.com/v1/geocode/search";
@@ -43,9 +43,27 @@ public sealed class GeoapifyPlaceResolver(
     private const double MinimumConfidence = 0.5;
     private const double MiamiAreaRadiusKilometers = 60;
 
-    public async Task<PlaceResolutionResult> ResolveAsync(
+    // Geoapify's building and venue records for one address sat ~45 m apart.
+    private const double SameSiteMeters = 75;
+
+    public Task<PlaceResolutionResult> ResolveAsync(
         string query,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        ResolveCoreAsync(query, restrictToMiamiArea: true, cancellationToken: cancellationToken);
+
+    /// <summary>
+    /// Resolves a named weather destination without the hotel-area restriction used for local
+    /// routes. Confidence and uniqueness checks still apply; ambiguous matches require clarification.
+    /// </summary>
+    public Task<PlaceResolutionResult> ResolveForWeatherAsync(
+        string query,
+        CancellationToken cancellationToken = default) =>
+        ResolveCoreAsync(query, restrictToMiamiArea: false, cancellationToken: cancellationToken);
+
+    private async Task<PlaceResolutionResult> ResolveCoreAsync(
+        string query,
+        bool restrictToMiamiArea,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
 
@@ -55,7 +73,7 @@ public sealed class GeoapifyPlaceResolver(
             throw new ArgumentException("Place search text cannot exceed 200 characters.", nameof(query));
         }
 
-        var hotel = hotelOptions.Value;
+        var hotel = hotelLocation.Coordinates;
         var key = geoapifyOptions.Value.ApiKey;
         if (string.IsNullOrWhiteSpace(key))
         {
@@ -69,20 +87,30 @@ public sealed class GeoapifyPlaceResolver(
         var uri = $"{Endpoint}?text={Uri.EscapeDataString(trimmedQuery)}"
             + $"&bias={Uri.EscapeDataString(bias)}&limit={ResultLimit}&format=json"
             + $"&apiKey={Uri.EscapeDataString(key)}";
-        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        using var response = await LocationProviderHttp.SendAsync(httpClient, request, "Geoapify", cancellationToken);
-        using var document = await JsonDocument.ParseAsync(
-            await response.Content.ReadAsStreamAsync(cancellationToken),
-            cancellationToken: cancellationToken);
+        using var document = await LocationProviderHttp.GetJsonAsync(
+            httpClientFactory, uri, "Geoapify", cancellationToken);
 
-        var candidates = ReadResults(document.RootElement)
-            .Select(ReadPlace)
-            .Where(place => place is not null)
-            .Select(place => place!)
-            .Where(place => place.Confidence >= MinimumConfidence && IsInMiamiArea(place, hotel))
-            .OrderByDescending(place => place.Confidence)
-            .DistinctBy(place => place.PlaceId, StringComparer.Ordinal)
+        var records = ReadResults(document.RootElement)
+            .Select(result => ReadPlace(result, trimmedQuery))
+            .Where(record => record is not null)
+            .Select(record => record!)
+            .Where(record => record.Place.Confidence >= MinimumConfidence
+                && (!restrictToMiamiArea || IsInMiamiArea(record.Place, hotel)))
+            .OrderByDescending(record => record.Place.Confidence)
+            .DistinctBy(record => record.Place.PlaceId, StringComparer.Ordinal)
             .ToArray();
+
+        // Geoapify returns nameless building records and the named venue for one address
+        // (e.g. "Wayan Miami, 50 Northwest 24th Street"); asking the guest to choose between
+        // them is meaningless. Geoapify gives these records no shared id, so merge only when the
+        // guest's own words name the identity they share; nearby venues or branches still need
+        // clarification.
+        if (records.Length > 1 && SelectRequestedIdentity(records, trimmedQuery) is { } requested)
+        {
+            records = [requested];
+        }
+
+        var candidates = records.Select(record => record.Place).ToArray();
 
         return candidates.Length switch
         {
@@ -106,7 +134,7 @@ public sealed class GeoapifyPlaceResolver(
         return [];
     }
 
-    private static ResolvedPlace? ReadPlace(JsonElement result)
+    private static PlaceRecord? ReadPlace(JsonElement result, string query)
     {
         var properties = result.TryGetProperty("properties", out var featureProperties)
             ? featureProperties
@@ -145,13 +173,31 @@ public sealed class GeoapifyPlaceResolver(
             return null;
         }
 
+        var name = ReadString(properties, "name");
+        var houseNumber = ReadString(properties, "housenumber");
+        var street = ReadString(properties, "street");
+
+        // Geoapify scores "Name, street address" text (no city) at confidence 0 even when the
+        // named place and its address both match, which is how guests repeat a nearby-search
+        // result. Building-level confidence only says the building position is correct, so it
+        // stands in only when the request independently names this venue and its address.
+        if (confidence < MinimumConfidence
+            && string.Equals(ReadString(rank, "match_type"), "full_match", StringComparison.Ordinal)
+            && TryReadDouble(rank, "confidence_building_level", out var buildingConfidence)
+            && buildingConfidence is >= 0 and <= 1
+            && PlaceIdentity.RequestNamesVenue(query, name)
+            && PlaceIdentity.RequestNamesAddress(query, houseNumber, street))
+        {
+            confidence = buildingConfidence;
+        }
+
         var placeId = ReadString(properties, "place_id")
             ?? $"{formatted}:{latitude.ToString("F5", CultureInfo.InvariantCulture)}:"
             + longitude.ToString("F5", CultureInfo.InvariantCulture);
 
-        return new ResolvedPlace(
+        return new PlaceRecord(new ResolvedPlace(
             placeId,
-            ReadString(properties, "name") ?? formatted,
+            name ?? formatted,
             formatted,
             latitude,
             longitude,
@@ -159,10 +205,64 @@ public sealed class GeoapifyPlaceResolver(
             ReadString(properties, "county"),
             ReadString(properties, "state"),
             ReadString(properties, "country_code"),
-            confidence);
+            confidence),
+            name,
+            PlaceIdentity.AddressKey(houseNumber, street));
     }
 
-    private static bool IsInMiamiArea(ResolvedPlace place, HotelLocationOptions hotel)
+    /// <summary>
+    /// The one record the request identifies when every record is at the same house number and
+    /// street within one site. When the request names a venue, every named record must be that
+    /// venue (nameless records at its address are its building). When it names no venue but
+    /// names the address, the address itself is the destination. Otherwise null: the guest chooses.
+    /// </summary>
+    private static PlaceRecord? SelectRequestedIdentity(IReadOnlyList<PlaceRecord> records, string query)
+    {
+        if (records[0].AddressKey is not { } address
+            || records.Any(record => !StringComparer.Ordinal.Equals(record.AddressKey, address))
+            || !LieWithinOneSite(records))
+        {
+            return null;
+        }
+
+        var named = records.Where(record => record.VenueName is not null).ToArray();
+        var requestedVenue = named.FirstOrDefault(record => PlaceIdentity.RequestNamesVenue(query, record.VenueName));
+        if (requestedVenue is not null)
+        {
+            var venue = PlaceIdentity.NormalizeName(requestedVenue.VenueName);
+            return named.All(record => StringComparer.Ordinal.Equals(PlaceIdentity.NormalizeName(record.VenueName), venue))
+                ? requestedVenue
+                : null;
+        }
+
+        return PlaceIdentity.RequestNamesAddressKey(query, address)
+            ? records.FirstOrDefault(record => record.VenueName is null)
+            : null;
+    }
+
+    private static bool LieWithinOneSite(IReadOnlyList<PlaceRecord> records)
+    {
+        for (var i = 0; i < records.Count; i++)
+        {
+            for (var j = i + 1; j < records.Count; j++)
+            {
+                var first = records[i].Place;
+                var second = records[j].Place;
+                if (DistanceKilometers(first.Latitude, first.Longitude, second.Latitude, second.Longitude) * 1000
+                    > SameSiteMeters)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>A resolved candidate with the raw Geoapify identity used to merge records.</summary>
+    private sealed record PlaceRecord(ResolvedPlace Place, string? VenueName, string? AddressKey);
+
+    private static bool IsInMiamiArea(ResolvedPlace place, HotelCoordinates hotel)
     {
         if (!string.Equals(place.CountryCode, "us", StringComparison.OrdinalIgnoreCase)
             || !string.Equals(place.State, "Florida", StringComparison.OrdinalIgnoreCase)

@@ -10,7 +10,7 @@ using OpenTelemetry.Trace;
 
 namespace Microsoft.Extensions.Hosting;
 
-// Adds common Aspire services: service discovery, resilience, health checks, and OpenTelemetry.
+// Adds common Aspire services: service discovery, health checks, and OpenTelemetry.
 // This project should be referenced by each service project in your solution.
 // To learn more about using this project, see https://aka.ms/aspire/service-defaults
 public static class Extensions
@@ -20,7 +20,8 @@ public static class Extensions
 
     /// <summary>
     /// Adds the Aspire defaults shared by every service: OpenTelemetry, the liveness health check,
-    /// service discovery, and standard HttpClient resilience.
+    /// and service discovery for every HttpClient. Retry-bearing resilience is not a global default:
+    /// each named client declares its own policy so the retry owner and time budget are explicit.
     /// </summary>
     public static TBuilder AddServiceDefaults<TBuilder>(this TBuilder builder) where TBuilder : IHostApplicationBuilder
     {
@@ -32,8 +33,8 @@ public static class Extensions
 
         builder.Services.ConfigureHttpClientDefaults(http =>
         {
-            // Turn on resilience by default
-            http.AddStandardResilienceHandler();
+            // No default resilience handler: a global retry policy would repeat side effects and
+            // silently stack on top of Temporal activity retries. Named clients opt in explicitly.
 
             // Turn on service discovery by default
             http.AddServiceDiscovery();
