@@ -179,16 +179,16 @@ public sealed class AIProviderRegistrationTests
 
         Assert.Equal(32_768, options.ContextWindowTokens);
         Assert.Equal(
-            ConciergeStayWorkflow.AnswerWorkingContextBudgetTokens,
+            ConciergeStayWorkflow.ActionWorkingContextBudgetTokens,
             ConciergeStayWorkflow.WorstCaseContextTokens);
         Assert.Equal("low", options.ReasoningEffort);
     }
 
     [Fact]
-    public void TimeoutAndConcurrencyHaveNoArbitraryUpperLimit()
+    public void ConcurrencyHasNoArbitraryUpperLimit()
     {
+        // RequestTimeoutSeconds is capped by its activity allowance (ModelCallBoundTests).
         var values = ValidSettings(AIProviderNames.Ollama, AIProviderNames.Ollama);
-        values["AI:Chat:RequestTimeoutSeconds"] = "601";
         values["AI:Chat:MaxConcurrentRequests"] = "65";
         using var services = CreateServices(values);
 
@@ -196,7 +196,7 @@ public sealed class AIProviderRegistrationTests
     }
 
     [Theory]
-    [InlineData("7999")]
+    [InlineData("11999")]
     [InlineData("0")]
     [InlineData("-1")]
     public void ContextWindowSmallerThanWorstCaseBudgetFailsWithActionableMessage(string window)
@@ -458,13 +458,13 @@ public sealed class AIProviderRegistrationTests
             ["AI:Chat:Provider"] = chatProvider,
             ["AI:Chat:Endpoint"] = Endpoint(chatProvider),
             ["AI:Chat:Model"] = "chat-model",
-            ["AI:Chat:RequestTimeoutSeconds"] = "30",
+            ["AI:Chat:RequestTimeoutSeconds"] = "18",
             ["AI:Chat:MaxConcurrentRequests"] = "2",
             ["AI:Embeddings:Provider"] = embeddingProvider,
             ["AI:Embeddings:Endpoint"] = Endpoint(embeddingProvider),
             ["AI:Embeddings:Model"] = "embedding-model",
             ["AI:Embeddings:Dimensions"] = "768",
-            ["AI:Embeddings:RequestTimeoutSeconds"] = "30",
+            ["AI:Embeddings:RequestTimeoutSeconds"] = "8",
             ["AI:Embeddings:MaxConcurrentRequests"] = "2",
         };
 

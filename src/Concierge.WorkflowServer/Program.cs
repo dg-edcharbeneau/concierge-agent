@@ -30,16 +30,16 @@ builder.Services.AddOptions<HotelLocationOptions>()
 builder.Services.AddOptions<GeoapifyOptions>()
     .Bind(builder.Configuration.GetSection(GeoapifyOptions.SectionName))
     .ValidateOnStart();
-// Geoapify requires its key in the query string. A directly owned client avoids
-// HttpClientFactory request logging; Geoapify spans are filtered in ServiceDefaults.
-builder.Services.AddSingleton(_ => new HttpClient
-{
-    Timeout = TimeSpan.FromSeconds(20),
-});
+// Also registers the named location-provider client (no HTTP retries; Temporal owns them).
+builder.Services.AddHotelLocation();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<GeoapifyPlaceResolver>();
 builder.Services.AddSingleton<OpenMeteoWeatherService>();
 builder.Services.AddSingleton<GeoapifyDrivingRouteService>();
+builder.Services.AddSingleton<GeoapifyNearbyPlacesService>();
+builder.Services.AddSingleton<GeoapifyPlaceOpeningHoursService>();
+ConciergeActionToolService.AddRideServiceClient(builder.Services);
+builder.Services.AddScoped<IConciergeActionToolBackend, ConciergeActionToolService>();
 
 var conciergeConnectionString = builder.Configuration.GetConnectionString("concierge")
     ?? throw new InvalidOperationException(
@@ -84,7 +84,24 @@ builder.Services.AddOpenTelemetry()
         .AddMeter("Npgsql"));
 
 builder.Services.AddHostedTemporalWorker(TemporalWorkerConnection.TaskQueue)
-    .AddDurableAI(options => options.RegisterDefaultWorkflow = false)
+    .ConfigureOptions(options => options.Interceptors =
+        [.. options.Interceptors ?? [], new ConciergeTurnDeadlineInterceptor()])
+    .AddDurableAI(options =>
+    {
+        options.RegisterDefaultWorkflow = false;
+        // Fallback only: the stay workflow sets a per-call timeout no longer than this.
+        options.ActivityTimeout = ConciergeStayWorkflow.ModelActivityTimeout;
+        // Model calls retry transient provider failures; Temporal owns these retries (the chat
+        // SDK client is configured with zero retries). Tool invokers set their own policy:
+        // read-only weather retries, while side-effecting ride actions stay single-attempt.
+        options.RetryPolicy = new Temporalio.Common.RetryPolicy
+        {
+            MaximumAttempts = 3,
+            InitialInterval = TimeSpan.FromSeconds(1),
+            MaximumInterval = TimeSpan.FromSeconds(2),
+        };
+    })
+    .AddDurableTools(ConciergeToolDefinitions.CreateActivityTools())
     .AddWorkflow<ConciergeStayWorkflow>()
     .AddWorkflow<HotelSetupWorkflow>()
     .AddScopedActivities<ConciergeTranscriptActivities>()
@@ -127,6 +144,8 @@ _ = app.Services.GetRequiredService<IOptions<GeoapifyOptions>>().Value;
 // Schema ownership stays in this process and completes before Temporal workers start.
 await app.Services.GetRequiredService<DatabaseMigrator>()
     .MigrateAsync(app.Lifetime.ApplicationStopping);
+
+await app.ResolveHotelLocationAsync();
 
 app.MapDefaultEndpoints();
 await app.RunAsync();

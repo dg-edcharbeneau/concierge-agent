@@ -63,12 +63,12 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
         var voiceTurn = await SubmitAsync(host, riveraVoice, Turn("turn-2", "What time?", "voice"));
         Assert.Equal(0, webTurn.Sequence);
         Assert.Equal(1, voiceTurn.Sequence);
-        Assert.Contains("Where is breakfast?", host.ChatClient.AnswerRequests[^1].UserTexts);
+        Assert.Contains("Where is breakfast?", host.ChatClient.Requests[^1].UserTexts);
 
         // The same turn ID on another stay is an unrelated turn with its own context.
         var morganTurn = await SubmitAsync(host, morgan, Turn("turn-1", "Is there a gym?", "web"));
         Assert.Equal(0, morganTurn.Sequence);
-        Assert.DoesNotContain("Where is breakfast?", host.ChatClient.AnswerRequests[^1].UserTexts);
+        Assert.DoesNotContain("Where is breakfast?", host.ChatClient.Requests[^1].UserTexts);
 
         await AssertErrorAsync(
             await Send(host, HttpMethod.Post, "/api/concierge/turns", riveraWeb, Turn("turn-1", "Changed", "web")),
@@ -187,7 +187,7 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
     }
 
     [Fact]
-    public async Task ModelFailureReturnsGenericUnavailableWithoutInternalDetails()
+    public async Task ModelFailureReturnsCuratedReplyWithoutInternalDetails()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
         var today = ConciergeTestHost.HotelToday;
@@ -202,8 +202,9 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
             credential,
             Turn("fails", "Is the spa open?", "web"));
 
-        await AssertErrorAsync(response, HttpStatusCode.ServiceUnavailable, "unavailable");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("couldn't reach the concierge service", body, StringComparison.Ordinal);
         Assert.DoesNotContain("secret-internal-detail", body, StringComparison.Ordinal);
         Assert.DoesNotContain("10.0.0.7", body, StringComparison.Ordinal);
         Assert.DoesNotContain("Exception", body, StringComparison.Ordinal);
@@ -267,7 +268,7 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
         var results = await Task.WhenAll(admitted, retried);
 
         Assert.Equal(results[0], results[1]);
-        Assert.Single(host.ChatClient.AnswerRequests);
+        Assert.Single(host.ChatClient.Requests);
         var workflow = host.Environment.Client.GetWorkflowHandle($"concierge-stay-{stayId:N}");
         Assert.Equal(results[0], await workflow.GetUpdateHandle<ConciergeTurnResult>(turnId).GetResultAsync());
         var history = await workflow.FetchHistoryAsync();

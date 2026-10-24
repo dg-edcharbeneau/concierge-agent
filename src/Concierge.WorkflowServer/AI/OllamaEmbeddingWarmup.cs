@@ -27,7 +27,9 @@ public sealed class OllamaEmbeddingWarmup(
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            await embeddingGenerator.GenerateAsync(["warm-up"], cancellationToken: stoppingToken);
+            // A cold load can outlast the short retrieval bound; use the ingestion bound.
+            await embeddingGenerator.ForIngestion()
+                .GenerateAsync(["warm-up"], cancellationToken: stoppingToken);
             logger.LogInformation(
                 "Warmed Ollama embedding model {EmbeddingModel} in {ElapsedMs} ms.",
                 embeddingOptions.Model,

@@ -52,4 +52,50 @@ public sealed class VerifiedGuestContextTests
         Assert.Equal("112", data.GetProperty("RoomNumber").GetString());
         Assert.Equal(1, data.GetProperty("Floor").GetInt32());
     }
+
+    [Theory]
+    [InlineData("2026-10-19", "2026-10-22", 3)]
+    [InlineData("2026-10-31", "2026-11-01", 1)]
+    [InlineData("2026-10-19", "2026-10-19", null)]
+    [InlineData("2026-10-22", "2026-10-19", null)]
+    [InlineData(null, "2026-10-22", null)]
+    [InlineData("2026-10-19", null, null)]
+    public void NightsComeOnlyFromAKnownForwardStay(string? checkIn, string? checkout, int? nights)
+    {
+        var guest = new ConciergeVerifiedGuest(
+            Guid.NewGuid(), "Cecil", "Phillip", "112",
+            CheckoutDate: checkout is null ? default : DateOnly.Parse(checkout),
+            CheckInDate: checkIn is null ? default : DateOnly.Parse(checkIn));
+
+        Assert.Equal(nights, guest.Nights);
+    }
+
+    [Fact]
+    public void StayDatesAreHotelCalendarDatesWithWeekdaysAndServerComputedNights()
+    {
+        var guest = new ConciergeVerifiedGuest(
+            Guid.NewGuid(), "Cecil", "Phillip", "112", Guid.NewGuid(),
+            new DateOnly(2026, 10, 22), new DateOnly(2026, 10, 19));
+
+        var context = VerifiedGuestAnswerContext.Format(guest);
+
+        Assert.Contains("stay dates", context, StringComparison.Ordinal);
+        Assert.Contains("Floor and Nights are computed by the server", context, StringComparison.Ordinal);
+        var data = JsonDocument.Parse(context[(context.IndexOf('\n') + 1)..]).RootElement;
+        Assert.Equal("Mon 2026-10-19", data.GetProperty("CheckInDate").GetString());
+        Assert.Equal("Thu 2026-10-22", data.GetProperty("CheckoutDate").GetString());
+        Assert.Equal(3, data.GetProperty("Nights").GetInt32());
+    }
+
+    [Fact]
+    public void UnknownStayDatesAreNullNotInvented()
+    {
+        var context = VerifiedGuestAnswerContext.Format(
+            new ConciergeVerifiedGuest(Guid.NewGuid(), "Cecil", "Phillip", "112"));
+
+        var data = JsonDocument.Parse(context[(context.IndexOf('\n') + 1)..]).RootElement;
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("CheckInDate").ValueKind);
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("CheckoutDate").ValueKind);
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("Nights").ValueKind);
+    }
 }

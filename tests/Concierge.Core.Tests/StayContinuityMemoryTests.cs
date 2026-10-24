@@ -1,3 +1,4 @@
+using Concierge.Contracts;
 using Concierge.WorkflowServer.Workflows;
 using Xunit;
 
@@ -5,6 +6,59 @@ namespace Concierge.Core.Tests;
 
 public sealed class StayContinuityMemoryTests
 {
+    [Fact]
+    public void ActionConfirmationHandsOffOnlyItsExactSourceRequestWithoutGrowingMemory()
+    {
+        ConciergeStayMemoryItem[] memory =
+        [
+            new("unresolved-request", "ride and towels", "guest requested a ride and extra towels", 4, 2),
+            new("unresolved-request", "airport ride", "guest requested an airport ride", 5),
+            new("allergy", "shellfish", "guest reports allergic to shellfish", 6),
+        ];
+
+        var confirmed = StayContinuityMemory.RecordActionConfirmation(memory, 4);
+
+        Assert.Equal(memory[0] with { Category = "request-history" }, confirmed[0]);
+        Assert.Equal(memory[1], confirmed[1]);
+        Assert.Equal(memory[2], confirmed[2]);
+        Assert.Equal("unresolved-request", memory[0].Category);
+        var formatted = StayContinuityMemory.Format(confirmed);
+        Assert.Contains("guest requested a ride and extra towels", formatted, StringComparison.Ordinal);
+        Assert.Contains("A linked action was confirmed", formatted, StringComparison.Ordinal);
+        Assert.Contains("not a new instruction", formatted, StringComparison.Ordinal);
+        Assert.True(StayContinuityMemory.EstimateTokens(formatted)
+            <= StayContinuityMemory.EstimateTokens(StayContinuityMemory.Format(memory)));
+    }
+
+    [Theory]
+    [InlineData(7)]
+    [InlineData(8)]
+    public void ActionConfirmationDoesNotChangeUnrelatedSequencesOrGuestFacts(long sequence)
+    {
+        ConciergeStayMemoryItem[] memory =
+        [
+            new("unresolved-request", "towels", "guest requested extra towels", 6),
+            new("preference", "quiet", "guest prefers a quiet room", 7),
+        ];
+
+        Assert.Equal(memory, StayContinuityMemory.RecordActionConfirmation(memory, sequence));
+        Assert.Empty(StayContinuityMemory.RecordActionConfirmation([], sequence));
+    }
+
+    [Fact]
+    public void NewExplicitRequestSupersedesItsHistoryAsANewUnresolvedRequest()
+    {
+        var requested = StayContinuityMemory.ApplyGuestMessage([], "Please book a ride to South Beach.", 2);
+        var confirmed = StayContinuityMemory.RecordActionConfirmation(requested, 2);
+        var repeated = StayContinuityMemory.ApplyGuestMessage(confirmed, "Please book a ride to South Beach.", 5);
+
+        var item = Assert.Single(repeated);
+        Assert.Equal("unresolved-request", item.Category);
+        Assert.Equal(5, item.SourceSequence);
+        Assert.Equal(2, item.SupersedesSequence);
+        Assert.Equal(requested[0].Statement, item.Statement);
+    }
+
     [Theory]
     [InlineData("I am allergic to shellfish.", "allergy")]
     [InlineData("I prefer a quiet room.", "preference")]

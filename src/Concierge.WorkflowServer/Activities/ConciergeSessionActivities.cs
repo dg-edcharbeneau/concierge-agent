@@ -23,7 +23,7 @@ public sealed class ConciergeSessionActivities(ConciergeSessionService sessions)
             || request.SessionId == Guid.Empty
             || request.CredentialSha256 is not { Length: 32 }
             || string.IsNullOrWhiteSpace(request.LastName)
-            || request.LastName.Trim().Length > 100
+            || request.LastName.Trim().Length > ConciergeVerifiedGuest.MaxNameLength
             || !RoomNumberFormat.IsValid(request.RoomNumber))
         {
             throw InvalidRequest();

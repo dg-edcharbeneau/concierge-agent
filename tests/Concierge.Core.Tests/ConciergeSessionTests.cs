@@ -15,7 +15,7 @@ public sealed class ConciergeSessionTests(PostgreSqlFixture postgreSql)
     {
         var dataSource = await CreateDatabaseAsync();
         var (firstStay, secondStay) = await SeedTwoEligibleStaysAsync(dataSource);
-        var sessions = new ConciergeSessionService(dataSource);
+        var sessions = new ConciergeSessionService(dataSource, ConciergeTestHost.HotelOptions);
 
         var invalidId = Guid.NewGuid();
         var invalidDigest = RandomNumberGenerator.GetBytes(32);
@@ -47,12 +47,30 @@ public sealed class ConciergeSessionTests(PostgreSqlFixture postgreSql)
 
         Assert.Equal(firstStay, first.StayId);
         Assert.NotEqual(secondStay, first.StayId);
-        Assert.Equal(new ConciergeVerifiedGuest(firstStay, "Jordan", "Rivera", "412"), first.VerifiedGuest);
+        Assert.Equal(
+            new ConciergeVerifiedGuest(
+                firstStay,
+                "Jordan",
+                "Rivera",
+                "412",
+                Guid.Parse("bca99f5d-8e64-5f1b-bc77-a12d9385b104"),
+                ConciergeTestHost.HotelToday.AddDays(1),
+                ConciergeTestHost.HotelToday.AddDays(-1)),
+            first.VerifiedGuest);
         var otherDigest = RandomNumberGenerator.GetBytes(32);
         var other = await sessions.VerifyAsync(
             new VerifyConciergeSessionActivityRequest(Guid.NewGuid(), otherDigest, "Morgan", "812"),
             CancellationToken.None);
-        Assert.Equal(new ConciergeVerifiedGuest(secondStay, "Taylor", "Morgan", "812"), other!.VerifiedGuest);
+        Assert.Equal(
+            new ConciergeVerifiedGuest(
+                secondStay,
+                "Taylor",
+                "Morgan",
+                "812",
+                Guid.Parse("e9f93b63-8607-58f7-8c5a-296bcbe7ea38"),
+                ConciergeTestHost.HotelToday.AddDays(1),
+                ConciergeTestHost.HotelToday.AddDays(-1)),
+            other!.VerifiedGuest);
         Assert.Equal(first.VerifiedGuest, (await sessions.AuthenticateAsync(firstDigest, CancellationToken.None))!.VerifiedGuest);
         Assert.Equal(
             firstDigest,
@@ -89,7 +107,7 @@ public sealed class ConciergeSessionTests(PostgreSqlFixture postgreSql)
             Guid.Parse("bca99f5d-8e64-5f1b-bc77-a12d9385b104"),
             "0412");
 
-        Assert.Null(await new ConciergeSessionService(dataSource).VerifyAsync(
+        Assert.Null(await new ConciergeSessionService(dataSource, ConciergeTestHost.HotelOptions).VerifyAsync(
             new VerifyConciergeSessionActivityRequest(
                 Guid.NewGuid(), RandomNumberGenerator.GetBytes(32), "Rivera", "0412"),
             CancellationToken.None));
@@ -112,7 +130,7 @@ public sealed class ConciergeSessionTests(PostgreSqlFixture postgreSql)
             Guid.Parse("bca99f5d-8e64-5f1b-bc77-a12d9385b104"),
             "412");
 
-        var match = await new ConciergeSessionService(dataSource).VerifyAsync(
+        var match = await new ConciergeSessionService(dataSource, ConciergeTestHost.HotelOptions).VerifyAsync(
             new VerifyConciergeSessionActivityRequest(
                 Guid.NewGuid(),
                 RandomNumberGenerator.GetBytes(32),
@@ -147,7 +165,7 @@ public sealed class ConciergeSessionTests(PostgreSqlFixture postgreSql)
             await command.ExecuteNonQueryAsync();
         }
 
-        var sessions = new ConciergeSessionService(dataSource);
+        var sessions = new ConciergeSessionService(dataSource, ConciergeTestHost.HotelOptions);
         Assert.Null(await sessions.VerifyAsync(
             new VerifyConciergeSessionActivityRequest(
                 Guid.NewGuid(), RandomNumberGenerator.GetBytes(32), "Rivera", "101"),

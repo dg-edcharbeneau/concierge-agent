@@ -23,7 +23,7 @@ public sealed class ConciergeSessionActivityTests
         new(Guid.NewGuid(), new byte[31], "Rivera", "412"),
         new(Guid.NewGuid(), ValidHash, null!, "412"),
         new(Guid.NewGuid(), ValidHash, " ", "412"),
-        new(Guid.NewGuid(), ValidHash, new string('x', 101), "412"),
+        new(Guid.NewGuid(), ValidHash, new string('x', ConciergeVerifiedGuest.MaxNameLength + 1), "412"),
         new(Guid.NewGuid(), ValidHash, "Rivera", null!),
         new(Guid.NewGuid(), ValidHash, "Rivera", "0412"),
         new(Guid.NewGuid(), ValidHash, "Rivera", "bad room"),
@@ -75,7 +75,7 @@ public sealed class ConciergeSessionActivityTests
     {
         // The data source is never opened: validation must reject the request first.
         await using var dataSource = NpgsqlDataSource.Create("Host=invalid.invalid;Database=unused");
-        var activities = new ConciergeSessionActivities(new ConciergeSessionService(dataSource));
+        var activities = new ConciergeSessionActivities(new ConciergeSessionService(dataSource, ConciergeTestHost.HotelOptions));
         var failure = await Assert.ThrowsAsync<ApplicationFailureException>(() =>
             new ActivityEnvironment().RunAsync(() => run(activities)));
         Assert.Equal(ConciergeActivityNames.SessionInvalidRequestErrorType, failure.ErrorType);

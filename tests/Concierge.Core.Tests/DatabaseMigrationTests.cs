@@ -473,7 +473,10 @@ public sealed class PostgreSqlFixture : IAsyncLifetime
         .WithDatabase("concierge_tests")
         .WithUsername("postgres")
         .WithPassword("postgres")
-        .WithWaitStrategy(Wait.ForUnixContainer().UntilCommandIsCompleted("pg_isready"))
+        // The image's init-only server answers on the Unix socket, then restarts; probing TCP waits for
+        // the final server so the first CREATE DATABASE is not reset mid-restart.
+        .WithWaitStrategy(Wait.ForUnixContainer().UntilCommandIsCompleted(
+            "pg_isready", "--host", "127.0.0.1", "--port", "5432", "--username", "postgres"))
         .Build();
 
     public Task InitializeAsync() => container.StartAsync();

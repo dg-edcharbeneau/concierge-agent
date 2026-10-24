@@ -89,17 +89,48 @@ public sealed class AssistantResponseMarkdownTests
         Assert.Contains("desk@example.com", html);
     }
 
-    /// <summary>Images make no request and keep their alt text readable.</summary>
-    [Theory]
-    [InlineData("![Pool at sunset](https://example.com/pool.png)")]
-    [InlineData("![Pool at sunset](javascript:alert(1))")]
-    public void ImagesBecomeAltText(string text)
+    /// <summary>Only local image assets under the image path become active markup.</summary>
+    [Fact]
+    public void SameOriginWeatherImageRendersWithAltText()
     {
-        var html = Render(text);
+        var html = Render("![Rain showers](/images/weather/rain.svg)");
+
+        Assert.Contains("<img src=\"/images/weather/rain.svg\" alt=\"Rain showers\"", html);
+    }
+
+    [Theory]
+    [InlineData("https://evil.example/image.png")]
+    [InlineData("//evil.example/image.png")]
+    [InlineData("data:image/png;base64,AAAA")]
+    [InlineData("javascript:alert(1)")]
+    [InlineData("/images/../secrets.svg")]
+    [InlineData("/images/%2e%2e/secrets.svg")]
+    [InlineData("/images%2fweather/rain.svg")]
+    [InlineData("/other/rain.svg")]
+    [InlineData("/images/rain.svg?x=1")]
+    [InlineData("/images\\rain.svg")]
+    public void RejectsUnsafeImagesAndKeepsAltText(string url)
+    {
+        var html = Render($"![Weather icon]({url})");
 
         Assert.DoesNotContain("<img", html);
-        Assert.DoesNotContain("example.com", html);
-        Assert.Contains("Pool at sunset", html);
+        Assert.Contains("Weather icon", html);
+        Assert.DoesNotContain("evil.example", html);
+    }
+
+    [Fact]
+    public void WeatherIconAssetsExistForEverySupportedKey()
+    {
+        var root = FindRepositoryRoot();
+        foreach (var key in new[]
+        {
+            "clear", "partly-cloudy", "cloudy", "fog", "drizzle", "rain", "snow", "thunderstorm",
+        })
+        {
+            Assert.True(
+                File.Exists(Path.Combine(root, "src", "Concierge.Web", "wwwroot", "images", "weather", $"{key}.svg")),
+                $"Missing weather asset '{key}.svg'.");
+        }
     }
 
     /// <summary>Plain replies keep their text and line breaks.</summary>
@@ -132,4 +163,19 @@ public sealed class AssistantResponseMarkdownTests
 
     private static string Render(string text) =>
         AssistantResponseMarkdown.Render(text) ?? throw new Xunit.Sdk.XunitException("Expected rendered HTML.");
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "Concierge.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new DirectoryNotFoundException("Could not locate Concierge.slnx from the test output directory.");
+    }
 }

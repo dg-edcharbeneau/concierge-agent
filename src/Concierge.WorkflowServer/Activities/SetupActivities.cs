@@ -357,7 +357,8 @@ public sealed class SetupActivities(
         }
 
         var cancellationToken = ActivityExecutionContext.Current.CancellationToken;
-        var result = await embeddingGenerator.GenerateAsync(
+        // Whole sections, possibly on a cold model: use the ingestion bound, not retrieval's.
+        var result = await embeddingGenerator.ForIngestion().GenerateAsync(
             request.Inputs,
             cancellationToken: cancellationToken);
         var vectors = result.Select(embedding => embedding.Vector.ToArray()).ToArray();
@@ -628,6 +629,13 @@ public sealed class SetupActivities(
             _ = Guid.Parse(guest.GuestId);
             ArgumentException.ThrowIfNullOrWhiteSpace(guest.GivenName);
             ArgumentException.ThrowIfNullOrWhiteSpace(guest.FamilyName);
+            if (guest.GivenName.Trim().Length > ConciergeVerifiedGuest.MaxNameLength
+                || guest.FamilyName.Trim().Length > ConciergeVerifiedGuest.MaxNameLength)
+            {
+                throw new InvalidOperationException(
+                    $"Fictional guest '{guest.GuestId}' given and family names must each be at most "
+                    + $"{ConciergeVerifiedGuest.MaxNameLength} characters; shorten them in the Setup:Guests configuration.");
+            }
         }
 
         var guestIds = request.Guests

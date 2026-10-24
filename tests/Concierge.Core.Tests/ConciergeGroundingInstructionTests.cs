@@ -25,7 +25,7 @@ public sealed class ConciergeGroundingInstructionTests
             "Do not promise or assure staff response, willingness, success, or outcome unless current hotel evidence explicitly states it.",
             instructions,
             StringComparison.Ordinal);
-        Assert.Contains("Treat a related but different topic as evidence", instructions, StringComparison.Ordinal);
+        Assert.Contains("- Treat a related but different topic as evidence.", instructions, StringComparison.Ordinal);
         Assert.Contains("Do not say a requested action was completed without system confirmation", instructions, StringComparison.Ordinal);
     }
 
@@ -35,8 +35,15 @@ public sealed class ConciergeGroundingInstructionTests
         var instructions = ConciergeStayWorkflow.ConciergeInstructions;
 
         Assert.Contains("Speak naturally and warmly, in one or two short sentences, with no lists", instructions, StringComparison.Ordinal);
-        Assert.Contains("Do not add unsolicited policies, limits, or closing offers of help", instructions, StringComparison.Ordinal);
-        Assert.Contains("Do not end with an invitation to further help", instructions, StringComparison.Ordinal);
+        Assert.Contains(
+            "Include relevant evidence-supported qualifications or limits and any required referral to hotel staff as part of the answer, not as unsolicited additions.",
+            instructions,
+            StringComparison.Ordinal);
+        Assert.Contains("Do not add unrelated policies or closing offers of help", instructions, StringComparison.Ordinal);
+        Assert.Contains(
+            "- Do not offer an action or further help the guest did not ask for; do not end with an invitation to further help.",
+            instructions,
+            StringComparison.Ordinal);
         Assert.Contains("For greetings or \"what can you do?\", say you help with", instructions, StringComparison.Ordinal);
         Assert.DoesNotContain("at most three sentences", instructions, StringComparison.Ordinal);
 

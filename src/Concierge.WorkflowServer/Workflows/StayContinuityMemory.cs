@@ -72,7 +72,8 @@ internal static class StayContinuityMemory
         }
 
         var superseded = current.Where(item =>
-            StringComparer.Ordinal.Equals(item.Category, candidate.Category)
+            (StringComparer.Ordinal.Equals(item.Category, candidate.Category)
+                || candidate.Category == "unresolved-request" && item.Category == "request-history")
             && StringComparer.OrdinalIgnoreCase.Equals(item.Subject, candidate.Subject))
             .ToArray();
 
@@ -83,6 +84,13 @@ internal static class StayContinuityMemory
             candidate with { SupersedesSequence = supersedesSequence }).ToArray();
         return next;
     }
+
+    public static IReadOnlyList<ConciergeStayMemoryItem> RecordActionConfirmation(
+        IReadOnlyList<ConciergeStayMemoryItem> current,
+        long requestSequence) => current.Select(item =>
+            item.SourceSequence == requestSequence && item.Category == "unresolved-request"
+                ? item with { Category = "request-history" }
+                : item).ToArray();
 
     public static string Format(IReadOnlyList<ConciergeStayMemoryItem> memory)
     {
@@ -108,6 +116,12 @@ internal static class StayContinuityMemory
             if (StringComparer.Ordinal.Equals(item.Category, "unresolved-request"))
             {
                 text.Append(" This remains unresolved; no system confirmation of completion is recorded.");
+            }
+            else if (StringComparer.Ordinal.Equals(item.Category, "request-history"))
+            {
+                // A linked action can cover only part of a compound request. Preserve the guest's
+                // words without claiming the entire request was fulfilled or asking to repeat it.
+                text.Append(" A linked action was confirmed; request history is not a new instruction.");
             }
 
             text.Append('\n');

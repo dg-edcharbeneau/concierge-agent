@@ -290,6 +290,40 @@ public sealed class HotelSetupWorkflowTests(PostgreSqlFixture postgres)
         Assert.Contains("room number", error.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SeedRejectsNamesLongerThanTheVerifiedGuestLimit(bool givenName)
+    {
+        // The action prompt budget is sized for both names at this limit.
+        await using var unusedDataSource = NpgsqlDataSource.Create("Host=unused.invalid");
+        var activities = new SetupActivities(
+            unusedDataSource,
+            new KnowledgeMarkdownCatalog(
+                new TestHostEnvironment(Path.GetTempPath()),
+                Options.Create(new SetupOptions())),
+            new ZeroEmbeddingGenerator(),
+            new EmbeddingModelIdentityStore(unusedDataSource),
+            Options.Create(new EmbeddingProviderOptions()),
+            NullLogger<SetupActivities>.Instance);
+        var defaults = new SetupOptions();
+        var tooLong = new string('x', ConciergeVerifiedGuest.MaxNameLength + 1);
+        if (givenName)
+        {
+            defaults.Guests[0].GivenName = tooLong;
+        }
+        else
+        {
+            defaults.Guests[0].FamilyName = tooLong;
+        }
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new ActivityEnvironment().RunAsync(() => activities.SeedFictionalStaysAsync(
+                new SeedDemoDataRequest(false, defaults.Guests, defaults.Stays))));
+
+        Assert.Contains($"at most {ConciergeVerifiedGuest.MaxNameLength} characters", error.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ChangedStayIdForExistingExternalKeyFailsSetupWithoutWritingSeedChanges()
     {

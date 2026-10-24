@@ -53,9 +53,12 @@ public sealed class AIConfigurationTests
             Path.Combine(RepoRoot, "models/ollama/Modelfile.concierge-chat"));
         Assert.Contains("FROM qwen3.8:27b-mlx", modelfile, StringComparison.Ordinal);
         Assert.Contains("PARAMETER num_ctx 32768", modelfile, StringComparison.Ordinal);
+        // Each request timeout sits inside its Temporal activity attempt; cold model loads are
+        // handled by keep_alive and warm-up, not by a long interactive timeout.
+        Assert.Equal("18", defaults["AI:Chat:RequestTimeoutSeconds"]);
+        Assert.Equal("8", defaults["AI:Embeddings:RequestTimeoutSeconds"]);
         foreach (var capability in new[] { "Chat", "Embeddings" })
         {
-            Assert.Equal("180", defaults[$"AI:{capability}:RequestTimeoutSeconds"]);
             Assert.Equal("2", defaults[$"AI:{capability}:MaxConcurrentRequests"]);
         }
         Assert.Equal("knowledge/hotel-zgy", defaults["Setup:KnowledgeDirectory"]);
@@ -99,9 +102,15 @@ public sealed class AIConfigurationTests
         Assert.Equal(0, exitCode);
         var resources = manifest!["resources"]!;
         var environment = resources["workflow-server"]!["env"]!;
-        Assert.Equal("25.7984634", environment["Hotel__Latitude"]!.GetValue<string>());
-        Assert.Equal("-80.1956016", environment["Hotel__Longitude"]!.GetValue<string>());
+        // Coordinates are geocoded from Hotel__Address at workflow-server startup.
+        Assert.Null(environment["Hotel__Latitude"]);
+        Assert.Null(environment["Hotel__Longitude"]);
         Assert.Equal("America/New_York", environment["Hotel__TimeZoneId"]!.GetValue<string>());
+        var rideEnvironment = resources["ride-service"]!["env"]!;
+        Assert.Equal("America/New_York", rideEnvironment["Hotel__TimeZoneId"]!.GetValue<string>());
+        Assert.Null(rideEnvironment["Hotel__Latitude"]);
+        Assert.Null(rideEnvironment["Hotel__Address"]);
+        Assert.Equal("2217 NW Miami Court, Miami, FL 33127", environment["Hotel__Address"]!.GetValue<string>());
         Assert.Equal("{geoapify-api-key.value}", environment["Geoapify__ApiKey"]!.GetValue<string>());
         Assert.NotNull(resources["geoapify-api-key"]);
         Assert.Null(resources["web"]!["env"]!["Geoapify__ApiKey"]);
@@ -133,7 +142,7 @@ public sealed class AIConfigurationTests
                     .Select(pair => new KeyValuePair<string, string?>(
                         pair.Key.Replace("__", ":"), pair.Value!.GetValue<string>()))).Build())
             .BuildServiceProvider();
-        Assert.Equal(180, services.GetRequiredService<IOptions<ChatProviderOptions>>().Value.RequestTimeoutSeconds);
+        Assert.Equal(18, services.GetRequiredService<IOptions<ChatProviderOptions>>().Value.RequestTimeoutSeconds);
         Assert.Equal(768, services.GetRequiredService<IOptions<EmbeddingProviderOptions>>().Value.Dimensions);
     }
 
@@ -217,7 +226,8 @@ public sealed class AIConfigurationTests
         var embeddings = services.GetRequiredService<IOptions<EmbeddingProviderOptions>>().Value;
         Assert.Equal("Foundry", chat.Provider);
         Assert.Equal("Foundry", embeddings.Provider);
-        Assert.Equal(60, chat.RequestTimeoutSeconds);
+        Assert.Equal(18, chat.RequestTimeoutSeconds);
+        Assert.Equal(8, embeddings.RequestTimeoutSeconds);
         Assert.Equal(4, chat.MaxConcurrentRequests);
         Assert.Equal(32768, chat.ContextWindowTokens);
         Assert.Null(chat.ApiKey);

@@ -8,9 +8,13 @@ namespace Concierge.WorkflowServer.Workflows;
 [Workflow(SetupWorkflowIdentity.WorkflowType)]
 public sealed class HotelSetupWorkflow
 {
+    // AI:Embeddings:IngestionRequestTimeoutSeconds is validated to finish inside this allowance.
+    internal static readonly TimeSpan SetupActivityTimeout = TimeSpan.FromMinutes(5);
+
+    // Temporal owns ingestion embedding retries; the embedding SDK client does not retry.
     private static readonly ActivityOptions SetupActivityOptions = new()
     {
-        StartToCloseTimeout = TimeSpan.FromMinutes(5),
+        StartToCloseTimeout = SetupActivityTimeout,
         RetryPolicy = new RetryPolicy
         {
             InitialInterval = TimeSpan.FromSeconds(1),

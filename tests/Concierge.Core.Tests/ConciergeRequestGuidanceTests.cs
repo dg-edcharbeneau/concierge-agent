@@ -18,10 +18,10 @@ public sealed class ConciergeRequestGuidanceTests
     public static TheoryData<ConciergeVerificationRequest?, string> InvalidVerificationRequests => new()
     {
         { null, "Provide a verification request with LastName and RoomNumber." },
-        { new(null!, "412"), "Enter LastName (up to 100 characters)." },
-        { new("", "412"), "Enter LastName (up to 100 characters)." },
-        { new(" \t", "412"), "Enter LastName (up to 100 characters)." },
-        { new(new string('X', 101), "412"), "Enter LastName (up to 100 characters)." },
+        { new(null!, "412"), $"Enter LastName (up to {ConciergeVerifiedGuest.MaxNameLength} characters)." },
+        { new("", "412"), $"Enter LastName (up to {ConciergeVerifiedGuest.MaxNameLength} characters)." },
+        { new(" \t", "412"), $"Enter LastName (up to {ConciergeVerifiedGuest.MaxNameLength} characters)." },
+        { new(new string('X', ConciergeVerifiedGuest.MaxNameLength + 1), "412"), $"Enter LastName (up to {ConciergeVerifiedGuest.MaxNameLength} characters)." },
         { new("PrivateGuestName", null!), "Enter RoomNumber as 1–4 ASCII digits with no leading zero." },
         { new("PrivateGuestName", ""), "Enter RoomNumber as 1–4 ASCII digits with no leading zero." },
         { new("PrivateGuestName", "0412"), "Enter RoomNumber as 1–4 ASCII digits with no leading zero." },
@@ -86,7 +86,7 @@ public sealed class ConciergeRequestGuidanceTests
     {
         var client = DispatchProxy.Create<ITemporalClient, RejectingTemporalClient>();
         var error = await Assert.ThrowsAsync<ConciergeApiException>(
-            () => CreateService(client).VerifyAsync(new($" {new string('X', 100)} ", roomNumber)));
+            () => CreateService(client).VerifyAsync(new($" {new string('X', ConciergeVerifiedGuest.MaxNameLength)} ", roomNumber)));
 
         // The rejecting client proves validation reached Temporal, not the invalid-request branch.
         Assert.Equal("unavailable", error.Code);
@@ -142,7 +142,7 @@ public sealed class ConciergeRequestGuidanceTests
         // Missing JSON properties must also reach service validation rather than a generic binding error.
         await AssertResponseAsync(
             await http.PostAsJsonAsync("/api/concierge/sessions", new { RoomNumber = "412" }),
-            "Enter LastName (up to 100 characters).");
+            $"Enter LastName (up to {ConciergeVerifiedGuest.MaxNameLength} characters).");
         await AssertResponseAsync(
             await http.PostAsJsonAsync("/api/concierge/turns", new { TurnId = "private-turn", Channel = "web" }),
             "Enter a nonblank UserMessage of at most 2000 UTF-8 bytes.");

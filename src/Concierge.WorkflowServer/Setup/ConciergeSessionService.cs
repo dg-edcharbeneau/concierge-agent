@@ -1,10 +1,18 @@
 using Concierge.Contracts;
+using Concierge.WorkflowServer.Location;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace Concierge.WorkflowServer.Setup;
 
-public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
+public sealed class ConciergeSessionService(
+    NpgsqlDataSource dataSource,
+    IOptions<HotelLocationOptions> hotelOptions)
 {
+    // Stay boundaries are stored as UTC instants of hotel-local midnight.
+    private readonly TimeZoneInfo hotelTimeZone =
+        TimeZoneInfo.FindSystemTimeZoneById(hotelOptions.Value.TimeZoneId);
+
     /// <summary>
     /// Creates a session for the guest's eligible stay, bound to the credential digest. Retries with the same
     /// session ID return the original binding. Returns <see langword="null"/> for invalid input or no match.
@@ -15,7 +23,7 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
     {
         if (request is null
             || string.IsNullOrWhiteSpace(request.LastName)
-            || request.LastName.Trim().Length > 100
+            || request.LastName.Trim().Length > ConciergeVerifiedGuest.MaxNameLength
             || !RoomNumberFormat.IsValid(request.RoomNumber)
             || request.CredentialSha256 is not { Length: 32 })
         {
@@ -26,7 +34,8 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
         // Return the first committed binding rather than selecting a different stay later.
         await using (var command = dataSource.CreateCommand(
             """
-            SELECT cs.stay_id, cs.expires_at_utc, g.given_name, g.family_name, s.room_number
+            SELECT cs.stay_id, cs.expires_at_utc, g.given_name, g.family_name, s.room_number,
+                   g.guest_id, s.check_out_utc, s.check_in_utc
             FROM concierge_sessions cs
             JOIN stays s ON s.stay_id = cs.stay_id
             JOIN guests g ON g.guest_id = s.guest_id
@@ -95,7 +104,8 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
         // A concurrent retry may have inserted this ID. Only accept the matching verifier.
         await using (var command = dataSource.CreateCommand(
             """
-            SELECT cs.stay_id, cs.expires_at_utc, g.given_name, g.family_name, s.room_number
+            SELECT cs.stay_id, cs.expires_at_utc, g.given_name, g.family_name, s.room_number,
+                   g.guest_id, s.check_out_utc, s.check_in_utc
             FROM concierge_sessions cs
             JOIN stays s ON s.stay_id = cs.stay_id
             JOIN guests g ON g.guest_id = s.guest_id
@@ -131,7 +141,8 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
         await using var command = dataSource.CreateCommand(
             """
             SELECT cs.session_id, cs.stay_id, cs.expires_at_utc,
-                   g.given_name, g.family_name, s.room_number
+                   g.given_name, g.family_name, s.room_number, g.guest_id, s.check_out_utc,
+                   s.check_in_utc
             FROM concierge_sessions cs
             JOIN stays s ON s.stay_id = cs.stay_id
             JOIN guests g ON g.guest_id = s.guest_id
@@ -155,8 +166,18 @@ public sealed class ConciergeSessionService(NpgsqlDataSource dataSource)
             ReadVerifiedGuest(reader, reader.GetGuid(1), 3));
     }
 
-    private static ConciergeVerifiedGuest ReadVerifiedGuest(NpgsqlDataReader reader, Guid stayId, int offset) =>
-        new(stayId, reader.GetString(offset), reader.GetString(offset + 1), reader.GetString(offset + 2));
+    private ConciergeVerifiedGuest ReadVerifiedGuest(NpgsqlDataReader reader, Guid stayId, int offset) =>
+        new(
+            stayId,
+            reader.GetString(offset),
+            reader.GetString(offset + 1),
+            reader.GetString(offset + 2),
+            reader.GetGuid(offset + 3),
+            HotelLocalDate(reader.GetFieldValue<DateTimeOffset>(offset + 4)),
+            HotelLocalDate(reader.GetFieldValue<DateTimeOffset>(offset + 5)));
+
+    private DateOnly HotelLocalDate(DateTimeOffset utc) =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(utc, hotelTimeZone).DateTime);
 
     /// <summary>
     /// Marks the session ended. Already-ended sessions are left unchanged, so retries are safe.

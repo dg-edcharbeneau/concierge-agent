@@ -19,7 +19,11 @@ public abstract class AIProviderOptions
 
     public string? ApiKey { get; set; }
 
-    public int RequestTimeoutSeconds { get; set; } = 60;
+    /// <summary>
+    /// Bound on one provider call, including the concurrency-slot wait. Must finish inside the
+    /// Temporal activity attempt that encloses the call; the validator enforces the ceiling.
+    /// </summary>
+    public int RequestTimeoutSeconds { get; set; }
 
     public int MaxConcurrentRequests { get; set; } = 4;
 }
@@ -27,6 +31,15 @@ public abstract class AIProviderOptions
 public sealed class ChatProviderOptions : AIProviderOptions
 {
     public const string SectionName = "AI:Chat";
+
+    /// <summary>
+    /// Ceiling for <see cref="AIProviderOptions.RequestTimeoutSeconds"/>: the model activity's
+    /// per-attempt allowance less <see cref="ActivityCallBudget.CompletionMargin"/> (18 s).
+    /// </summary>
+    public static int MaxRequestTimeoutSeconds =>
+        ActivityCallBudget.MaxRequestTimeoutSeconds(ConciergeStayWorkflow.ModelActivityTimeout);
+
+    public ChatProviderOptions() => RequestTimeoutSeconds = MaxRequestTimeoutSeconds;
 
     /// <summary>
     /// Model context window in tokens. Must cover the worst-case prompt budget.
@@ -44,6 +57,29 @@ public sealed class EmbeddingProviderOptions : AIProviderOptions
 {
     public const string SectionName = "AI:Embeddings";
 
+    /// <summary>
+    /// Ceiling for <see cref="AIProviderOptions.RequestTimeoutSeconds"/>: the retrieval activity's
+    /// per-attempt allowance less <see cref="ActivityCallBudget.CompletionMargin"/> (8 s). The same
+    /// generator embeds ingestion batches inside the much longer setup activity.
+    /// </summary>
+    public static int MaxRequestTimeoutSeconds =>
+        ActivityCallBudget.MaxRequestTimeoutSeconds(ConciergeStayWorkflow.RetrievalActivityTimeout);
+
+    public EmbeddingProviderOptions() => RequestTimeoutSeconds = MaxRequestTimeoutSeconds;
+
+    /// <summary>
+    /// Ceiling for <see cref="IngestionRequestTimeoutSeconds"/>: the setup activity's per-attempt
+    /// allowance less <see cref="ActivityCallBudget.CompletionMargin"/>.
+    /// </summary>
+    public static int MaxIngestionRequestTimeoutSeconds =>
+        ActivityCallBudget.MaxRequestTimeoutSeconds(HotelSetupWorkflow.SetupActivityTimeout);
+
+    /// <summary>
+    /// Bound on one ingestion embedding call: a whole knowledge section, possibly on a cold model,
+    /// inside the setup activity. Also used by the Ollama warm-up. Provisional until measured.
+    /// </summary>
+    public int IngestionRequestTimeoutSeconds { get; set; } = 60;
+
     public int Dimensions { get; set; }
 }
 
@@ -54,7 +90,8 @@ internal sealed class AIProviderOptionsValidator :
     /// <inheritdoc/>
     public ValidateOptionsResult Validate(string? name, ChatProviderOptions options)
     {
-        var failures = ValidateCommon(ChatProviderOptions.SectionName, options);
+        var failures = ValidateCommon(
+            ChatProviderOptions.SectionName, options, ChatProviderOptions.MaxRequestTimeoutSeconds);
         if (!string.Equals(options.ReasoningEffort, "low", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(options.ReasoningEffort, "none", StringComparison.OrdinalIgnoreCase))
         {
@@ -79,7 +116,17 @@ internal sealed class AIProviderOptionsValidator :
     /// <inheritdoc/>
     public ValidateOptionsResult Validate(string? name, EmbeddingProviderOptions options)
     {
-        var failures = ValidateCommon(EmbeddingProviderOptions.SectionName, options);
+        var failures = ValidateCommon(
+            EmbeddingProviderOptions.SectionName, options, EmbeddingProviderOptions.MaxRequestTimeoutSeconds);
+        if (options.IngestionRequestTimeoutSeconds < 1
+            || options.IngestionRequestTimeoutSeconds > EmbeddingProviderOptions.MaxIngestionRequestTimeoutSeconds)
+        {
+            failures.Add(
+                $"{EmbeddingProviderOptions.SectionName}:IngestionRequestTimeoutSeconds is "
+                + $"{options.IngestionRequestTimeoutSeconds}, but it must be between 1 and "
+                + $"{EmbeddingProviderOptions.MaxIngestionRequestTimeoutSeconds} so each section's embedding "
+                + "call finishes inside the setup activity attempt that retries it.");
+        }
         if (options.Dimensions != EmbeddingModelIdentity.MigratedSchemaDimensions)
         {
             failures.Add(
@@ -94,7 +141,10 @@ internal sealed class AIProviderOptionsValidator :
             : ValidateOptionsResult.Fail(failures);
     }
 
-    private static List<string> ValidateCommon(string section, AIProviderOptions options)
+    private static List<string> ValidateCommon(
+        string section,
+        AIProviderOptions options,
+        int maxRequestTimeoutSeconds)
     {
         var failures = new List<string>();
         if (!IsProvider(options.Provider))
@@ -135,6 +185,14 @@ internal sealed class AIProviderOptionsValidator :
         if (options.RequestTimeoutSeconds < 1)
         {
             failures.Add($"{section}:RequestTimeoutSeconds must be positive.");
+        }
+        else if (options.RequestTimeoutSeconds > maxRequestTimeoutSeconds)
+        {
+            failures.Add(
+                $"{section}:RequestTimeoutSeconds is {options.RequestTimeoutSeconds}, but it must be at most "
+                + $"{maxRequestTimeoutSeconds} so the call, including its concurrency-slot wait, finishes "
+                + "inside the Temporal activity attempt that retries it. Load slow local models before "
+                + "use instead of raising the request timeout.");
         }
 
         if (options.MaxConcurrentRequests < 1)
