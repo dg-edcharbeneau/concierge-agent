@@ -114,6 +114,22 @@ public sealed record ConciergeTurnInterruption(string TurnId);
 
 public sealed record ConciergeHistoryResult(IReadOnlyList<ConciergeTranscriptTurn> Turns);
 
+/// <summary>
+/// Offset requested when the guest marks a displayed ride-activity snapshot as read.
+/// SnapshotOffset is the exclusive end offset returned by the read-state query.
+/// </summary>
+public sealed record ConciergeRideReadOffsetUpdate(long SnapshotOffset);
+
+/// <summary>
+/// Ride-feed read cursor and offset boundaries for one stay. RetainedFromOffset is the first
+/// retained global stream offset to subscribe from; SnapshotOffset is the exclusive end of the
+/// snapshot, so entries published at or after it remain unread when that snapshot is marked read.
+/// </summary>
+public sealed record ConciergeRideReadState(
+    long ReadOffset,
+    long RetainedFromOffset,
+    long SnapshotOffset);
+
 public sealed record PersistTranscriptRequest(
     Guid StayId,
     IReadOnlyList<ConciergeTranscriptTurn> Turns);

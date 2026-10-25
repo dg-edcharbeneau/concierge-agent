@@ -1,4 +1,5 @@
 using System.Buffers.Text;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using Concierge.Contracts;
 using Concierge.Web.Voice;
@@ -7,6 +8,7 @@ using Temporalio.Api.Enums.V1;
 using Temporalio.Client;
 using Temporalio.Common;
 using Temporalio.Exceptions;
+using Temporalio.Extensions.WorkflowStreams;
 
 namespace Concierge.Web.Services;
 
@@ -17,6 +19,9 @@ public sealed class ConciergeService(
     VoiceSessionRegistry voiceSessions,
     ILogger<ConciergeService> logger) : IConciergeService
 {
+    private static readonly TimeSpan InitialRideStreamRetryDelay = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan MaximumRideStreamRetryDelay = TimeSpan.FromSeconds(5);
+
     /// <inheritdoc/>
     public async Task<ConciergeSessionResponse> VerifyAsync(
         ConciergeVerificationRequest request,
@@ -232,6 +237,244 @@ public sealed class ConciergeService(
     }
 
     /// <inheritdoc/>
+    public async Task<ConciergeRideActivitySnapshot> ReadRideActivitySnapshotAsync(
+        string? bearerCredential,
+        CancellationToken cancellationToken = default)
+    {
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        RequireVerifiedGuest(session);
+        try
+        {
+            var workflow = await GetRideActivityWorkflowAsync(
+                session, cancellationToken, nameof(ReadRideActivitySnapshotAsync));
+            var readState = await workflow.QueryAsync<ConciergeRideReadState>(
+                ConciergeWorkflowNames.RideActivityReadStateQuery,
+                [],
+                QueryOptions(cancellationToken));
+            ValidateRideReadState(readState);
+
+            var firstOffset = Math.Max(
+                readState.RetainedFromOffset,
+                readState.SnapshotOffset - ConciergeRideActivityWindow.MaxEntries);
+            var expectedOffset = firstOffset;
+            var entries = new List<ConciergeRideActivityItem>(
+                checked((int)(readState.SnapshotOffset - firstOffset)));
+            if (firstOffset < readState.SnapshotOffset)
+            {
+                await using var streamClient = new WorkflowStreamClient(
+                    temporalClient,
+                    ConciergeStayWorkflowIds.ForStay(session.StayId));
+                await using var subscription = streamClient
+                    .GetTopic<RideActivityEntry>(RideActivityFeed.Topic)
+                    .SubscribeAsync(firstOffset)
+                    .GetAsyncEnumerator(cancellationToken);
+
+                while (expectedOffset < readState.SnapshotOffset)
+                {
+                    if (!await subscription.MoveNextAsync())
+                    {
+                        throw Unavailable();
+                    }
+
+                    var item = subscription.Current;
+                    if (item.Offset != expectedOffset || item.Offset >= readState.SnapshotOffset)
+                    {
+                        // The retained window changed between the query and subscription. Never
+                        // return a success-shaped partial snapshot.
+                        LogRideActivityFailure(nameof(ReadRideActivitySnapshotAsync), "snapshot_window_changed");
+                        throw Unavailable();
+                    }
+
+                    entries.Add(new ConciergeRideActivityItem(item.Offset, item.Value));
+                    expectedOffset++;
+                }
+            }
+
+            return new ConciergeRideActivitySnapshot(readState, entries);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not ConciergeApiException)
+        {
+            throw MapTemporalFailure(exception, nameof(ReadRideActivitySnapshotAsync));
+        }
+    }
+
+    /// <inheritdoc/>
+    public async IAsyncEnumerable<ConciergeRideActivityItem> StreamRideActivityAsync(
+        string? bearerCredential,
+        long fromOffset,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (fromOffset < 0)
+        {
+            throw InvalidRequest("The ride activity offset cannot be negative.");
+        }
+
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        RequireVerifiedGuest(session);
+        var nextOffset = fromOffset;
+        var retryDelay = InitialRideStreamRetryDelay;
+        var isReconnect = false;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (isReconnect)
+            {
+                try
+                {
+                    // Re-authenticate before reconnecting so revoked or expired credentials cannot
+                    // silently keep an old subscription alive.
+                    var reauthenticated = await AuthenticateAsync(bearerCredential, cancellationToken);
+                    RequireSameAuthenticatedSession(session, reauthenticated);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    // Credential/session failures (401/403) are terminal. Temporary failures —
+                    // transient RPC errors, or session-activity failures already mapped to 503 —
+                    // share the stream's capped backoff and retry reauthentication.
+                    if (!IsRetryableRideStreamReauthenticationFailure(exception))
+                    {
+                        throw exception is ConciergeApiException apiException
+                            ? apiException
+                            : MapTemporalFailure(exception, nameof(StreamRideActivityAsync));
+                    }
+
+                    LogRideStreamRetry(exception);
+                    await Task.Delay(retryDelay, cancellationToken);
+                    retryDelay = NextRideStreamRetryDelay(retryDelay);
+                    continue;
+                }
+            }
+            isReconnect = true;
+
+            WorkflowStreamClient streamClient;
+            IAsyncEnumerator<WorkflowStreamItem<RideActivityEntry>> subscription;
+            try
+            {
+                _ = await GetRideActivityWorkflowAsync(
+                    session, cancellationToken, nameof(StreamRideActivityAsync));
+                streamClient = new WorkflowStreamClient(
+                    temporalClient,
+                    ConciergeStayWorkflowIds.ForStay(session.StayId));
+                try
+                {
+                    subscription = streamClient
+                        .GetTopic<RideActivityEntry>(RideActivityFeed.Topic)
+                        .SubscribeAsync(nextOffset)
+                        .GetAsyncEnumerator(cancellationToken);
+                }
+                catch
+                {
+                    await streamClient.DisposeAsync();
+                    throw;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException and not ConciergeApiException)
+            {
+                if (!IsTransientRideStreamFailure(exception))
+                {
+                    throw MapTemporalFailure(exception, nameof(StreamRideActivityAsync));
+                }
+
+                LogRideStreamRetry(exception);
+                await Task.Delay(retryDelay, cancellationToken);
+                retryDelay = NextRideStreamRetryDelay(retryDelay);
+                continue;
+            }
+
+            Exception? retryFailure = null;
+            try
+            {
+                while (true)
+                {
+                    bool hasNext;
+                    try
+                    {
+                        hasNext = await subscription.MoveNextAsync();
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException and not ConciergeApiException)
+                    {
+                        if (!IsTransientRideStreamFailure(exception))
+                        {
+                            throw MapTemporalFailure(exception, nameof(StreamRideActivityAsync));
+                        }
+
+                        retryFailure = exception;
+                        break;
+                    }
+
+                    if (!hasNext)
+                    {
+                        throw RideActivityStreamEnded(session, nameof(StreamRideActivityAsync));
+                    }
+
+                    var item = subscription.Current;
+                    if (item.Offset < nextOffset)
+                    {
+                        continue;
+                    }
+                    if (item.Offset != nextOffset)
+                    {
+                        LogRideActivityFailure(nameof(StreamRideActivityAsync), "stream_offset_gap");
+                        throw Unavailable();
+                    }
+
+                    nextOffset = checked(item.Offset + 1);
+                    retryDelay = InitialRideStreamRetryDelay;
+                    yield return new ConciergeRideActivityItem(item.Offset, item.Value);
+                }
+            }
+            finally
+            {
+                try
+                {
+                    await subscription.DisposeAsync();
+                }
+                finally
+                {
+                    await streamClient.DisposeAsync();
+                }
+            }
+
+            if (retryFailure is not null)
+            {
+                LogRideStreamRetry(retryFailure);
+                await Task.Delay(retryDelay, cancellationToken);
+                retryDelay = NextRideStreamRetryDelay(retryDelay);
+            }
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<ConciergeRideReadState> MarkRideActivitySnapshotReadAsync(
+        string? bearerCredential,
+        long snapshotOffset,
+        CancellationToken cancellationToken = default)
+    {
+        if (snapshotOffset < 0)
+        {
+            throw InvalidRequest("The ride activity snapshot offset cannot be negative.");
+        }
+
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        RequireVerifiedGuest(session);
+        try
+        {
+            var workflow = await GetRideActivityWorkflowAsync(
+                session, cancellationToken, nameof(MarkRideActivitySnapshotReadAsync));
+            return await workflow.ExecuteUpdateAsync<ConciergeRideReadState>(
+                ConciergeWorkflowNames.AdvanceRideActivityReadOffsetUpdate,
+                [new ConciergeRideReadOffsetUpdate(snapshotOffset)],
+                UpdateOptions(cancellationToken));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not ConciergeApiException)
+        {
+            throw MapTemporalFailure(exception, nameof(MarkRideActivitySnapshotReadAsync));
+        }
+    }
+
+    /// <inheritdoc/>
     public async Task EndAsync(
         string? bearerCredential,
         CancellationToken cancellationToken = default)
@@ -384,8 +627,121 @@ public sealed class ConciergeService(
         return temporalClient.GetWorkflowHandle(workflowId);
     }
 
+    /// <summary>
+    /// Ensures a stay feed workflow exists without resurrecting a closed execution. An absent
+    /// workflow is started for a newly verified stay; a closed workflow is an explicit failure.
+    /// </summary>
+    private async Task<WorkflowHandle> GetRideActivityWorkflowAsync(
+        ConciergeSessionContext session,
+        CancellationToken cancellationToken,
+        string operation)
+    {
+        var workflowId = ConciergeStayWorkflowIds.ForStay(session.StayId);
+        var workflow = temporalClient.GetWorkflowHandle(workflowId);
+        try
+        {
+            var description = await workflow.DescribeAsync(
+                new WorkflowDescribeOptions { Rpc = new RpcOptions { CancellationToken = cancellationToken } });
+            if (description.Status != WorkflowExecutionStatus.Running)
+            {
+                throw RideActivityStreamEnded(session, operation);
+            }
+
+            return workflow;
+        }
+        catch (RpcException exception) when (exception.Code == RpcException.StatusCode.NotFound)
+        {
+            // Starting is needed for a signed-in guest who has not yet sent a chat turn. The
+            // existence check above prevents a closed stay workflow from being restarted.
+            await GetStayWorkflowAsync(session, cancellationToken);
+            workflow = temporalClient.GetWorkflowHandle(workflowId);
+            var description = await workflow.DescribeAsync(
+                new WorkflowDescribeOptions { Rpc = new RpcOptions { CancellationToken = cancellationToken } });
+            if (description.Status != WorkflowExecutionStatus.Running)
+            {
+                throw RideActivityStreamEnded(session, operation);
+            }
+
+            return workflow;
+        }
+    }
+
     private static WorkflowUpdateOptions UpdateOptions(CancellationToken cancellationToken) =>
         new() { Rpc = new RpcOptions { CancellationToken = cancellationToken } };
+
+    private static WorkflowQueryOptions QueryOptions(CancellationToken cancellationToken) =>
+        new() { Rpc = new RpcOptions { CancellationToken = cancellationToken } };
+
+    private static void ValidateRideReadState(ConciergeRideReadState state)
+    {
+        if (state.ReadOffset < 0
+            || state.RetainedFromOffset < 0
+            || state.SnapshotOffset < state.RetainedFromOffset
+            || state.ReadOffset > state.SnapshotOffset)
+        {
+            throw new InvalidOperationException("The stay workflow returned invalid ride activity offsets.");
+        }
+    }
+
+    private static void RequireSameAuthenticatedSession(
+        ConciergeSessionContext expected,
+        ConciergeSessionContext actual)
+    {
+        RequireVerifiedGuest(actual);
+        if (actual.SessionId != expected.SessionId || actual.StayId != expected.StayId)
+        {
+            throw Unauthorized();
+        }
+    }
+
+    private static TimeSpan NextRideStreamRetryDelay(TimeSpan current) =>
+        TimeSpan.FromMilliseconds(Math.Min(
+            current.TotalMilliseconds * 2,
+            MaximumRideStreamRetryDelay.TotalMilliseconds));
+
+    private static bool IsTransientRideStreamFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is RpcException rpcException
+                && rpcException.Code is RpcException.StatusCode.Unavailable
+                    or RpcException.StatusCode.DeadlineExceeded
+                    or RpcException.StatusCode.ResourceExhausted
+                    or RpcException.StatusCode.Aborted)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsRetryableRideStreamReauthenticationFailure(Exception exception) =>
+        exception is ConciergeApiException apiException
+            ? apiException.StatusCode == StatusCodes.Status503ServiceUnavailable
+            : IsTransientRideStreamFailure(exception);
+
+    private void LogRideStreamRetry(Exception exception) =>
+        logger.LogWarning(
+            "Concierge Temporal operation {Operation} encountered a transient stream failure. Cause types: {CauseTypes}.",
+            nameof(StreamRideActivityAsync),
+            ConciergeDiagnostics.ExceptionTypeChain(exception));
+
+    private void LogRideActivityFailure(string operation, string reason) =>
+        logger.LogWarning(
+            "Concierge Temporal operation {Operation} failed. Reason: {Reason}.",
+            operation,
+            reason);
+
+    private ConciergeApiException RideActivityStreamEnded(
+        ConciergeSessionContext session,
+        string operation)
+    {
+        LogRideActivityFailure(operation, "stay_workflow_closed");
+        return session.EligibilityDeadlineUtc <= DateTimeOffset.UtcNow
+            ? Unauthorized()
+            : Unavailable();
+    }
 
     private static bool TryHashCredential(string? credential, out byte[] hash)
     {

@@ -373,6 +373,15 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         public Task<ConciergeHistoryResult> ReadHistoryAsync(
             string? bearerCredential, CancellationToken cancellationToken = default) => throw Failure();
         /// <inheritdoc/>
+        public Task<ConciergeRideActivitySnapshot> ReadRideActivitySnapshotAsync(
+            string? bearerCredential, CancellationToken cancellationToken = default) => throw Failure();
+        /// <inheritdoc/>
+        public IAsyncEnumerable<ConciergeRideActivityItem> StreamRideActivityAsync(
+            string? bearerCredential, long fromOffset, CancellationToken cancellationToken = default) => throw Failure();
+        /// <inheritdoc/>
+        public Task<ConciergeRideReadState> MarkRideActivitySnapshotReadAsync(
+            string? bearerCredential, long snapshotOffset, CancellationToken cancellationToken = default) => throw Failure();
+        /// <inheritdoc/>
         public Task EndAsync(
             string? bearerCredential, CancellationToken cancellationToken = default) => throw Failure();
         /// <inheritdoc/>

@@ -1,10 +1,12 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Concierge.Contracts;
 using Concierge.Web.Components.Pages;
 using Concierge.Web.Services;
 using Concierge.Web.Voice;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.RenderTree;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.JSInterop;
@@ -164,12 +166,18 @@ public sealed class HomeSessionTests
         await using var harness = new Harness();
         harness.SetSession("old", Guid.NewGuid());
         harness.Set("draft", "Keep this");
+        var rideFeedCancellation = new CancellationTokenSource();
+        harness.Set("rideActivityCancellation", rideFeedCancellation);
+        harness.Set("rideActivityCredential", "old");
         await harness.Call("OnAfterRenderAsync", false);
         Assert.Equal(1, harness.JavaScript.Calls.Count(call => call == "conciergeChat.wireTranscript"));
         await harness.Call("EndChatAsync");
+        Assert.True(rideFeedCancellation.IsCancellationRequested);
         await harness.Call("OnAfterRenderAsync", false);
         Assert.Contains("conciergeChat.unwireTranscript", harness.JavaScript.Calls);
         await harness.Call("CancelEndChat");
+        await harness.WaitUntil(() => harness.Service.RideStreamFromOffset == 0);
+        Assert.Equal(0, harness.Service.RideStreamFromOffset);
         await harness.Call("OnAfterRenderAsync", false);
         Assert.Equal(2, harness.JavaScript.Calls.Count(call => call == "conciergeChat.wireTranscript"));
         await harness.Call("EndInteractionAsync");
@@ -307,6 +315,7 @@ public sealed class HomeSessionTests
         var retry = harness.Call("RetryAsync");
         if (!replyCompleted)
         {
+            await harness.WaitUntil(() => harness.Service.Submissions.Count == 2);
             Assert.Equal(2, harness.Service.Submissions.Count);
             harness.Service.History = _ => Task.FromResult(History(pending.TurnId));
             response.SetResult(new ConciergeTurnResult(pending.TurnId, "Reply", 1));
@@ -354,18 +363,19 @@ public sealed class HomeSessionTests
         await harness.Call("StateHasChanged");
 
         var elements = harness.RenderedElements();
-        var header = Assert.Single(elements, element => element.Tag == "header");
+        var header = elements.First(element => element.Tag == "header");
         var controls = elements
             .Where(element => element.Index > header.Index && element.Index < header.EndIndex)
             .Where(element => element.Tag == "button")
             .ToArray();
 
-        Assert.Equal(3, controls.Length);
+        Assert.Equal(4, controls.Length);
         Assert.Equal(
-            ["Mute microphone", "End voice", "End chat"],
+            ["Activity", "Mute microphone", "End voice", "End chat"],
             controls.Select(element => element.Attributes.GetValueOrDefault("aria-label")));
+        Assert.Equal("ride-activity-panel", controls[0].Attributes.GetValueOrDefault("aria-controls"));
         // The visible label switches Mute/Unmute, so the name carries state; aria-pressed would double it.
-        Assert.False(controls[0].Attributes.ContainsKey("aria-pressed"));
+        Assert.False(controls[1].Attributes.ContainsKey("aria-pressed"));
         Assert.All(controls, element => Assert.False(element.Attributes.ContainsKey("tabindex")));
         Assert.Contains(elements, element =>
             element.Tag == "div"
@@ -414,7 +424,7 @@ public sealed class HomeSessionTests
         await harness.Call("StateHasChanged");
 
         var elements = harness.RenderedElements();
-        var header = Assert.Single(elements, element => element.Tag == "header");
+        var header = elements.First(element => element.Tag == "header");
         var muteButton = Assert.Single(elements, element =>
             element.Tag == "button"
             && element.Index > header.Index && element.Index < header.EndIndex
@@ -437,7 +447,7 @@ public sealed class HomeSessionTests
         await harness.Call("StateHasChanged");
 
         var elements = harness.RenderedElements();
-        var header = Assert.Single(elements, element => element.Tag == "header");
+        var header = elements.First(element => element.Tag == "header");
         var themePicker = Assert.Single(elements, element =>
             element.Tag == "select"
             && Equals(element.Attributes.GetValueOrDefault("aria-label"), "Color theme"));
@@ -469,16 +479,17 @@ public sealed class HomeSessionTests
         await harness.Call("StateHasChanged");
 
         var elements = harness.RenderedElements();
-        var header = Assert.Single(elements, element => element.Tag == "header");
+        var header = elements.First(element => element.Tag == "header");
         var controls = elements
             .Where(element => element.Index > header.Index && element.Index < header.EndIndex)
             .Where(element => element.Tag == "button")
             .ToArray();
 
-        Assert.Equal(3, controls.Length);
+        Assert.Equal(4, controls.Length);
         Assert.Equal(
-            [action, "End voice", "End chat"],
+            ["Activity", action, "End voice", "End chat"],
             controls.Select(element => element.Attributes.GetValueOrDefault("aria-label")));
+        Assert.Equal("ride-activity-panel", controls[0].Attributes.GetValueOrDefault("aria-controls"));
         Assert.DoesNotContain(controls, element => Equals(element.Attributes.GetValueOrDefault("aria-label"), "Mute microphone"));
     }
 
@@ -506,6 +517,259 @@ public sealed class HomeSessionTests
 
         Assert.Equal(new[] { false, true, false, false }, interruptedFlags);
         Assert.Equal(1, indicatorCount);
+    }
+
+    /// <summary>Opening ride activity reads one snapshot, leaving later entries unread.</summary>
+    [Fact]
+    public async Task OpeningRideActivityReadsOnlyTheDisplayedSnapshot()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        var rideId = Guid.NewGuid();
+        var bookedAt = new DateTimeOffset(2026, 10, 24, 16, 0, 0, TimeSpan.Zero);
+        var completedAt = bookedAt.AddMinutes(30);
+        var entries = harness.Get<List<RideActivityEntry>>("rideActivityEntries");
+        entries.Add(new RideActivityEntry(
+            rideId, 1, "Booked", bookedAt, "Hotel ZGY", "Museum", bookedAt.AddHours(1)));
+        entries.Add(new RideActivityEntry(
+            rideId, 2, "DriverAssigned", bookedAt.AddMinutes(10), "Hotel ZGY", "Museum",
+            bookedAt.AddHours(1), "Jordan Lee", "Black sedan", "ZGY 204"));
+        entries.Add(new RideActivityEntry(
+            rideId, 3, "Completed", completedAt, "Hotel ZGY", "Museum", bookedAt.AddHours(1)));
+        entries.Add(new RideActivityEntry(
+            rideId, 4, "PickedUp", completedAt.AddMinutes(5), "Hotel ZGY", "Museum", bookedAt.AddHours(1)));
+        entries.Add(new RideActivityEntry(
+            rideId, 5, "Cancelled", completedAt.AddMinutes(10), "Hotel ZGY", "Museum", bookedAt.AddHours(1)));
+        harness.Service.RideSnapshot = _ => Task.FromResult(new ConciergeRideActivitySnapshot(
+            new ConciergeRideReadState(harness.Service.RideReadOffset, 0, entries.Count),
+            entries.Select((entry, index) => new ConciergeRideActivityItem(index, entry)).ToArray()));
+        harness.Set("rideActivityCancellation", new CancellationTokenSource());
+
+        await harness.Call("ToggleActivity");
+        var readKeys = harness.Get<HashSet<string>>("rideActivityReadEntryKeys");
+        Assert.Equal(5, readKeys.Count);
+        Assert.Equal(5, harness.Service.MarkedRideSnapshotOffset);
+
+        var lateEntry = new RideActivityEntry(
+            rideId, 6, "Booked", completedAt.AddMinutes(15), "Hotel ZGY", "Museum", bookedAt.AddHours(1));
+        var window = harness.Get<ConciergeRideActivityWindow?>("rideActivityWindow")!;
+        Assert.True(window.Apply(new ConciergeRideActivityItem(5, lateEntry)));
+        await harness.Call("SynchronizeRideActivityEntries");
+        await harness.Call("RefreshRideActivityReadKeys");
+        Assert.DoesNotContain($"{rideId:N}:6", readKeys);
+        Assert.Equal(1, harness.Get<int>("UnreadRideActivityCount"));
+
+        await harness.Call("StateHasChanged");
+        var (text, markup) = harness.RenderedContent();
+        var renderedText = string.Concat(text.Concat(markup));
+        Assert.True(renderedText.IndexOf("Completed", StringComparison.Ordinal)
+            < renderedText.IndexOf("Driver assigned", StringComparison.Ordinal));
+        Assert.True(renderedText.IndexOf("Driver assigned", StringComparison.Ordinal)
+            < renderedText.LastIndexOf("Booked", StringComparison.Ordinal));
+        Assert.Contains("Picked up", renderedText);
+        Assert.Contains("Cancelled", renderedText);
+        Assert.Contains("Jordan Lee", text);
+        Assert.Contains("Black sedan", text);
+        Assert.Contains("ZGY 204", text);
+        Assert.Contains("12:30 PM", string.Concat(text));
+        Assert.Contains("Updates for your stay · Miami time (ET)", renderedText);
+        Assert.DoesNotContain("YOUR RIDES", renderedText);
+        Assert.DoesNotContain(text, item => item.Contains("New", StringComparison.Ordinal));
+        Assert.DoesNotContain(text, item => item.Contains("Close", StringComparison.Ordinal));
+        Assert.Contains("Unread", renderedText);
+        Assert.Contains(harness.RenderedElements(), element =>
+            Equals(element.Attributes.GetValueOrDefault("aria-label"), "Close activity"));
+    }
+
+    [Fact]
+    public async Task EmptyRideActivityUsesApprovedCopy()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+
+        await harness.Call("StateHasChanged");
+
+        var (text, markup) = harness.RenderedContent();
+        var renderedText = string.Concat(text.Concat(markup));
+        Assert.Contains("No activity yet", renderedText);
+        Assert.Contains("Ride updates will appear here when you book a ride with the concierge.", renderedText);
+    }
+
+    [Fact]
+    public async Task ActivityButtonIsFirstAndCapsItsUnreadBadge()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        var rideId = Guid.NewGuid();
+        var entries = Enumerable.Range(1, 12)
+            .Select(sequence => RideEntry(rideId, sequence, DateTimeOffset.UtcNow.AddMinutes(-sequence)))
+            .ToArray();
+        harness.Get<List<RideActivityEntry>>("rideActivityEntries").AddRange(entries);
+        harness.Set("rideActivityWindow", new ConciergeRideActivityWindow(
+            new ConciergeRideActivitySnapshot(
+                new ConciergeRideReadState(0, 0, entries.Length),
+                entries.Select((entry, offset) => new ConciergeRideActivityItem(offset, entry)).ToArray())));
+        Assert.Equal(12, harness.Get<int>("UnreadRideActivityCount"));
+
+        await harness.Call("StateHasChanged");
+
+        var elements = harness.RenderedElements();
+        Assert.Equal("Activity, 12 unread ride updates", harness.Get<string>("ActivityButtonAccessibleName"));
+        var buttonNames = elements.Where(element => element.Tag == "button")
+            .Select(element => element.Attributes.GetValueOrDefault("aria-label")?.ToString())
+            .ToArray();
+        Assert.Contains("Activity, 12 unread ride updates", buttonNames);
+        var activity = Assert.Single(elements, element =>
+            element.Tag == "button"
+            && element.Attributes.GetValueOrDefault("aria-label") is string name
+            && name.StartsWith("Activity", StringComparison.Ordinal));
+        Assert.Equal("Activity, 12 unread ride updates", activity.Attributes.GetValueOrDefault("aria-label"));
+        var endChat = Assert.Single(elements, element =>
+            Equals(element.Attributes.GetValueOrDefault("aria-label"), "End chat"));
+        Assert.True(activity.Index < endChat.Index);
+        var (_, markup) = harness.RenderedContent();
+        Assert.Contains(elements, element => element.Tag == "span"
+            && Equals(element.Attributes.GetValueOrDefault("class"), "activity-unread-badge"));
+        Assert.Contains("9+", string.Concat(harness.RenderedContent().Text));
+    }
+
+    [Fact]
+    public async Task ActivityDrawerUsesOpenStateMotionAndReducedMotionOverride()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        await harness.Call("StateHasChanged");
+        var closedDrawer = Assert.Single(harness.RenderedElements(), element => element.Tag == "aside");
+        var closedClass = Assert.IsType<string>(closedDrawer.Attributes.GetValueOrDefault("class"));
+        Assert.StartsWith("ride-activity-drawer", closedClass, StringComparison.Ordinal);
+        Assert.DoesNotContain("is-open", closedClass, StringComparison.Ordinal);
+
+        await harness.Call("ToggleActivity");
+        Assert.Contains(harness.RenderedElements(), element =>
+            element.Tag == "aside"
+            && Equals(element.Attributes.GetValueOrDefault("class"), "ride-activity-drawer is-open"));
+
+        var css = File.ReadAllText(Path.Combine(FindRepositoryRoot(),
+            "src", "Concierge.Web", "Components", "Shared", "RideActivityPanel.razor.css"));
+        Assert.Contains("transition:", css, StringComparison.Ordinal);
+        Assert.Contains(".ride-activity-drawer.is-open", css, StringComparison.Ordinal);
+        Assert.Contains("@media (prefers-reduced-motion: reduce)", css, StringComparison.Ordinal);
+        Assert.Contains("transition: none", css, StringComparison.Ordinal);
+        Assert.Contains("@media (max-width: 700px)", css, StringComparison.Ordinal);
+        Assert.Contains("position: absolute", css, StringComparison.Ordinal);
+        // Scoped .razor.css only reaches the browser through the generated bundle link.
+        var appShell = File.ReadAllText(Path.Combine(FindRepositoryRoot(),
+            "src", "Concierge.Web", "Components", "App.razor"));
+        Assert.Contains("@Assets[\"Concierge.Web.styles.css\"]", appShell, StringComparison.Ordinal);
+        var appCss = File.ReadAllText(Path.Combine(FindRepositoryRoot(),
+            "src", "Concierge.Web", "wwwroot", "css", "app.css"));
+        Assert.Contains(".voice-site-header .voice-header-controls.has-voice-mode", appCss, StringComparison.Ordinal);
+        Assert.Contains("grid-template-columns: repeat(3, minmax(0, 1fr))", appCss, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EscapeBubblesFromActivityTriggerToPageShellAndClosesDrawer()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        await harness.Call("ToggleActivity");
+        Assert.True(harness.Get<bool>("activityOpen"));
+
+        var elements = harness.RenderedElements();
+        var pageShell = Assert.Single(elements, element =>
+            element.Tag == "div"
+            && Equals(element.Attributes.GetValueOrDefault("class"), "page-shell"));
+        var pageShellKeyDown = Assert.IsType<Func<KeyboardEventArgs, Task>>(
+            pageShell.Attributes.GetValueOrDefault("onkeydown"));
+        Assert.Contains(elements, element =>
+            element.Tag == "button"
+            && Equals(element.Attributes.GetValueOrDefault("aria-controls"), "ride-activity-panel"));
+
+        // The trigger retains focus after opening, so its Escape keydown bubbles to the page shell.
+        await harness.DispatchKeyDown(pageShellKeyDown, new KeyboardEventArgs { Key = "Escape" });
+
+        Assert.False(harness.Get<bool>("activityOpen"));
+    }
+
+    [Fact]
+    public void ActivityTimestampsUseTimeTodayAndDateForEarlierMiamiDays()
+    {
+        var panelType = typeof(Home).Assembly.GetType("Concierge.Web.Components.Shared.RideActivityPanel")!;
+        var formatter = panelType.GetMethod("FormatTimestamp", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var miami = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+        var nowInMiami = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, miami);
+
+        var today = (string)formatter.Invoke(null, [nowInMiami])!;
+        var yesterday = (string)formatter.Invoke(null, [nowInMiami.AddDays(-1)])!;
+
+        Assert.Equal(nowInMiami.ToString("h:mm tt", System.Globalization.CultureInfo.InvariantCulture), today);
+        Assert.Equal(nowInMiami.AddDays(-1).ToString("MMM d, h:mm tt",
+            System.Globalization.CultureInfo.InvariantCulture), yesterday);
+        Assert.DoesNotContain(",", today);
+        Assert.Contains(",", yesterday);
+    }
+
+    [Fact]
+    public async Task EndingChatAwaitsRideStreamCancellationCleanup()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanedUp = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Service.RideStream = (_, _, cancellationToken) =>
+            WaitingRideItems(cancellationToken, started, cleanedUp);
+
+        await harness.Call("StartRideActivityFeedAsync", 0, "current");
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var activeStream = harness.Get<Task?>("rideActivityStreamTask")!;
+
+        await harness.Call("EndChatAsync");
+
+        Assert.True(activeStream.IsCompleted);
+        await cleanedUp.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Null(harness.Get<Task?>("rideActivityStreamTask"));
+    }
+
+    /// <summary>Starts live updates at the snapshot end and keeps the bounded, deduplicated list.</summary>
+    [Fact]
+    public async Task RideActivityFeedStartsAtSnapshotOffsetAndKeepsOnlyNewestTwentyFive()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+
+        var rideId = Guid.NewGuid();
+        var retained = Enumerable.Range(0, 30)
+            .Select(index => new ConciergeRideActivityItem(
+                index,
+                RideEntry(rideId, index + 1, DateTimeOffset.UnixEpoch.AddMinutes(index))))
+            .ToArray();
+        harness.Service.RideSnapshot = _ => Task.FromResult(new ConciergeRideActivitySnapshot(
+            new ConciergeRideReadState(0, 0, 30),
+            retained.TakeLast(25).ToArray()));
+
+        var arrivals = Enumerable.Range(30, 30)
+            .Select(index => new ConciergeRideActivityItem(
+                index,
+                RideEntry(rideId, index + 1, DateTimeOffset.UnixEpoch.AddMinutes(index))))
+            .ToList();
+        // A publisher retry uses a new stream offset but the same ride/sequence application key.
+        arrivals.Add(new ConciergeRideActivityItem(
+            60,
+            RideEntry(rideId, 61, DateTimeOffset.UnixEpoch.AddMinutes(60))));
+        arrivals.Add(new ConciergeRideActivityItem(
+            61,
+            RideEntry(rideId, 61, DateTimeOffset.UnixEpoch.AddMinutes(60))));
+        harness.Service.RideStream = (_, _, _) => RideItems(arrivals);
+
+        await harness.Call("StartRideActivityFeedAsync", 0, "current");
+        await harness.WaitUntil(() => harness.Get<Task?>("rideActivityStreamTask") is null);
+
+        Assert.Equal(30, harness.Service.RideStreamFromOffset);
+        var displayed = harness.Get<List<RideActivityEntry>>("rideActivityEntries");
+        Assert.Equal(25, displayed.Count);
+        Assert.Contains(displayed, entry => entry.Sequence == 61);
+        Assert.DoesNotContain(displayed, entry => entry.Sequence == 35);
+        Assert.Single(displayed, entry => entry.Sequence == 61);
     }
 
     /// <summary>Shows Reconnect when the relay closes while the browser's report was lost.</summary>
@@ -580,6 +844,52 @@ public sealed class HomeSessionTests
     private static ConciergeHistoryResult History(string id) =>
         new([new ConciergeTranscriptTurn(id, 1, "web", "Guest", "Reply", DateTimeOffset.UtcNow)]);
 
+    private static RideActivityEntry RideEntry(Guid rideId, int sequence, DateTimeOffset changedAt) =>
+        new(rideId, sequence, "Booked", changedAt, "Hotel", "Museum", changedAt.AddHours(1));
+
+    private static async IAsyncEnumerable<ConciergeRideActivityItem> RideItems(
+        IEnumerable<ConciergeRideActivityItem> items)
+    {
+        foreach (var item in items)
+        {
+            yield return item;
+            await Task.Yield();
+        }
+    }
+
+    private static async IAsyncEnumerable<ConciergeRideActivityItem> WaitingRideItems(
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        TaskCompletionSource started,
+        TaskCompletionSource cleanedUp)
+    {
+        try
+        {
+            started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+        finally
+        {
+            cleanedUp.TrySetResult();
+        }
+
+        yield break;
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "Concierge.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new DirectoryNotFoundException("Could not locate Concierge.slnx from the test output directory.");
+    }
+
 #pragma warning disable BL0006 // The fixture intentionally uses Blazor's renderer instead of a new test dependency.
     private sealed class Harness : IAsyncDisposable
     {
@@ -625,11 +935,12 @@ public sealed class HomeSessionTests
 
                 var endIndex = index + frame.ElementSubtreeLength;
                 var attributes = new Dictionary<string, object>();
-                foreach (var attribute in frames
-                    .Skip(index + 1)
-                    .Take(endIndex - index - 1)
-                    .Where(child => child.FrameType == RenderTreeFrameType.Attribute))
+                for (var attributeIndex = index + 1;
+                     attributeIndex < frames.Count
+                     && frames[attributeIndex].FrameType == RenderTreeFrameType.Attribute;
+                     attributeIndex++)
                 {
+                    var attribute = frames[attributeIndex];
                     attributes[attribute.AttributeName] = attribute.AttributeValue;
                 }
                 elements.Add(new RenderedElement(frame.ElementName, attributes, index, endIndex));
@@ -700,6 +1011,9 @@ public sealed class HomeSessionTests
             }).WaitAsync(TimeSpan.FromSeconds(10));
 
         public Task VoiceEndRequested() => renderer.Dispatcher.InvokeAsync(home.OnVoiceEndRequested);
+
+        public Task DispatchKeyDown(Func<KeyboardEventArgs, Task> callback, KeyboardEventArgs args) =>
+            renderer.Dispatcher.InvokeAsync(() => callback(args));
 
         /// <summary>Seeds a verified chat in voice mode with an open relay connection.</summary>
         public VoiceConnection StartListening()
@@ -780,6 +1094,15 @@ public sealed class HomeSessionTests
         public Func<ConciergeVerificationRequest, Task<ConciergeSessionResponse>>? Verify { get; set; }
         public Func<string?, Task> End { get; set; } = _ => Task.CompletedTask;
         public Func<string?, Task<ConciergeHistoryResult>> History { get; set; } = _ => Task.FromResult(new ConciergeHistoryResult([]));
+        public Func<string?, Task<ConciergeRideActivitySnapshot>> RideSnapshot { get; set; } =
+            _ => Task.FromResult(new ConciergeRideActivitySnapshot(
+                new ConciergeRideReadState(0, 0, 0),
+                []));
+        public long MarkedRideSnapshotOffset { get; private set; } = -1;
+        public long RideReadOffset { get; private set; }
+        public Func<string?, long, CancellationToken, IAsyncEnumerable<ConciergeRideActivityItem>> RideStream { get; set; } =
+            (_, _, _) => RideItems([]);
+        public long RideStreamFromOffset { get; private set; } = -1;
         public Func<ConciergeTurnRequest, Task<ConciergeTurnResult>> Submission { get; set; } =
             request => Task.FromResult(new ConciergeTurnResult(request.TurnId, "Reply", 1));
         public List<ConciergeTurnRequest> Submissions { get; } = [];
@@ -789,6 +1112,25 @@ public sealed class HomeSessionTests
         /// <summary>Returns the arranged history task for this credential.</summary>
         public Task<ConciergeHistoryResult> ReadHistoryAsync(string? bearerCredential, CancellationToken cancellationToken = default) =>
             History(bearerCredential);
+        /// <summary>Ride activity is outside these component tests.</summary>
+        public Task<ConciergeRideActivitySnapshot> ReadRideActivitySnapshotAsync(
+            string? bearerCredential, CancellationToken cancellationToken = default) =>
+            RideSnapshot(bearerCredential);
+        /// <summary>Returns the arranged ride stream and records the exclusive subscription offset.</summary>
+        public IAsyncEnumerable<ConciergeRideActivityItem> StreamRideActivityAsync(
+            string? bearerCredential, long fromOffset, CancellationToken cancellationToken = default)
+        {
+            RideStreamFromOffset = fromOffset;
+            return RideStream(bearerCredential, fromOffset, cancellationToken);
+        }
+        /// <summary>Advances the arranged read cursor through the requested snapshot.</summary>
+        public Task<ConciergeRideReadState> MarkRideActivitySnapshotReadAsync(
+            string? bearerCredential, long snapshotOffset, CancellationToken cancellationToken = default)
+        {
+            MarkedRideSnapshotOffset = snapshotOffset;
+            RideReadOffset = Math.Max(RideReadOffset, snapshotOffset);
+            return Task.FromResult(new ConciergeRideReadState(RideReadOffset, 0, snapshotOffset));
+        }
         /// <summary>Records the retry identity and returns the arranged turn task.</summary>
         public Task<ConciergeTurnResult> SubmitTurnAsync(string? bearerCredential, ConciergeTurnRequest request, CancellationToken cancellationToken = default)
         {

@@ -1,0 +1,317 @@
+.ride-activity-drawer {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    width: 0;
+    flex: 0 0 0;
+    flex-direction: column;
+    overflow: hidden;
+    color: var(--text-primary);
+    background: var(--surface-background);
+    border-left: 0 solid var(--border-color);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(20px);
+    visibility: hidden;
+    transition:
+        flex-basis 220ms ease,
+        width 220ms ease,
+        opacity 160ms ease,
+        transform 220ms ease,
+        border-left-width 220ms ease,
+        visibility 0s linear 220ms;
+}
+
+.ride-activity-drawer.is-open {
+    width: clamp(300px, 32vw, 420px);
+    flex-basis: clamp(300px, 32vw, 420px);
+    border-left-width: 1px;
+    box-shadow: -8px 0 24px rgb(25 19 37 / 7%);
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
+    visibility: visible;
+    transition:
+        flex-basis 220ms ease,
+        width 220ms ease,
+        opacity 160ms ease,
+        transform 220ms ease,
+        border-left-width 220ms ease,
+        visibility 0s;
+}
+
+.ride-activity-header {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 22px 24px 18px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.ride-activity-header h2 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 670;
+    letter-spacing: -.035em;
+}
+
+.ride-activity-subtitle {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.ride-activity-close {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    flex: 0 0 auto;
+    place-items: center;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 9px;
+}
+
+.ride-activity-close:hover {
+    color: var(--text-primary);
+    background: var(--transcript-background);
+    border-color: var(--border-color);
+}
+
+.ride-activity-close svg {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-width: 1.8;
+}
+
+.ride-activity-content {
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-color: var(--border-color) transparent;
+    scrollbar-width: thin;
+}
+
+.ride-activity-notice {
+    margin: 14px 18px 0;
+    padding: 10px 12px;
+    color: var(--text-secondary);
+    background: var(--transcript-background);
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.ride-activity-error {
+    color: var(--error-text);
+    background: var(--error-background);
+    border-color: var(--error-border);
+}
+
+.ride-activity-empty {
+    display: flex;
+    min-height: 240px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 22px;
+    text-align: center;
+}
+
+.ride-activity-empty-icon {
+    display: grid;
+    width: 52px;
+    height: 52px;
+    place-items: center;
+    color: var(--accent-color);
+    background: var(--suggestion-background);
+    border-radius: 15px;
+}
+
+.ride-activity-empty-icon svg {
+    width: 25px;
+    height: 25px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-width: 1.7;
+}
+
+.ride-activity-empty h3 {
+    margin: 18px 0 6px;
+    font-size: 15px;
+    font-weight: 650;
+}
+
+.ride-activity-empty p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.ride-activity-list {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding: 16px 14px 20px;
+    list-style: none;
+}
+
+.ride-activity-entry {
+    position: relative;
+    display: flex;
+    gap: 12px;
+    padding: 14px 14px 14px 13px;
+    background: var(--transcript-background);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid transparent;
+    border-radius: 10px;
+}
+
+.ride-activity-entry.is-unread {
+    background: var(--suggestion-background);
+    border-left-color: var(--accent-color);
+}
+
+.ride-activity-marker {
+    width: 9px;
+    height: 9px;
+    flex: 0 0 auto;
+    margin-top: 5px;
+    background: var(--accent-color);
+    border: 2px solid var(--surface-background);
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px var(--accent-color);
+}
+
+.ride-activity-entry-content {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.ride-activity-entry-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.ride-activity-entry-heading h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 680;
+}
+
+.ride-activity-entry-heading time {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.ride-activity-route {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin: 7px 0 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.ride-activity-driver {
+    display: grid;
+    gap: 4px;
+    margin: 10px 0 0;
+}
+
+.ride-activity-driver > div {
+    display: flex;
+    gap: 7px;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.ride-activity-driver dt {
+    flex: 0 0 44px;
+    color: var(--text-muted);
+}
+
+.ride-activity-driver dd {
+    min-width: 0;
+    margin: 0;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.ride-activity-footer {
+    display: flex;
+    flex: 0 0 auto;
+    justify-content: center;
+    padding: 14px 18px max(16px, env(safe-area-inset-bottom));
+    background: var(--surface-background);
+    border-top: 1px solid var(--border-color);
+}
+
+.ride-activity-footer p {
+    margin: 0;
+    color: var(--text-secondary);
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+@media (max-width: 700px) {
+    .ride-activity-drawer {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        width: 100%;
+        height: 100%;
+        flex: none;
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+        transform: translateX(100%);
+    }
+
+    .ride-activity-drawer.is-open {
+        width: 100%;
+        flex-basis: auto;
+    }
+
+    .ride-activity-header {
+        padding: 18px 17px 14px;
+    }
+
+    .ride-activity-close {
+        width: 44px;
+        height: 44px;
+    }
+
+    .ride-activity-list {
+        padding: 13px 12px 18px;
+    }
+
+    .ride-activity-entry {
+        gap: 10px;
+        padding: 13px 12px 13px 11px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ride-activity-drawer {
+        transition: none;
+        scroll-behavior: auto;
+    }
+}

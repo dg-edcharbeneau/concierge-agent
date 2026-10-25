@@ -571,6 +571,12 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         streamPublisher.GetTopic<RideActivityEntry>(RideActivityFeed.Topic)
             .Publish(firstEntry, forceFlush: true);
         await streamPublisher.FlushAsync();
+        var firstSnapshot = await handle.QueryAsync(wf => wf.GetRideActivityReadState());
+        Assert.Equal(new ConciergeRideReadState(0, 0, 1), firstSnapshot);
+        var firstSnapshotRead = await handle.ExecuteUpdateAsync(wf =>
+            wf.AdvanceRideActivityReadOffsetAsync(
+                new ConciergeRideReadOffsetUpdate(firstSnapshot.SnapshotOffset)));
+        Assert.Equal(1, firstSnapshotRead.ReadOffset);
         Assert.True(await firstEntryRead.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal(firstEntry, subscription.Current.Value);
         var nextEntryRead = subscription.MoveNextAsync().AsTask();
@@ -608,7 +614,10 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         Assert.Equal(7, continued.TranscriptFlushBatchSize);
         Assert.NotNull(continued.RideStreamState);
         Assert.Single(continued.RideStreamState.Log);
-        Assert.Equal(0, continued.RideReadOffset);
+        Assert.Equal(1, continued.RideReadOffset);
+        Assert.Equal(
+            new ConciergeRideReadState(1, 0, 2),
+            await handle.QueryAsync(wf => wf.GetRideActivityReadState()));
         Assert.True(continued.RecentTurns!.Count > 6);
         Assert.True(
             ConciergeStayWorkflow.EstimateRecentHistoryTokens(continued.RecentTurns)
@@ -662,6 +671,72 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         await replayer.ReplayWorkflowAsync(await handle.FetchHistoryAsync());
         await replayer.ReplayWorkflowAsync(await host.Environment.Client
             .GetWorkflowHandle<ConciergeStayWorkflow>(handle.Id, firstRunId).FetchHistoryAsync());
+    }
+
+    [Fact]
+    public async Task RideReadOffsetIsForwardOnlyAndLimitedToDisplayedSnapshot()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        await using var publisher = new WorkflowStreamClient(host.Environment.Client, handle.Id);
+        await using var subscriber = new WorkflowStreamClient(host.Environment.Client, handle.Id);
+
+        var firstEntry = RideEntry(1);
+        publisher.GetTopic<RideActivityEntry>(RideActivityFeed.Topic)
+            .Publish(firstEntry, forceFlush: true);
+        await publisher.FlushAsync();
+
+        var displayedSnapshot = await handle.QueryAsync(wf => wf.GetRideActivityReadState());
+        Assert.Equal(new ConciergeRideReadState(0, 0, 1), displayedSnapshot);
+        await using var firstSubscription = subscriber
+            .GetTopic<RideActivityEntry>(RideActivityFeed.Topic)
+            .SubscribeAsync(displayedSnapshot.RetainedFromOffset)
+            .GetAsyncEnumerator();
+        Assert.True(await firstSubscription.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(firstEntry, firstSubscription.Current.Value);
+        Assert.Equal(displayedSnapshot.RetainedFromOffset, firstSubscription.Current.Offset);
+
+        // This entry arrives after the snapshot was obtained and must remain unread.
+        var laterEntry = RideEntry(2);
+        publisher.GetTopic<RideActivityEntry>(RideActivityFeed.Topic)
+            .Publish(laterEntry, forceFlush: true);
+        await publisher.FlushAsync();
+
+        var marked = await handle.ExecuteUpdateAsync(wf =>
+            wf.AdvanceRideActivityReadOffsetAsync(
+                new ConciergeRideReadOffsetUpdate(displayedSnapshot.SnapshotOffset)));
+        Assert.Equal(new ConciergeRideReadState(1, 0, 2), marked);
+
+        // Replaying the same Update is idempotent, and an older displayed snapshot cannot regress it.
+        var duplicate = await handle.ExecuteUpdateAsync(wf =>
+            wf.AdvanceRideActivityReadOffsetAsync(
+                new ConciergeRideReadOffsetUpdate(displayedSnapshot.SnapshotOffset)));
+        var older = await handle.ExecuteUpdateAsync(wf =>
+            wf.AdvanceRideActivityReadOffsetAsync(new ConciergeRideReadOffsetUpdate(0)));
+        Assert.Equal(marked, duplicate);
+        Assert.Equal(marked, older);
+        Assert.Equal(marked, await handle.QueryAsync(wf => wf.GetRideActivityReadState()));
+
+        // The retained start is a global offset and is safe to use as the subscription start.
+        await handle.SignalAsync(
+            ConciergeStayWorkflowIds.TruncateRideActivityStreamSignal,
+            [new TruncateRideActivityStreamRequest(1)]);
+        var retainedSnapshot = await handle.QueryAsync(wf => wf.GetRideActivityReadState());
+        Assert.Equal(new ConciergeRideReadState(1, 1, 2), retainedSnapshot);
+        await using var retainedSubscription = subscriber
+            .GetTopic<RideActivityEntry>(RideActivityFeed.Topic)
+            .SubscribeAsync(retainedSnapshot.RetainedFromOffset)
+            .GetAsyncEnumerator();
+        Assert.True(await retainedSubscription.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(laterEntry, retainedSubscription.Current.Value);
+        Assert.Equal(retainedSnapshot.RetainedFromOffset, retainedSubscription.Current.Offset);
+
+        // A future offset is capped to the stream end observed by the Update.
+        var capped = await handle.ExecuteUpdateAsync(wf =>
+            wf.AdvanceRideActivityReadOffsetAsync(
+                new ConciergeRideReadOffsetUpdate(long.MaxValue)));
+        Assert.Equal(new ConciergeRideReadState(2, 1, 2), capped);
+        await handle.ExecuteUpdateAsync(wf => wf.EndInteractionAsync());
     }
 
     [Fact]
@@ -738,6 +813,16 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
 
     private static ConciergeTurnSubmission Turn(Guid stayId, string turnId, string message, string channel) =>
         new(turnId, message, channel, ConciergeTestHost.VerifiedGuest(stayId));
+
+    private static RideActivityEntry RideEntry(int sequence) =>
+        new(
+            Guid.NewGuid(),
+            sequence,
+            sequence == 1 ? "Booked" : "DriverAssigned",
+            DateTimeOffset.UtcNow,
+            "Hotel ZGY",
+            "Miami Beach",
+            DateTimeOffset.UtcNow.AddMinutes(45));
 
     private static Task<Guid> SeedStayAsync(ConciergeTestHost host) =>
         host.SeedStayAsync(

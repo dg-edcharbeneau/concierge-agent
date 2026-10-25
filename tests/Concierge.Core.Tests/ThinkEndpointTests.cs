@@ -510,6 +510,17 @@ public sealed class ThinkEndpointTests : IDisposable
         public Task<ConciergeHistoryResult> ReadHistoryAsync(
             string? bearerCredential, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         /// <summary>Not used by the Think handler.</summary>
+        public Task<ConciergeRideActivitySnapshot> ReadRideActivitySnapshotAsync(
+            string? bearerCredential, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        /// <summary>Not used by the Think handler.</summary>
+        public IAsyncEnumerable<ConciergeRideActivityItem> StreamRideActivityAsync(
+            string? bearerCredential, long fromOffset, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        /// <summary>Not used by the Think handler.</summary>
+        public Task<ConciergeRideReadState> MarkRideActivitySnapshotReadAsync(
+            string? bearerCredential, long snapshotOffset, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        /// <summary>Not used by the Think handler.</summary>
         public Task EndAsync(string? bearerCredential, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
         /// <summary>Not used by the Think handler.</summary>

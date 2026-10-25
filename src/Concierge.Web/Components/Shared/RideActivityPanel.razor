@@ -1,0 +1,175 @@
+@using System.Globalization
+@using Concierge.Contracts
+
+<aside id="ride-activity-panel"
+       class="ride-activity-drawer @(IsOpen ? "is-open" : "")"
+       aria-labelledby="ride-activity-title"
+       aria-hidden="@(!IsOpen)"
+       inert="@(!IsOpen)"
+       tabindex="-1">
+    <header class="ride-activity-header">
+        <div>
+            <h2 id="ride-activity-title">Activity</h2>
+            <p class="ride-activity-subtitle">Updates for your stay · Miami time (ET)</p>
+        </div>
+        <button class="ride-activity-close" type="button" aria-label="Close activity" @onclick="OnClose">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
+        </button>
+    </header>
+
+    <div class="ride-activity-content">
+        @if (IsPaused)
+        {
+            <p class="ride-activity-notice" role="status">Activity updates are paused.</p>
+        }
+        @if (IsReconnecting)
+        {
+            <p class="ride-activity-notice" role="status">Reconnecting to activity updates…</p>
+        }
+        @if (!string.IsNullOrWhiteSpace(SubscriptionError))
+        {
+            <p class="ride-activity-notice ride-activity-error" role="status">
+                Activity updates are temporarily unavailable. Showing the latest activity received.
+            </p>
+        }
+
+        @if (Entries.Count == 0)
+        {
+            <div class="ride-activity-empty" role="status">
+                <span class="ride-activity-empty-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                        <path d="M4 5h16M4 12h16M4 19h16" />
+                        <circle cx="8" cy="5" r="1.5" />
+                        <circle cx="16" cy="12" r="1.5" />
+                        <circle cx="10" cy="19" r="1.5" />
+                    </svg>
+                </span>
+                <h3>No activity yet</h3>
+                <p>Ride updates will appear here when you book a ride with the concierge.</p>
+            </div>
+        }
+        else
+        {
+            <ol class="ride-activity-list" aria-label="Ride activity">
+                @foreach (var entry in Entries
+                    .OrderByDescending(item => item.ChangedAtUtc)
+                    .ThenByDescending(item => item.Sequence)
+                    .Take(MaxVisibleEntries))
+                {
+                    var unread = !ReadEntryKeys.Contains(EntryKey(entry));
+                    var changedAt = ToMiamiTime(entry.ChangedAtUtc);
+                    <li class="ride-activity-entry @(unread ? "is-unread" : "")">
+                        @if (unread)
+                        {
+                            <span class="visually-hidden">Unread</span>
+                        }
+                        <span class="ride-activity-marker" aria-hidden="true"></span>
+                        <div class="ride-activity-entry-content">
+                            <div class="ride-activity-entry-heading">
+                                <h3>@StatusLabel(entry.Status)</h3>
+                                <time datetime="@entry.ChangedAtUtc.ToString("O", CultureInfo.InvariantCulture)">
+                                    @FormatTimestamp(changedAt)
+                                </time>
+                            </div>
+                            @if (!string.IsNullOrWhiteSpace(entry.PickupName)
+                                || !string.IsNullOrWhiteSpace(entry.DropoffName))
+                            {
+                                <p class="ride-activity-route">
+                                    @if (!string.IsNullOrWhiteSpace(entry.PickupName))
+                                    {
+                                        <span>@entry.PickupName</span>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(entry.PickupName)
+                                        && !string.IsNullOrWhiteSpace(entry.DropoffName))
+                                    {
+                                        <span aria-hidden="true">→</span>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(entry.DropoffName))
+                                    {
+                                        <span>@entry.DropoffName</span>
+                                    }
+                                </p>
+                            }
+                            @if (StringComparer.Ordinal.Equals(entry.Status, "DriverAssigned"))
+                            {
+                                <dl class="ride-activity-driver">
+                                    @if (!string.IsNullOrWhiteSpace(entry.DriverName))
+                                    {
+                                        <div><dt>Driver</dt><dd>@entry.DriverName</dd></div>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(entry.Car))
+                                    {
+                                        <div><dt>Car</dt><dd>@entry.Car</dd></div>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(entry.Plate))
+                                    {
+                                        <div><dt>Plate</dt><dd>@entry.Plate</dd></div>
+                                    }
+                                </dl>
+                            }
+                        </div>
+                    </li>
+                }
+            </ol>
+        }
+    </div>
+
+    <footer class="ride-activity-footer">
+        <p>To change or cancel a ride, ask the concierge.</p>
+    </footer>
+</aside>
+
+@code {
+    public const int MaxVisibleEntries = Concierge.Web.Services.ConciergeRideActivityWindow.MaxEntries;
+
+    private static readonly TimeZoneInfo MiamiTimeZone =
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
+    [Parameter]
+    public IReadOnlyList<RideActivityEntry> Entries { get; set; } = Array.Empty<RideActivityEntry>();
+
+    [Parameter]
+    public IReadOnlySet<string> ReadEntryKeys { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+
+    [Parameter]
+    public bool IsPaused { get; set; }
+
+    [Parameter]
+    public bool IsReconnecting { get; set; }
+
+    [Parameter]
+    public string? SubscriptionError { get; set; }
+
+    [Parameter]
+    public bool IsOpen { get; set; }
+
+    [Parameter]
+    public EventCallback OnClose { get; set; }
+
+    private static string EntryKey(RideActivityEntry entry) =>
+        $"{entry.RideId:N}:{entry.Sequence.ToString(CultureInfo.InvariantCulture)}";
+
+    private static DateTimeOffset ToMiamiTime(DateTimeOffset timestamp) =>
+        TimeZoneInfo.ConvertTime(timestamp, MiamiTimeZone);
+
+    private static string FormatTimestamp(DateTimeOffset miamiTime)
+    {
+        var today = DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, MiamiTimeZone).DateTime);
+        return DateOnly.FromDateTime(miamiTime.DateTime) == today
+            ? miamiTime.ToString("h:mm tt", CultureInfo.InvariantCulture)
+            : miamiTime.ToString("MMM d, h:mm tt", CultureInfo.InvariantCulture);
+    }
+
+    private static string StatusLabel(string status) => status switch
+    {
+        "Booked" => "Booked",
+        "DriverAssigned" => "Driver assigned",
+        "PickedUp" => "Picked up",
+        "Completed" => "Completed",
+        "Cancelled" => "Cancelled",
+        _ => status,
+    };
+}

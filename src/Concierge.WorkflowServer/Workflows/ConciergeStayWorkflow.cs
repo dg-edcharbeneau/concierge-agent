@@ -254,6 +254,48 @@ public sealed class ConciergeStayWorkflow
         return Task.CompletedTask;
     }
 
+    [WorkflowUpdateValidator(nameof(AdvanceRideActivityReadOffsetAsync))]
+    public void ValidateAdvanceRideActivityReadOffset(ConciergeRideReadOffsetUpdate request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.SnapshotOffset < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                "The ride activity snapshot offset cannot be negative.");
+        }
+    }
+
+    /// <summary>
+    /// Advances the stay's read cursor through the requested displayed snapshot only.
+    /// A newer stream entry is not marked read just because it arrived after the snapshot.
+    /// </summary>
+    [WorkflowUpdate(ConciergeWorkflowNames.AdvanceRideActivityReadOffsetUpdate)]
+    public Task<ConciergeRideReadState> AdvanceRideActivityReadOffsetAsync(
+        ConciergeRideReadOffsetUpdate request)
+    {
+        var streamState = rideStream.GetState();
+        var currentStreamOffset = streamState.BaseOffset + streamState.Log.Count;
+        var requestedOffset = Math.Min(request.SnapshotOffset, currentStreamOffset);
+        rideReadOffset = Math.Max(rideReadOffset, requestedOffset);
+        return Task.FromResult(CreateRideActivityReadState(streamState));
+    }
+
+    /// <summary>Returns the current read cursor and retained subscription/snapshot offset bounds.</summary>
+    [WorkflowQuery(ConciergeWorkflowNames.RideActivityReadStateQuery)]
+    public ConciergeRideReadState GetRideActivityReadState() =>
+        CreateRideActivityReadState(rideStream.GetState());
+
+    private ConciergeRideReadState CreateRideActivityReadState(
+        Temporalio.Extensions.WorkflowStreams.WorkflowStreamState streamState)
+    {
+        var snapshotOffset = streamState.BaseOffset + streamState.Log.Count;
+        return new ConciergeRideReadState(
+            rideReadOffset,
+            streamState.BaseOffset,
+            snapshotOffset);
+    }
+
     /// <summary>
     /// Rejects malformed turns, turns without the stay's verified guest, and turns submitted after the
     /// stay's eligibility deadline before they enter history.

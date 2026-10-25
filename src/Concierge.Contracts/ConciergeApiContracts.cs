@@ -110,6 +110,8 @@ public static class ConciergeWorkflowNames
     public const string MarkTurnInterruptedUpdate = "MarkTurnInterrupted";
     public const string HistoryUpdate = "History";
     public const string EndInteractionUpdate = "EndInteraction";
+    public const string RideActivityReadStateQuery = "RideActivityReadState";
+    public const string AdvanceRideActivityReadOffsetUpdate = "AdvanceRideActivityReadOffset";
     public const string TurnConflictErrorType = "ConciergeTurnConflict";
     public const string StayExpiredErrorType = "ConciergeStayExpired";
 }

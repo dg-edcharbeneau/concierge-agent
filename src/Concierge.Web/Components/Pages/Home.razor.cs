@@ -4,6 +4,7 @@ using Concierge.Contracts;
 using Concierge.Web.Services;
 using Concierge.Web.Voice;
 using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.JSInterop;
 
 namespace Concierge.Web.Components.Pages;
@@ -20,6 +21,13 @@ public partial class Home : ComponentBase, IAsyncDisposable
         "What amenities are available?",
         "Can you recommend a nearby restaurant?"
     ];
+
+    private readonly List<RideActivityEntry> rideActivityEntries = [];
+    private readonly HashSet<string> rideActivityReadEntryKeys = new(StringComparer.Ordinal);
+    private ConciergeRideActivityWindow? rideActivityWindow;
+    private CancellationTokenSource? rideActivityCancellation;
+    private Task? rideActivityStreamTask;
+    private string? rideActivityCredential;
 
     [Inject]
     private IJSRuntime JavaScript { get; set; } = default!;
@@ -64,6 +72,10 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private bool showNewMessage;
     private bool transcriptNearBottom = true;
     private bool scrollAfterRender;
+    private bool activityOpen;
+    private bool rideActivityPaused;
+    private bool rideActivityReconnecting;
+    private string? rideActivityError;
     private string? wiredCredential;
     private int wiredVersion = -1;
     private bool disposed;
@@ -76,6 +88,18 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private IDisposable? voiceClosedSubscription;
 
     private bool IsCurrentSession(int version) => !disposed && model.IsCurrent(version);
+    private int UnreadRideActivityCount =>
+        rideActivityWindow?.UnreadCount
+        ?? rideActivityEntries.Count(entry => !rideActivityReadEntryKeys.Contains(RideActivityEntryKey(entry)));
+    private string UnreadRideActivityBadge => UnreadRideActivityCount > 9
+        ? "9+"
+        : UnreadRideActivityCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    private string ActivityButtonAccessibleName => UnreadRideActivityCount switch
+    {
+        0 => "Activity",
+        1 => "Activity, 1 unread ride update",
+        _ => $"Activity, {UnreadRideActivityCount} unread ride updates",
+    };
 
     private bool TranscriptVisible =>
         ready && session?.Credential is not null && !showEndConfirmation && !chatEnded;
@@ -209,6 +233,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
             model = model.VerificationSucceeded(result, DateTimeOffset.UtcNow);
             currentVersion = sessionVersion;
+            await ResetRideActivityAsync();
             lastName = string.Empty;
             roomNumber = string.Empty;
             suggestionsExpanded = false;
@@ -266,7 +291,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
                 if (!IsCurrentSession(currentVersion)) return;
                 model = model.SetTurnError(null);
             }
-            else if (pending is not null && replayPending)
+
+            await StartRideActivityFeedAsync(currentVersion, credential);
+            if (pending is not null && replayPending)
             {
                 await SubmitPendingAsync();
                 return;
@@ -280,7 +307,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             if (!IsCurrentSession(currentVersion)) return;
             if (IsUnauthorized(exception))
             {
-                MarkExpired();
+                await MarkExpiredAsync();
                 return;
             }
 
@@ -411,7 +438,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
             if (IsUnauthorized(exception))
             {
-                MarkExpired();
+                await MarkExpiredAsync();
                 return;
             }
 
@@ -446,7 +473,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
         await LoadHistoryAndReconcileAsync(replayPending: pending is not null);
     }
 
-    private void MarkExpired()
+    private async Task MarkExpiredAsync()
     {
         if (voiceMode)
         {
@@ -458,6 +485,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
         voiceMode = false;
         voiceSessionId = null;
         StopWatchingVoiceRelay();
+        await ResetRideActivityAsync();
         model = model.MarkExpired();
         isWorking = false;
         isVerifying = false;
@@ -465,8 +493,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
         StateHasChanged();
     }
 
-    private void VerifyAgain()
+    private async Task VerifyAgain()
     {
+        await ResetRideActivityAsync();
         model = model.BeginVerification();
         verificationError = null;
         isWorking = false;
@@ -474,8 +503,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
         StateHasChanged();
     }
 
-    private void VerifyStayAgain()
+    private async Task VerifyStayAgain()
     {
+        await ResetRideActivityAsync();
         model = model.BeginStayVerification();
         lastName = string.Empty;
         roomNumber = string.Empty;
@@ -504,6 +534,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private async Task EndChatAsync()
     {
         // The guest is leaving the conversation; voice must not keep listening behind the dialog.
+        CloseActivity();
+        await StopRideActivityFeedAsync();
         await StopVoiceAsync("Voice stopped.");
         if (!model.HasEndContent)
         {
@@ -528,9 +560,13 @@ public partial class Home : ComponentBase, IAsyncDisposable
         await LoadHistoryAndReconcileAsync(replayPending: false);
     }
 
-    private void CancelEndChat()
+    private async Task CancelEndChat()
     {
         model = model.CancelEnd();
+        if (!hasExpired && session?.Credential is { } credential)
+        {
+            await StartRideActivityFeedAsync(sessionVersion, credential);
+        }
     }
 
     private async Task EndInteractionAsync()
@@ -541,6 +577,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
         }
 
         await StopVoiceAsync("Voice stopped.");
+        CloseActivity();
+        await StopRideActivityFeedAsync();
         model = model.BeginEnd();
         var currentVersion = sessionVersion;
         var credential = session.Credential;
@@ -576,7 +614,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             if (IsUnauthorized(exception))
             {
                 model = model.HideEndConfirmation();
-                MarkExpired();
+                await MarkExpiredAsync();
                 return;
             }
 
@@ -607,12 +645,18 @@ public partial class Home : ComponentBase, IAsyncDisposable
                 {
                     model = model.FinishEndAttempt();
                 }
+
+                if (!chatEnded && !hasExpired && session?.Credential is { } activeCredential)
+                {
+                    await StartRideActivityFeedAsync(currentVersion, activeCredential);
+                }
             }
         }
     }
 
     private async Task CompleteEndAsync()
     {
+        await ResetRideActivityAsync();
         voiceMode = false;
         voiceMuted = false;
         voiceSessionId = null;
@@ -791,7 +835,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             }
             if (state == "disconnected" && closeCode == (int)Voice.VoiceCloseCodes.Unauthorized)
             {
-                MarkExpired();
+                await MarkExpiredAsync();
                 return;
             }
 
@@ -805,6 +849,317 @@ public partial class Home : ComponentBase, IAsyncDisposable
         });
 
     private void ToggleSuggestions() => suggestionsExpanded = !suggestionsExpanded;
+
+    private async Task ToggleActivity()
+    {
+        if (activityOpen)
+        {
+            CloseActivity();
+            return;
+        }
+
+        activityOpen = true;
+        var credential = session?.Credential;
+        var currentVersion = sessionVersion;
+        if (credential is null)
+        {
+            return;
+        }
+
+        var retrying = rideActivityPaused || rideActivityError is not null;
+        if (retrying)
+        {
+            rideActivityPaused = false;
+            rideActivityReconnecting = true;
+        }
+
+        var cancellationToken = rideActivityCancellation?.Token ?? CancellationToken.None;
+        try
+        {
+            // A fresh server snapshot makes the read boundary include entries published before this
+            // open action, while later live arrivals remain beyond its exclusive end offset.
+            var snapshot = await Concierge.ReadRideActivitySnapshotAsync(credential, cancellationToken);
+            if (!IsCurrentSession(currentVersion) || !activityOpen) return;
+            MergeRideActivitySnapshot(snapshot);
+
+            var readState = await Concierge.MarkRideActivitySnapshotReadAsync(
+                credential,
+                snapshot.ReadState.SnapshotOffset,
+                cancellationToken);
+            if (!IsCurrentSession(currentVersion) || !activityOpen) return;
+            rideActivityWindow?.ApplyReadState(readState);
+            RefreshRideActivityReadKeys();
+            rideActivityPaused = false;
+            rideActivityReconnecting = false;
+            rideActivityError = null;
+            if (rideActivityStreamTask is null)
+            {
+                await StartRideActivityFeedAsync(currentVersion, credential);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The stay changed or ended while the read snapshot was in flight.
+        }
+        catch (ConciergeApiException exception)
+        {
+            if (!IsCurrentSession(currentVersion)) return;
+            if (IsUnauthorized(exception))
+            {
+                await MarkExpiredAsync();
+                return;
+            }
+
+            rideActivityPaused = true;
+            rideActivityReconnecting = false;
+            rideActivityError = exception.Message;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            if (!IsCurrentSession(currentVersion)) return;
+            rideActivityPaused = true;
+            rideActivityReconnecting = false;
+            rideActivityError = "Ride activity could not be refreshed. Please try again.";
+        }
+    }
+
+    private void CloseActivity() => activityOpen = false;
+
+    private Task HandlePageKeyDown(KeyboardEventArgs args)
+    {
+        if (activityOpen && StringComparer.Ordinal.Equals(args.Key, "Escape"))
+        {
+            CloseActivity();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ResetRideActivityAsync()
+    {
+        activityOpen = false;
+        rideActivityEntries.Clear();
+        rideActivityReadEntryKeys.Clear();
+        rideActivityWindow = null;
+        rideActivityPaused = false;
+        rideActivityReconnecting = false;
+        rideActivityError = null;
+        await StopRideActivityFeedAsync();
+    }
+
+    private async Task StartRideActivityFeedAsync(int version, string credential)
+    {
+        if (StringComparer.Ordinal.Equals(rideActivityCredential, credential)
+            && rideActivityStreamTask is not null)
+        {
+            return;
+        }
+
+        await StopRideActivityFeedAsync();
+        rideActivityCredential = credential;
+        var cancellation = new CancellationTokenSource();
+        rideActivityCancellation = cancellation;
+
+        try
+        {
+            var snapshot = await Concierge.ReadRideActivitySnapshotAsync(credential, cancellation.Token);
+            if (!IsCurrentSession(version)
+                || cancellation.IsCancellationRequested
+                || !ReferenceEquals(rideActivityCancellation, cancellation))
+            {
+                return;
+            }
+
+            MergeRideActivitySnapshot(snapshot);
+            var streamStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            rideActivityStreamTask = ConsumeRideActivityAsync(
+                version,
+                credential,
+                snapshot.ReadState.SnapshotOffset,
+                cancellation,
+                streamStart.Task);
+            streamStart.SetResult();
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // A new stay/session superseded this initial snapshot request.
+        }
+        catch (ConciergeApiException exception)
+        {
+            if (!IsCurrentSession(version) || !ReferenceEquals(rideActivityCancellation, cancellation)) return;
+            if (IsUnauthorized(exception))
+            {
+                await MarkExpiredAsync();
+                return;
+            }
+
+            rideActivityError = exception.Message;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            if (!IsCurrentSession(version) || !ReferenceEquals(rideActivityCancellation, cancellation)) return;
+            Logger.LogWarning(exception, "Could not load the ride activity snapshot for the current stay.");
+            rideActivityError = "Ride activity could not be loaded. Please try again.";
+        }
+    }
+
+    private async Task ConsumeRideActivityAsync(
+        int version,
+        string credential,
+        long fromOffset,
+        CancellationTokenSource cancellation,
+        Task streamStart)
+    {
+        try
+        {
+            await streamStart;
+            await foreach (var item in Concierge
+                .StreamRideActivityAsync(credential, fromOffset, cancellation.Token)
+                .WithCancellation(cancellation.Token))
+            {
+                await InvokeAsync(() =>
+                {
+                    if (!IsCurrentSession(version)
+                        || !ReferenceEquals(rideActivityCancellation, cancellation)
+                        || rideActivityWindow is null)
+                    {
+                        return;
+                    }
+
+                    rideActivityPaused = false;
+                    rideActivityReconnecting = false;
+                    rideActivityError = null;
+                    if (rideActivityWindow.Apply(item))
+                    {
+                        SynchronizeRideActivityEntries();
+                        RefreshRideActivityReadKeys();
+                    }
+
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // Cancellation owns subscription disposal in ConciergeService.
+        }
+        catch (ConciergeApiException exception)
+        {
+            await InvokeAsync(async () =>
+            {
+                if (!ReferenceEquals(rideActivityCancellation, cancellation)) return;
+                if (IsUnauthorized(exception))
+                {
+                    // The stream enumerator has already unwound; detach this task so expiry can
+                    // await every other owned resource without awaiting itself.
+                    rideActivityStreamTask = null;
+                    rideActivityCancellation = null;
+                    rideActivityCredential = null;
+                    await MarkExpiredAsync();
+                    return;
+                }
+
+                rideActivityPaused = true;
+                rideActivityError = "Ride activity updates are temporarily unavailable.";
+                StateHasChanged();
+            });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            Logger.LogWarning(exception, "Ride activity updates stopped for the current stay.");
+            await InvokeAsync(() =>
+            {
+                if (!ReferenceEquals(rideActivityCancellation, cancellation)) return;
+                rideActivityPaused = true;
+                rideActivityError = "Ride activity updates are temporarily unavailable.";
+                StateHasChanged();
+            });
+        }
+        finally
+        {
+            if (ReferenceEquals(rideActivityCancellation, cancellation))
+            {
+                rideActivityStreamTask = null;
+                rideActivityCancellation = null;
+                rideActivityCredential = null;
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private void MergeRideActivitySnapshot(ConciergeRideActivitySnapshot snapshot)
+    {
+        if (rideActivityWindow is null)
+        {
+            rideActivityWindow = new ConciergeRideActivityWindow(snapshot);
+        }
+        else
+        {
+            rideActivityWindow.MergeSnapshot(snapshot);
+        }
+
+        SynchronizeRideActivityEntries();
+        RefreshRideActivityReadKeys();
+        rideActivityError = null;
+        rideActivityPaused = false;
+        StateHasChanged();
+    }
+
+    private void SynchronizeRideActivityEntries()
+    {
+        rideActivityEntries.Clear();
+        if (rideActivityWindow is null) return;
+        rideActivityEntries.AddRange(rideActivityWindow.Entries
+            .Select(item => item.Entry)
+            .OrderByDescending(entry => entry.ChangedAtUtc)
+            .ThenByDescending(entry => entry.Sequence));
+    }
+
+    private void RefreshRideActivityReadKeys()
+    {
+        rideActivityReadEntryKeys.Clear();
+        if (rideActivityWindow is null) return;
+        foreach (var item in rideActivityWindow.Entries)
+        {
+            if (item.Offset < rideActivityWindow.ReadState.ReadOffset)
+            {
+                rideActivityReadEntryKeys.Add(RideActivityEntryKey(item.Entry));
+            }
+        }
+    }
+
+    private async Task StopRideActivityFeedAsync()
+    {
+        var cancellation = rideActivityCancellation;
+        var streamTask = rideActivityStreamTask;
+        rideActivityCancellation = null;
+        rideActivityCredential = null;
+        rideActivityStreamTask = null;
+        if (cancellation is not null)
+        {
+            cancellation.Cancel();
+            if (streamTask is null)
+            {
+                cancellation.Dispose();
+            }
+        }
+
+        if (streamTask is not null)
+        {
+            try
+            {
+                await streamTask;
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation is the expected result of disposing a live feed.
+            }
+        }
+    }
+
+    private static string RideActivityEntryKey(RideActivityEntry entry) =>
+        $"{entry.RideId:N}:{entry.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     /// <summary>
     /// Called from <c>concierge.js</c> when the transcript scroll position changes; hides the
@@ -830,6 +1185,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     {
         disposed = true;
         StopWatchingVoiceRelay();
+        await ResetRideActivityAsync();
         model = model.InvalidateOutstandingWork();
         if (voiceReference is not null)
         {

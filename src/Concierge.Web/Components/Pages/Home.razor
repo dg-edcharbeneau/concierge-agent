@@ -4,7 +4,7 @@
 
 <PageTitle>Hotel ZGY Concierge</PageTitle>
 
-<div class="page-shell">
+<div class="page-shell" @onkeydown="HandlePageKeyDown">
     @if (showEndConfirmation || chatEnded)
     {
         <main class="end-flow-main">
@@ -81,7 +81,25 @@
                         <strong>@(voiceMuted ? "Muted" : VoiceStateLabel)</strong>
                     </div>
                 }
-                <div class="voice-header-controls" role="group" aria-label="Chat controls">
+                <div class="voice-header-controls @(voiceMode ? "has-voice-mode" : "")" role="group" aria-label="Chat controls">
+                    @if (session?.Credential is not null && !hasExpired)
+                    {
+                        <button class="voice-control-button activity-button" type="button"
+                                aria-expanded="@activityOpen"
+                                aria-controls="ride-activity-panel"
+                                aria-label="@ActivityButtonAccessibleName"
+                                @onclick="ToggleActivity">
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+                                <path d="M10 21h4" />
+                            </svg>
+                            <span>Activity</span>
+                            @if (UnreadRideActivityCount > 0)
+                            {
+                                <span class="activity-unread-badge" aria-hidden="true">@UnreadRideActivityBadge</span>
+                            }
+                        </button>
+                    }
                     @if (voiceMode)
                     {
                         if (VoiceActive)
@@ -165,7 +183,7 @@
             </div>
         </header>
 
-        <main class="main-content @(ready && session?.Credential is null ? "verification-main" : "")">
+        <main class="main-content @(ready && session?.Credential is null ? "verification-main" : "") @(activityOpen ? "activity-main-content" : "")">
             @if (!ready)
             {
                 <div class="startup-message" role="status">Preparing your chat…</div>
@@ -203,6 +221,7 @@
             }
             else
             {
+                <div class="activity-layout @(activityOpen ? "activity-layout-open" : "")">
                 <section class="chat-panel" aria-label="Hotel concierge chat">
                     <button class="questions-heading" type="button" aria-expanded="@suggestionsExpanded"
                             aria-controls="suggested-question-content" @onclick="ToggleSuggestions">
@@ -361,6 +380,14 @@
                         </div>
                     </form>
                 </section>
+                <RideActivityPanel Entries="@rideActivityEntries"
+                                   ReadEntryKeys="@rideActivityReadEntryKeys"
+                                   IsPaused="@rideActivityPaused"
+                                   IsReconnecting="@rideActivityReconnecting"
+                                   SubscriptionError="@rideActivityError"
+                                   IsOpen="@activityOpen"
+                                   OnClose="CloseActivity" />
+                </div>
             }
         </main>
     }
