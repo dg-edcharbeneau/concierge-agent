@@ -189,7 +189,9 @@ public sealed class ConciergeActionToolService(
             result.Status.ToString(),
             result.PlaceName is null ? null : Limit(result.PlaceName, 120),
             result.OpeningHours is null ? null : Limit(result.OpeningHours, 500),
-            result.Candidates.Take(3).Select(candidate => Limit(candidate, 160)).ToArray());
+            result.Candidates.Take(3).Select(candidate => Limit(candidate, 160)).ToArray(),
+            // Resolved here so the recorded result, not host time zone data, drives workflow replay.
+            OpeningHoursFormatter.TimeZoneLabel(hotelTimeZone));
         return JsonSerializer.Serialize(output, JsonOptions);
     }
 
@@ -737,12 +739,17 @@ public sealed record ConciergeNearbyPlacesToolResult(
 
 public sealed record ConciergeNearbyPlace(string Name, string? Address, double DistanceMiles);
 
-/// <summary>One named place's opening hours; absent provider hours use NotListed rather than nearby results.</summary>
+/// <summary>
+/// One named place's opening hours; absent provider hours use NotListed rather than nearby results.
+/// TimeZoneName labels the hotel's zone (e.g. "Eastern Time"); null in older histories or when the
+/// host has no short name.
+/// </summary>
 public sealed record ConciergePlaceOpeningHoursToolResult(
     string Status,
     string? PlaceName,
     string? OpeningHours,
-    IReadOnlyList<string> Candidates);
+    IReadOnlyList<string> Candidates,
+    string? TimeZoneName = null);
 
 public sealed record ConciergeRideProposalDraft(
     ConciergeRidePlace Pickup,

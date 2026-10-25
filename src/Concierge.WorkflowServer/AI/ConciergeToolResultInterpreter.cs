@@ -48,7 +48,7 @@ internal static class ConciergeToolResultInterpreter
                 ConciergeToolDefinitions.FindNearbyPlaces =>
                     FormatNearbyPlaces((ConciergeNearbyPlacesToolResult?)Decoded, request),
                 ConciergeToolDefinitions.GetPlaceOpeningHours =>
-                    FormatPlaceOpeningHours((ConciergePlaceOpeningHoursToolResult?)Decoded, arguments),
+                    FormatPlaceOpeningHours((ConciergePlaceOpeningHoursToolResult?)Decoded, request, arguments),
                 ConciergeToolDefinitions.ProposeRide =>
                     FormatRideProposal(
                         (ConciergeRideProposalToolResult?)Decoded,
@@ -374,6 +374,7 @@ internal static class ConciergeToolResultInterpreter
 
     private static string FormatPlaceOpeningHours(
         ConciergePlaceOpeningHoursToolResult? result,
+        ConciergeTurnSubmission request,
         IDictionary<string, object?> arguments)
     {
         if (result is null)
@@ -387,7 +388,15 @@ internal static class ConciergeToolResultInterpreter
         {
             case "Available" when !string.IsNullOrWhiteSpace(result.PlaceName)
                 && !string.IsNullOrWhiteSpace(result.OpeningHours):
-                return $"{result.PlaceName}'s listed opening hours are {result.OpeningHours}.";
+                // Place hours are already local to the hotel area; no conversion is needed.
+                if (!OpeningHoursFormatter.TryParse(result.OpeningHours, out var week))
+                {
+                    return $"{result.PlaceName}'s listed opening hours are {result.OpeningHours}.";
+                }
+
+                return StringComparer.Ordinal.Equals(request.Channel, "web")
+                    ? OpeningHoursFormatter.FormatWeb(EscapeMarkdown(result.PlaceName), week, result.TimeZoneName)
+                    : OpeningHoursFormatter.FormatVoice(result.PlaceName, week);
             case "NotListed" when !string.IsNullOrWhiteSpace(result.PlaceName):
                 return $"Opening hours for {result.PlaceName} are not listed.";
             case "NoResults":

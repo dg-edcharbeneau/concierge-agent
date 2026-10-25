@@ -106,7 +106,7 @@ try
         new("How long is the drive to South Beach?", ["GetRoute"], ["mi", "min"]),
         new("What is the nearest pharmacy?", ["FindNearbyPlaces"], ["pharmac", "mile"]),
         new("What is the nearest movie theater?", ["FindNearbyPlaces"], ["theater|cinema", "mile"]),
-        new("What are Wayan Miami's hours?", ["GetPlaceOpeningHours"], ["Wayan", "17:30"]),
+        new("What are Wayan Miami's hours?", ["GetPlaceOpeningHours"], ["Wayan", "5:30 PM|17:30"]),
         // Answered from the verified stay dates in the guest context; no tool is needed.
         new("How long is my stay and what day am I checking out?", [], ["one night|1 night", checkoutDay]),
         new("How much is a ride?", [], ["complimentary|no charge|no cost"]),

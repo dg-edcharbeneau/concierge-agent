@@ -466,7 +466,7 @@ internal sealed class ScriptedActionToolBackend : IConciergeActionToolBackend
         Record(ConciergeToolDefinitions.GetPlaceOpeningHours, new Dictionary<string, object?> { ["placeName"] = placeName });
         return Task.FromResult(Dequeue(ConciergeToolDefinitions.GetPlaceOpeningHours,
             new ConciergePlaceOpeningHoursToolResult(
-                "Available", placeName, "17:30-21:30; Th 17:30-22:00; Fr,Sa 17:30-22:30", [])));
+                "Available", placeName, "17:30-21:30; Th 17:30-22:00; Fr,Sa 17:30-22:30", [], "Eastern Time")));
     }
 
     public Task<string> ProposeRideAsync(

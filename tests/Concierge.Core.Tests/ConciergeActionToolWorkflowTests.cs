@@ -175,7 +175,14 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
 
         Assert.Single(host.ChatClient.Requests);
         Assert.Equal(
-            "Wayan Miami's listed opening hours are 17:30-21:30; Th 17:30-22:00; Fr,Sa 17:30-22:30.",
+            "Wayan Miami's hours (Eastern Time):\n\n"
+            + "- **Mon:** 5:30 PM–9:30 PM\n"
+            + "- **Tue:** 5:30 PM–9:30 PM\n"
+            + "- **Wed:** 5:30 PM–9:30 PM\n"
+            + "- **Thu:** 5:30 PM–10 PM\n"
+            + "- **Fri:** 5:30 PM–10:30 PM\n"
+            + "- **Sat:** 5:30 PM–10:30 PM\n"
+            + "- **Sun:** 5:30 PM–9:30 PM",
             result.AssistantMessage);
         var call = Assert.Single(host.ActionTools.Calls);
         Assert.Equal(ConciergeToolDefinitions.GetPlaceOpeningHours, call.Name);

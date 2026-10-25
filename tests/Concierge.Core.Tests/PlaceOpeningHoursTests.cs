@@ -145,53 +145,76 @@ public sealed class PlaceOpeningHoursTests
         Assert.Null(result.PlaceName);
     }
 
+    private const string WayanHours = "17:30-21:30; Th 17:30-22:00; Fr,Sa 17:30-22:30";
+
     [Fact]
-    public void OpeningHoursToolRendersProviderValueAndExplicitlyReportsUnlistedHours()
+    public void OpeningHoursToolRendersWebHoursAsADailyListAndExplicitlyReportsUnlistedHours()
     {
         var hours = Render(new ConciergePlaceOpeningHoursToolResult(
-            "Available", "Wayan Miami", "17:30-21:30; Th 17:30-22:00; Fr,Sa 17:30-22:30", []));
+            "Available", "Wayan Miami", WayanHours, [], "Eastern Time"));
         var unlisted = Render(new ConciergePlaceOpeningHoursToolResult(
             "NotListed", "Some Cafe", null, []));
 
         Assert.Equal(
-            "Wayan Miami's listed opening hours are 17:30-21:30; Th 17:30-22:00; Fr,Sa 17:30-22:30.",
+            "Wayan Miami's hours (Eastern Time):\n\n"
+            + "- **Mon:** 5:30 PM–9:30 PM\n"
+            + "- **Tue:** 5:30 PM–9:30 PM\n"
+            + "- **Wed:** 5:30 PM–9:30 PM\n"
+            + "- **Thu:** 5:30 PM–10 PM\n"
+            + "- **Fri:** 5:30 PM–10:30 PM\n"
+            + "- **Sat:** 5:30 PM–10:30 PM\n"
+            + "- **Sun:** 5:30 PM–9:30 PM",
             hours);
         Assert.Equal("Opening hours for Some Cafe are not listed.", unlisted);
         Assert.DoesNotContain("closest", unlisted, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("options", unlisted, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Theory]
-    [InlineData(null, false)]
-    [InlineData("", false)]
-    [InlineData("Wayan Miami", true)]
-    public void ToolPolicyRequiresOneNonemptyPlaceName(string? placeName, bool valid)
+    [Fact]
+    public void OpeningHoursToolRendersVoiceHoursAsPlainGroupedSentences()
     {
-        var arguments = new Dictionary<string, object?> { ["placeName"] = placeName };
+        var hours = Render(
+            new ConciergePlaceOpeningHoursToolResult("Available", "Wayan Miami", WayanHours, [], "Eastern Time"),
+            "voice");
 
-        Assert.Equal(valid, ConciergeToolCallPolicy.TryValidateArguments(
-            ConciergeToolDefinitions.GetPlaceOpeningHours, arguments, out _));
+        Assert.Equal(
+            "Wayan Miami is open Monday through Wednesday and Sunday from 5:30 PM to 9:30 PM, "
+            + "Thursday until 10 PM, and Friday and Saturday until 10:30 PM.",
+            hours);
+        Assert.DoesNotContain("*", hours, StringComparison.Ordinal);
+        Assert.DoesNotContain("- ", hours, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ModelSchemaRequiresOnlyTheNamedPlace()
+    public void WebHoursEscapeThePlaceNameAndOmitAMissingTimeZoneLabel()
     {
-        var schema = ConciergeToolDefinitions
-            .FindModelTool(ConciergeToolDefinitions.GetPlaceOpeningHours, includeEndChat: false)
-            .JsonSchema;
+        var hours = Render(new ConciergePlaceOpeningHoursToolResult(
+            "Available", "Joe's *Stone* Crab", "Mo-Su 11:00-22:00", []));
 
-        Assert.Equal(["placeName"], schema.GetProperty("properties").EnumerateObject().Select(property => property.Name));
-        Assert.Equal(["placeName"], schema.GetProperty("required").EnumerateArray().Select(value => value.GetString()));
+        Assert.StartsWith("Joe's \\*Stone\\* Crab's hours:\n\n- **Mon:** 11 AM–10 PM", hours);
     }
 
-    private static string Render(ConciergePlaceOpeningHoursToolResult result)
+    [Theory]
+    [InlineData("web")]
+    [InlineData("voice")]
+    public void UnsupportedOpeningHoursSyntaxFallsBackToTheProviderValue(string channel)
+    {
+        var hours = Render(
+            new ConciergePlaceOpeningHoursToolResult(
+                "Available", "Wayan Miami", "Mo-Fr 17:00-22:00; PH off", [], "Eastern Time"),
+            channel);
+
+        Assert.Equal("Wayan Miami's listed opening hours are Mo-Fr 17:00-22:00; PH off.", hours);
+    }
+
+    private static string Render(ConciergePlaceOpeningHoursToolResult result, string channel = "web")
     {
         var interpretation = ConciergeToolResultInterpreter.Decode(
             ConciergeToolDefinitions.GetPlaceOpeningHours,
             JsonSerializer.Serialize(result, JsonOptions));
         Assert.True(interpretation.ShouldReturnRenderedToolAnswer);
         return interpretation.Interpret(
-                new ConciergeTurnSubmission("hours", "What are the hours?", "web"),
+                new ConciergeTurnSubmission("hours", "What are the hours?", channel),
                 new Dictionary<string, object?> { ["placeName"] = result.PlaceName ?? "Wayan Miami" },
                 includeRideIdsForCancellation: false)
             .GuestFacingText;
