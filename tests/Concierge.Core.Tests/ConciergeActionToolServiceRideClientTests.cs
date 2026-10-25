@@ -326,7 +326,8 @@ public sealed class ConciergeActionToolServiceRideClientTests
             null!,
             new SingleClientFactory(client),
             TimeProvider.System,
-            Options.Create(new HotelLocationOptions { TimeZoneId = "America/New_York" }));
+            Options.Create(new HotelLocationOptions { TimeZoneId = "America/New_York" }),
+            Options.Create(new RideSchedulingOptions()));
 
     private static HttpClient CreateClient(RecordingHandler handler) =>
         new(handler) { BaseAddress = new Uri("http://ride-service.test") };

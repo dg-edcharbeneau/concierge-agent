@@ -53,6 +53,13 @@ if (string.IsNullOrWhiteSpace(hotelTimeZone))
 workflowServer.WithEnvironment("Hotel__TimeZoneId", hotelTimeZone);
 rideService.WithEnvironment("Hotel__TimeZoneId", hotelTimeZone);
 
+// Forward one policy to both validators; absent configuration uses their shared default.
+if (builder.Configuration["Rides:MinimumAdvanceNoticeMinutes"] is { } minimumNotice)
+{
+    workflowServer.WithEnvironment("Rides__MinimumAdvanceNoticeMinutes", minimumNotice);
+    rideService.WithEnvironment("Rides__MinimumAdvanceNoticeMinutes", minimumNotice);
+}
+
 // The fictional hotel's real demo anchor; weather, routes, and ride pickups use it for "Hotel ZGY".
 var hotelAddress = builder.Configuration["Hotel:Address"];
 if (string.IsNullOrWhiteSpace(hotelAddress))

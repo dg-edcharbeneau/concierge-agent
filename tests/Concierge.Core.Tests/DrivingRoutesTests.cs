@@ -1,13 +1,74 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Concierge.Contracts;
+using Concierge.WorkflowServer.AI;
 using Concierge.WorkflowServer.Location;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Concierge.Core.Tests;
 
 public sealed class DrivingRoutesTests
 {
+    [Theory]
+    [InlineData(null, 5)]
+    [InlineData(12, 12)]
+    public async Task RideProposalAcceptsExactMinimumAndRendersConfiguredJustUnderRejection(
+        int? configuredMinutes, int expectedMinutes)
+    {
+        var now = new DateTimeOffset(2026, 10, 19, 18, 0, 0, TimeSpan.Zero);
+        var providerCalls = 0;
+        using var http = CreateClient(request =>
+        {
+            providerCalls++;
+            return request.RequestUri!.AbsolutePath.EndsWith("/geocode/search", StringComparison.Ordinal)
+                ? Geocode("South Beach, Miami-Dade County, Florida", 25.7745, -80.1329)
+                : RouteResponse();
+        });
+        var options = new RideSchedulingOptions();
+        if (configuredMinutes is { } minutes)
+        {
+            options.MinimumAdvanceNoticeMinutes = minutes;
+        }
+        var tool = new ConciergeActionToolService(
+            null!, CreateService(http.Client), null!, null!, null!,
+            new FakeTimeProvider(now), Options.Create(Hotel), Options.Create(options));
+        var boundary = now.AddMinutes(expectedMinutes);
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+        var accepted = JsonSerializer.Deserialize<ConciergeRideProposalToolResult>(
+            await tool.ProposeRideAsync(null, "South Beach", false, boundary.ToString("O"), default),
+            jsonOptions)!;
+        Assert.Equal("Available", accepted.Status);
+        Assert.Equal(boundary, accepted.Proposal!.PickupAtUtc);
+        Assert.False(accepted.Proposal.Immediate);
+        var callsAfterAccepted = providerCalls;
+        Assert.True(callsAfterAccepted > 0);
+
+        var rejected = await tool.ProposeRideAsync(
+            null, "South Beach", false, boundary.AddTicks(-1).ToString("O"), default);
+        var result = JsonSerializer.Deserialize<ConciergeRideProposalToolResult>(rejected, jsonOptions)!;
+        Assert.Equal("InvalidSchedule", result.Status);
+        Assert.Equal(expectedMinutes, result.MinimumAdvanceNoticeMinutes);
+        Assert.Contains($"at least {expectedMinutes} minutes", result.Message, StringComparison.Ordinal);
+        Assert.Null(result.Proposal);
+        Assert.Equal(callsAfterAccepted, providerCalls);
+        var rendered = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.ProposeRide, rejected)
+            .Interpret(new ConciergeTurnSubmission("schedule", "Book a ride.", "voice"),
+                new Dictionary<string, object?>(), false);
+        Assert.Equal(
+            $"A scheduled pickup must be at least {expectedMinutes} minutes from now. Please choose a later time. No ride has been booked.",
+            rendered.GuestFacingText);
+        Assert.Equal(rendered.GuestFacingText, rendered.CompactModelContext);
+
+        var immediate = JsonSerializer.Deserialize<ConciergeRideProposalToolResult>(
+            await tool.ProposeRideAsync(null, "South Beach", true, null, default), jsonOptions)!;
+        Assert.Equal("Available", immediate.Status);
+        Assert.True(immediate.Proposal!.Immediate);
+        Assert.Null(immediate.Proposal.PickupAtUtc);
+    }
+
     private static readonly HotelLocationOptions Hotel = new()
     {
         TimeZoneId = "America/New_York",

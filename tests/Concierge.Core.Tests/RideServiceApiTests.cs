@@ -35,7 +35,7 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
     private static readonly Guid StayId = Guid.Parse("22222222-2222-2222-2222-222222222222");
 
     [Fact]
-    public async Task ExactFortyFiveMinutesSurvivesDelayedActivityAndStoresRowAndEventAtomically()
+    public async Task ExactFiveMinutesSurvivesDelayedActivityAndStoresRowAndEventAtomically()
     {
         await using var host = await RideTestHost.StartAsync(postgreSql, DefaultNow);
         await host.ExecuteAsync(
@@ -50,7 +50,7 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
                 FOR EACH ROW EXECUTE FUNCTION delay_ride_insert();
             """);
 
-        var request = Booking("exact-45", DefaultNow.AddMinutes(45));
+        var request = Booking("exact-5", DefaultNow.AddMinutes(5));
         var startedAt = DateTimeOffset.UtcNow;
         var response = await host.BookAsync(request);
         var elapsed = DateTimeOffset.UtcNow - startedAt;
@@ -58,15 +58,49 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
         Assert.True(elapsed >= TimeSpan.FromSeconds(1), $"Insert trigger delayed only {elapsed}.");
         var ride = (await ReadRideAsync(response))!;
         Assert.Equal(DefaultNow, ride.BookedAt.ToUniversalTime());
-        Assert.Equal(DefaultNow.AddMinutes(45), ride.PickupAt.ToUniversalTime());
+        Assert.Equal(DefaultNow.AddMinutes(5), ride.PickupAt.ToUniversalTime());
         Assert.Equal(1L, await host.ScalarAsync<long>("SELECT count(*) FROM rides;"));
         Assert.Equal(1L, await host.ScalarAsync<long>("SELECT count(*) FROM ride_events;"));
 
-        var tooSoon = await host.BookAsync(Booking("under-45", DefaultNow.AddMinutes(45).AddTicks(-1)));
+        var tooSoon = await host.BookAsync(Booking("under-5", DefaultNow.AddMinutes(5).AddTicks(-1)));
         Assert.Equal(HttpStatusCode.BadRequest, tooSoon.StatusCode);
         var error = (await tooSoon.Content.ReadFromJsonAsync<RideApiError>())!;
-        Assert.Contains("at least 45 minutes", error.Message, StringComparison.Ordinal);
+        Assert.Contains("at least 5 minutes", error.Message, StringComparison.Ordinal);
         Assert.Contains("earliest is", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ConfiguredMinimumAcceptsExactBoundaryRejectsJustUnderAndRetryUsesOriginalAdmission()
+    {
+        await using var host = await RideTestHost.StartAsync(
+            postgreSql, DefaultNow, minimumAdvanceNoticeMinutes: 12);
+        var request = Booking("exact-12", DefaultNow.AddMinutes(12));
+        using var first = await host.BookAsync(request);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var original = (await ReadRideAsync(first))!;
+        Assert.Equal(DefaultNow, original.BookedAt);
+        Assert.Equal(DefaultNow.AddMinutes(12), original.PickupAt);
+
+        using var rejected = await host.BookAsync(
+            Booking("under-12", DefaultNow.AddMinutes(12).AddTicks(-1)));
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        var error = (await rejected.Content.ReadFromJsonAsync<RideApiError>())!;
+        Assert.Contains("at least 12 minutes", error.Message, StringComparison.Ordinal);
+        Assert.Contains("2026-10-19 14:12 -04:00", error.Message, StringComparison.Ordinal);
+
+        host.AdvanceTime(TimeSpan.FromMinutes(30));
+        using var retry = await host.BookAsync(request);
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        var retried = (await ReadRideAsync(retry))!;
+        Assert.Equal(original.Id, retried.Id);
+        Assert.Equal(original.BookedAt, retried.BookedAt);
+        Assert.Equal(original.PickupAt, retried.PickupAt);
+
+        using var immediate = await host.BookAsync(Booking("immediate-12", null, immediate: true));
+        Assert.Equal(HttpStatusCode.OK, immediate.StatusCode);
+        var immediateRide = (await ReadRideAsync(immediate))!;
+        Assert.Equal(DefaultNow.AddMinutes(30), immediateRide.BookedAt);
+        Assert.Equal(immediateRide.BookedAt, immediateRide.PickupAt);
     }
 
     [Fact]
@@ -754,7 +788,8 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
             DateTimeOffset now,
             bool startStayWorkflow = true,
             bool unavailableFeed = false,
-            bool persistThenTimeOutStore = false)
+            bool persistThenTimeOutStore = false,
+            int? minimumAdvanceNoticeMinutes = null)
         {
             var database = await postgreSql.CreateDatabaseAsync();
             var dataSource = NpgsqlDataSource.Create(database.ConnectionString);
@@ -774,6 +809,16 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
             builder.Services.AddSingleton(HotelTimeZone);
             builder.Services.AddSingleton<RideRepository>();
             builder.Services.AddSingleton<RideBookingService>();
+            builder.Services.AddOptions<RideSchedulingOptions>()
+                .Configure(options =>
+                {
+                    if (minimumAdvanceNoticeMinutes is { } minutes)
+                    {
+                        options.MinimumAdvanceNoticeMinutes = minutes;
+                    }
+                })
+                .ValidateDataAnnotations()
+                .ValidateOnStart();
             builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
             var rideWorker = builder.Services.AddHostedTemporalWorker(RideWorkflowNames.TaskQueue)
                 .AddWorkflow<RideBookingWorkflow>();
@@ -826,6 +871,8 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
 
         public Task<HttpResponseMessage> BookAsync(RideBookingRequest request) =>
             Http.PostAsJsonAsync("/rides", request);
+
+        public void AdvanceTime(TimeSpan elapsed) => clock.Advance(elapsed);
 
         public Task<HttpResponseMessage> GetAsync(string path, Guid guestId, Guid stayId) =>
             SendWithScope(HttpMethod.Get, path, guestId, stayId);

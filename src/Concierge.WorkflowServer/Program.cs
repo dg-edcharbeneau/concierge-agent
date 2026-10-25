@@ -18,6 +18,10 @@ using Temporalio.Extensions.Hosting;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();
+builder.Services.AddOptions<RideSchedulingOptions>()
+    .Bind(builder.Configuration.GetSection(RideSchedulingOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
 builder.Services.AddConciergeAIProviders(builder.Configuration);
 builder.Services.AddSingleton<LocationOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<HotelLocationOptions>>(

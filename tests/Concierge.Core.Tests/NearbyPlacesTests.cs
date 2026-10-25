@@ -277,7 +277,8 @@ public sealed class NearbyPlacesTests
             CreateOpeningHoursService(responder),
             null!,
             TimeProvider.System,
-            Options.Create(new HotelLocationOptions { TimeZoneId = "America/New_York" }));
+            Options.Create(new HotelLocationOptions { TimeZoneId = "America/New_York" }),
+            Options.Create(new Concierge.Contracts.RideSchedulingOptions()));
 
     private static GeoapifyPlaceOpeningHoursService CreateOpeningHoursService(
         Func<HttpRequestMessage, HttpResponseMessage> responder)

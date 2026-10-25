@@ -12,7 +12,8 @@ public sealed class RideBookingService(
     RideRepository repository,
     ITemporalClient temporalClient,
     TimeProvider timeProvider,
-    TimeZoneInfo hotelTimeZone)
+    TimeZoneInfo hotelTimeZone,
+    Microsoft.Extensions.Options.IOptions<RideSchedulingOptions> schedulingOptions)
 {
     public async Task<RideResponse> BookAsync(
         RideBookingRequest? request,
@@ -55,11 +56,12 @@ public sealed class RideBookingService(
                 $"The stay is no longer eligible for rides after checkout day {request.CheckoutDate:yyyy-MM-dd}.");
         }
 
-        if (!request.Immediate && requestedPickup < bookedAt.AddMinutes(45))
+        var minimumNotice = schedulingOptions.Value.MinimumAdvanceNoticeMinutes;
+        if (!request.Immediate && requestedPickup < bookedAt.AddMinutes(minimumNotice))
         {
-            var earliest = TimeZoneInfo.ConvertTime(bookedAt.AddMinutes(45), hotelTimeZone);
+            var earliest = TimeZoneInfo.ConvertTime(bookedAt.AddMinutes(minimumNotice), hotelTimeZone);
             throw RideErrors.InvalidRequest(
-                $"Scheduled pickups must be at least 45 minutes from now; the earliest is "
+                $"Scheduled pickups must be at least {minimumNotice} minutes from now; the earliest is "
                 + $"{earliest:yyyy-MM-dd HH:mm zzz}.");
         }
 

@@ -806,6 +806,35 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
     }
 
     [Fact]
+    public async Task InvalidScheduleRendersRecordedNonDefaultMinimumAndReplaysWithoutBooking()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.ProposeRide,
+            JsonSerializer.Serialize(new ConciergeRideProposalToolResult(
+                "InvalidSchedule", "Provider detail must not reach the guest.", [],
+                null, null, null, null, 12),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "scheduled-too-soon", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?>
+            {
+                ["dropoff"] = "South Beach",
+                ["immediate"] = false,
+                ["pickupAt"] = "2026-10-24T18:05:00-04:00",
+            }));
+
+        var result = await SubmitAsync(host, handle, stayId, "scheduled-too-soon", "Schedule a ride.");
+
+        Assert.Equal(
+            "A scheduled pickup must be at least 12 minutes from now. Please choose a later time. No ride has been booked.",
+            result.AssistantMessage);
+        Assert.Single(host.ChatClient.Requests);
+        Assert.Equal(ConciergeToolDefinitions.ProposeRide, Assert.Single(host.ActionTools.Calls).Name);
+        await ReplayAsync(handle);
+    }
+
+    [Fact]
     public async Task FailedRideProposalUsesCuratedReplyAndCannotBeConfirmed()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);

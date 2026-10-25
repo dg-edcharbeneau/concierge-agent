@@ -431,7 +431,11 @@ internal static class ConciergeToolResultInterpreter
 
             if (StringComparer.Ordinal.Equals(result.Status, "InvalidSchedule"))
             {
-                return "A scheduled pickup must be at least 45 minutes from now. Please choose a later time. No ride has been booked.";
+                // Only the activity's structured policy value is rendered, never provider text
+                // or model arguments. Recording it in the result keeps workflow replay deterministic.
+                return result.MinimumAdvanceNoticeMinutes is > 0
+                    ? $"A scheduled pickup must be at least {result.MinimumAdvanceNoticeMinutes} minutes from now. Please choose a later time. No ride has been booked."
+                    : "The scheduled pickup is too soon or has an invalid time. Please choose a later time. No ride has been booked.";
             }
 
             return ToolFailureReply(ConciergeToolDefinitions.ProposeRide);

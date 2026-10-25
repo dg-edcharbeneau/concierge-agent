@@ -72,6 +72,33 @@ public sealed class AIConfigurationTests
     }
 
     [Theory]
+    [InlineData(null)]
+    [InlineData("12")]
+    public async Task ManifestForwardsOneRidePolicyToBothServices(string? minimumNotice)
+    {
+        var values = new Dictionary<string, string>
+        {
+            ["AI:Chat:Provider"] = "Ollama",
+            ["AI:Chat:Endpoint"] = "http://localhost:11434",
+            ["AI:Chat:Model"] = "test-chat",
+            ["AI:Embeddings:Provider"] = "Ollama",
+            ["AI:Embeddings:Endpoint"] = "http://localhost:11434",
+            ["AI:Embeddings:Model"] = "test-embeddings",
+        };
+        if (minimumNotice is not null)
+        {
+            values[Concierge.Contracts.RideSchedulingOptions.MinimumAdvanceNoticeKey] = minimumNotice;
+        }
+        var (exitCode, manifest, output) = await PublishManifestAsync(values);
+        Assert.True(exitCode == 0, output);
+        foreach (var resource in new[] { "ride-service", "workflow-server" })
+        {
+            Assert.Equal(minimumNotice,
+                manifest!["resources"]![resource]!["env"]!["Rides__MinimumAdvanceNoticeMinutes"]?.GetValue<string>());
+        }
+    }
+
+    [Theory]
     [InlineData("Ollama", "Ollama")]
     [InlineData("Foundry", "Foundry")]
     [InlineData("Foundry", "Ollama")]
@@ -249,6 +276,8 @@ public sealed class AIConfigurationTests
         foreach (var key in start.Environment.Keys.Where(key =>
             key.StartsWith("AI__", StringComparison.OrdinalIgnoreCase)
             || key.StartsWith("AI:", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("Rides__", StringComparison.OrdinalIgnoreCase)
+            || key.StartsWith("Rides:", StringComparison.OrdinalIgnoreCase)
             || key.StartsWith("Parameters", StringComparison.OrdinalIgnoreCase)).ToArray())
         {
             start.Environment.Remove(key);

@@ -51,7 +51,8 @@ public sealed class ConciergeActionToolService(
     GeoapifyPlaceOpeningHoursService placeOpeningHoursService,
     IHttpClientFactory httpClientFactory,
     TimeProvider timeProvider,
-    Microsoft.Extensions.Options.IOptions<HotelLocationOptions> hotelOptions) : IConciergeActionToolBackend
+    Microsoft.Extensions.Options.IOptions<HotelLocationOptions> hotelOptions,
+    Microsoft.Extensions.Options.IOptions<RideSchedulingOptions> schedulingOptions) : IConciergeActionToolBackend
 {
     // RideService stores UTC; guests should hear hotel-local pickup times.
     private readonly TimeZoneInfo hotelTimeZone =
@@ -212,18 +213,20 @@ public sealed class ConciergeActionToolService(
         DateTimeOffset? pickupAtUtc = null;
         if (!immediate)
         {
+            var minimumNotice = schedulingOptions.Value.MinimumAdvanceNoticeMinutes;
             if (!TryParseExplicitOffset(pickupAt!, out var parsed)
-                || parsed <= timeProvider.GetUtcNow().AddMinutes(45))
+                || parsed < timeProvider.GetUtcNow().AddMinutes(minimumNotice))
             {
                 return JsonSerializer.Serialize(
                     new ConciergeRideProposalToolResult(
                         "InvalidSchedule",
-                        "Scheduled pickups must be at least 45 minutes from now. Ask for a later time.",
+                        $"Scheduled pickups must be at least {minimumNotice} minutes from now. Ask for a later time.",
                         [],
                         null,
                         null,
                         null,
-                        null),
+                        null,
+                        minimumNotice),
                     JsonOptions);
             }
 
@@ -755,7 +758,8 @@ public sealed record ConciergeRideProposalToolResult(
     ConciergeRideProposalDraft? Proposal,
     string? RouteSummary,
     string? WebSummary,
-    IReadOnlyList<string>? Instructions);
+    IReadOnlyList<string>? Instructions,
+    int? MinimumAdvanceNoticeMinutes = null);
 
 public sealed record ConciergeRideActionResult(
     bool Simulated,

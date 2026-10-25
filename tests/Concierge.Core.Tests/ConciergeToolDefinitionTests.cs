@@ -7,6 +7,19 @@ namespace Concierge.Core.Tests;
 public sealed class ConciergeToolDefinitionTests
 {
     [Fact]
+    public void ScheduledPickupSchemaDefersToConfiguredMinimumInsteadOfClaimingAFixedLimit()
+    {
+        var description = Schema(ConciergeToolDefinitions.ProposeRide)
+            .GetProperty("properties").GetProperty("pickupAt")
+            .GetProperty("description").GetString()!;
+
+        Assert.Contains("ISO 8601 with UTC offset", description, StringComparison.Ordinal);
+        Assert.Contains("configured minimum", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("45", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("5 minutes", description, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EveryModelToolExplainsWhatItDoes()
     {
         var tools = ConciergeToolDefinitions.CreateModelTools(includeEndChat: false);

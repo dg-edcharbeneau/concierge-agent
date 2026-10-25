@@ -6,6 +6,10 @@ using Temporalio.Extensions.Hosting;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
+builder.Services.AddOptions<RideSchedulingOptions>()
+    .Bind(builder.Configuration.GetSection(RideSchedulingOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
 
 var connectionString = builder.Configuration.GetConnectionString("rides")
     ?? throw new InvalidOperationException(

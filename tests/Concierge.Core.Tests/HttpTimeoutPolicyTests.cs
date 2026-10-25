@@ -371,7 +371,8 @@ public sealed class HttpTimeoutPolicyTests
             null!,
             factory,
             TimeProvider.System,
-            Options.Create(new HotelLocationOptions { TimeZoneId = "America/New_York" }));
+            Options.Create(new HotelLocationOptions { TimeZoneId = "America/New_York" }),
+            Options.Create(new RideSchedulingOptions()));
 
     private static AIFunctionArguments RideArguments()
     {

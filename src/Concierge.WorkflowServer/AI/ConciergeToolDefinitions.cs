@@ -188,7 +188,7 @@ internal static class ConciergeToolDefinitions
         string dropoff,
         [Description("true for now; false to schedule with pickupAt.")] bool immediate,
         [Description("Omit for Hotel ZGY.")] string? pickup = null,
-        [Description("ISO 8601 with UTC offset, 45+ minutes ahead.")] string? pickupAt = null) =>
+        [Description("ISO 8601 with UTC offset; configured minimum notice.")] string? pickupAt = null) =>
         string.Empty;
     // The workflow binds confirmation to its stored pending proposal; models do not reliably
     // carry opaque ids across turns because working history keeps only spoken text.
