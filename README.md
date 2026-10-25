@@ -1,377 +1,162 @@
 # Concierge Agent
 
-A virtual concierge demo for Hotel ZGY, a fictional hotel in Wynwood, Miami,
-built with .NET 10, Temporal, and .NET Aspire.
-
+A virtual concierge for Hotel ZGY, a fictional hotel in Wynwood, Miami. Built
+with .NET 10, ASP.NET Core, Aspire, Temporal, and Deepgram’s Voice Agent API.
+Guests can use text or browser voice to ask about the hotel, check weather,
+find nearby places and their opening hours, get driving routes, and book, check,
+list, and cancel rides. An in-app **Activity** panel shows ride updates.
 
 ## Prerequisites
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- Docker
-- [just](https://just.systems). Run `just` to list the recipes. Each recipe
-  wraps a single `dotnet` command from the root `justfile`.
-- [Aspire CLI](https://aspire.dev) (optional). You need it only for `aspire run`.
-- [Ollama](https://ollama.com)
+- Docker, running
+- [just](https://just.systems)
+- [Aspire CLI](https://aspire.dev), for `just reset` and `just live-concierge-actions`
+  (`just run` uses `dotnet run`)
+- Dev Tunnels CLI (`devtunnel`)
+- [Ollama](https://ollama.com) for local models, or configured Foundry deployments
+- Geoapify account and API key (required at startup for location and mapping features)
+- Deepgram account and API key with Voice Agent API access (required for browser voice)
 
-  ```bash
-  ollama pull qwen3.8:27b-mlx
-  ollama pull embeddinggemma-2:740m
-  ollama create concierge-chat -f models/ollama/Modelfile.concierge-chat
-  ```
-
-To use Azure AI Foundry / Azure OpenAI instead of Ollama, see
-[Configuration](#configuration).
+Run all commands below from the repository root.
 
 ## Run locally
 
-From the repository root:
+### 1. Prepare the models
+
+Development defaults to Ollama for both chat and embeddings.
 
 ```bash
-just run      # or: aspire run
-just reset    # stop the AppHost and delete its Postgres and Temporal data volumes
+ollama pull qwen3.8:27b-mlx
+ollama pull embeddinggemma-2:740m
+ollama create concierge-chat -f models/ollama/Modelfile.concierge-chat
 ```
 
-The AppHost creates an anonymous Dev Tunnel for Web's dedicated Think endpoint
-(`POST /v1/chat/completions`); the normal Web endpoint and UI are not exposed by
-that tunnel. The dedicated Think listener and tunnel's local forwarding use
-HTTPS with the existing ASP.NET Core development certificate; all Web listeners
-are HTTPS-only. A terminal `MapWhen` branch isolates Think from Razor, UI error
-and status pages, HSTS, and antiforgery. The exact, case-insensitive
-`POST /v1/chat/completions` (no trailing slash) requires a short-lived,
-stay-bound voice bearer and returns a completed Temporal answer as SSE
-(assistant role, content, stop, `[DONE]`). Deepgram's supplied history is
-ignored; the stay workflow owns shared text/voice context.
-Other Think paths/methods, and that exact path on normal listeners, return empty
-**404** responses. A bounded live test on 2026-10-13 verified identical
-local/public 501 bodies, empty 404s, and preserved UI/API/health behavior with
-normal certificate validation and no redirects. That historical probe verified
-the then-pending handler's isolation, not the subsequently implemented voice protocol.
-Aspire injects the assigned public Think URL into Web as
-`THINK_PUBLIC_URL`; no tunnel URL argument is needed. Before starting Aspire
-the first time on a machine, sign in once with the Dev Tunnels CLI:
+The [Modelfile](models/ollama/Modelfile.concierge-chat) sets a 32,768-token
+context. Load the chat model before trying voice to avoid its initial load delay.
+
+To use Foundry instead, configure it [below](#use-foundry) and skip the local models
+for whichever capability you switch.
+
+### 2. Set the service keys
+
+Geoapify is used for mapping features and is **required at startup**:
 
 ```bash
+dotnet user-secrets set "Parameters:geoapify-api-key" "<your-key>" --project src/Concierge.AppHost
+```
+
+Deepgram key is required for voice features:
+
+```bash
+dotnet user-secrets set "Parameters:deepgram-api-key" "<your-key>" --project src/Concierge.AppHost
+```
+
+Keep keys in the AppHost user-secrets store, not checked-in settings.
+`aspire secret set "<key>" "<value>" --apphost src/Concierge.AppHost` writes to
+the same store, so either command works.
+
+### 3. Prepare HTTPS and the tunnel
+
+Once per machine:
+
+```bash
+dotnet dev-certs https --trust
 devtunnel user login
 ```
 
-Alternatively, run `devtunnel user login` to use a Microsoft account. This
-authenticates the tunnel host; the tunnel itself allows anonymous visitors.
-If the Aspire dashboard shows “Dev tunnels requires authentication to
-continue”, complete this sign-in and retry.
+Aspire creates the public voice callback tunnel and supplies its URL automatically.
+The web UI uses a separate local HTTPS endpoint.
 
+### 4. Start and sign in
 
-Verify a demo stay with a last name and room number:
+```bash
+just run
+```
+
+Alternatively, run `dotnet run --project src/Concierge.AppHost`. In the Aspire
+dashboard, wait for the services to become healthy, then open the **web** endpoint.
+Startup prepares the database, demo stays, and Markdown knowledge base.
 
 | Last name | Room |
 | --- | --- |
 | Rivera | 412 |
 | Morgan | 812 |
+| Phillip | 112 |
 
-Room numbers are 1–4 digits and can't start with `0`. Given and family names are at most 100
-characters (`ConciergeVerifiedGuest.MaxNameLength`): Setup rejects longer seeded names, and
-verification rejects a longer last name.
-
-### Stay memory and answer context
-
-A turn makes no summary model call. Each answer gets an estimated 8,000-token
-working context (21,000 on turns that offer weather, route, nearby-place and ride tools,
-which also counts their schemas and tool results): instructions, verified guest answer context, current hotel
-evidence, a bounded stay memory, and the newest complete recent turns that fit.
-
-Sign-in and subsequent authentication forward the database guest's given name,
-family name, room number and stay dates, bound to the authorized stay. Web and browser voice
-send that profile with each admitted turn, including turns on already-running
-stay workflows. It is a separate answer-context message, not hotel evidence or
-guest-reported memory; the main concierge instructions are unchanged. This
-deliberately sends the verified name and room to the configured model provider.
-Client-supplied last names and conversation claims cannot replace this identity.
-
-The server computes the room floor from the authoritative room number: `112`
-is floor 1, `412` floor 4, `812` floor 8, and `1212` floor 12. One- and two-digit
-rooms remain valid but have no inferred floor. The profile also carries the stay's
-hotel-local check-in and checkout dates (with weekday, e.g. `Thu 2026-10-22`) and a
-server-computed number of nights, so stay-length and checkout questions are
-answered from verified data. The complete JSON-escaped profile
-and its message overhead count against the working budget, rather than being
-hidden in the fixed instruction allowance. On action turns, when tool results
-need room, the profile is replaced by name-free stay facts (room, floor, dates,
-nights) that stay for the rest of the turn. If the required context cannot fit,
-the turn fails safely instead of truncating identity or exceeding the budget.
-Raw profile strings are data, not instructions. No extra guest lookup Activity,
-tool, or model call is added to an answer.
-
-Stay memory is extracted deterministically, without a model, from explicit
-guest statements: allergies, preferences, decisions, and requests. It is scoped
-to one stay, and a later statement on the same subject supersedes the earlier
-one. Questions are not promoted. Guest statements are continuity, not hotel
-authority. Memory, recent turns, and verified guest context carry across
-Continue-As-New. Every new web or voice turn requires the verified guest: the
-Web returns `401 unauthorized` (sign in again) for a session without a profile,
-and the stay workflow's update validator rejects a guestless turn before it
-enters history. The profile fields stay nullable only so older workflow
-histories and session payloads still replay; they never invent a name or room.
-
-The full transcript is persisted in PostgreSQL. Older turns outside the working
-window are not recalled into the prompt; older-turn recall is deferred. The
-legacy summary path remains only to replay workflow histories from before the
-`stay-memory-v1-*` patch.
-
-Voice turn IDs include a hash of the exact message, so resumed or changed
-speech is a distinct turn.
-
-### Voice latency and interruption measurements
-
-The relay logs receipt-to-worklet-silence-acknowledgment time. A browser-rendered
-barge-in requires nonzero audio in the playback worklet's last rendered block
-before the flush. Queued-only audio, drained playback, and normal speech while
-idle are not barge-in acceptance samples; filter on `BargeIn = true`.
-The timing includes acknowledgment return transit, excludes Deepgram detection
-before relay receipt, and is **not** a hardware/audible-silence measurement.
-Chrome real-microphone/speaker acceptance still requires a new live run.
-
-Run playback-boundary tests with `node --test tests/voice-play-worklet.test.mjs`.
-
-
-
-## Tests
-
-```bash
-just test
-```
-
-Docker must be running for the integration tests.
-
-To live-check place resolution and weather against Geoapify and Open-Meteo
-(opt-in; uses the AppHost `Parameters:geoapify-api-key` secret and never prints it):
-
-```bash
-just live-place-weather
-```
-
-It passes when "Miami" and "South Beach" each resolve to exactly one
-Miami-Dade result and the South Beach forecast is in °F and mph for the
-hotel-local day.
+Try “What time is checkout?” or “What’s the weather tomorrow?” Use the voice
+control for a spoken conversation and allow microphone access when prompted.
 
 ## Configuration
 
-The AppHost owns all AI configuration defaults, separately for chat and
-embeddings, and passes configured values to `Concierge.WorkflowServer`. There
-are no AI defaults in the workflow server's appsettings files. The workflow
-server owns setup options. The transcript persistence interval is
-configured on `Concierge.Web`. App secrets are stored in the AppHost
-user-secrets store and passed only to the service that needs them.
+AppHost forwards AI, hotel, ride-policy, and service-key settings to the
+services. The [Development settings](src/Concierge.AppHost/appsettings.Development.json)
+use local Ollama models.
+
+See the [configuration reference](docs/configuration.md) for settings, defaults,
+validation limits, and service ownership.
+
+### Use Foundry
+
+For chat, set the service endpoint and **deployment name**:
 
 ```bash
-aspire secret set "Parameters:foundry-chat-api-key" "<key>" --apphost src/Concierge.AppHost
-aspire secret set "Parameters:foundry-embeddings-api-key" "<key>" --apphost src/Concierge.AppHost
-aspire secret set "Parameters:deepgram-api-key" "<key>" --apphost src/Concierge.AppHost
-aspire secret set "Parameters:geoapify-api-key" "<key>" --apphost src/Concierge.AppHost
-aspire secret list --apphost src/Concierge.AppHost
+dotnet user-secrets set "AI:Chat:Provider" "Foundry" --project src/Concierge.AppHost
+dotnet user-secrets set "AI:Chat:Endpoint" "https://<resource>.openai.azure.com/" --project src/Concierge.AppHost
+dotnet user-secrets set "AI:Chat:Model" "<chat-deployment>" --project src/Concierge.AppHost
+dotnet user-secrets set "AI:Chat:RequestTimeoutSeconds" "15" --project src/Concierge.AppHost
+dotnet user-secrets set "Parameters:foundry-chat-api-key" "<your-key>" --project src/Concierge.AppHost
 ```
 
-`aspire secret` writes to the same store as `dotnet user-secrets --project
-src/Concierge.AppHost`; either works.
-
-Keys under `AI:Chat:*` and `AI:Embeddings:*`:
-
-| Key | Configuration owner | Development value | Notes |
-| --- | --- | --- | --- |
-| `Provider` | AppHost → `Concierge.WorkflowServer` | `Ollama` | `Ollama` or `Foundry` (Azure AI Foundry / Azure OpenAI), case-insensitive. The AppHost stops with an error for any other value. |
-| `Endpoint` | AppHost → `Concierge.WorkflowServer` | `http://127.0.0.1:11434` | Foundry requires HTTPS. |
-| `Model` | AppHost → `Concierge.WorkflowServer` | `concierge-chat` / `embeddinggemma-2:740m` | The Ollama chat model is created from the checked-in Modelfile below. For Foundry, use the deployment name. |
-| `AI:Chat:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | not created | Created only when `AI:Chat:Provider` is `Foundry`, from `Parameters:foundry-chat-api-key`. If unset, Foundry uses `DefaultAzureCredential`; Aspire does not prompt. |
-| `AI:Embeddings:ApiKey` | AppHost parameter → `Concierge.WorkflowServer` | not created | Created only when `AI:Embeddings:Provider` is `Foundry`, from `Parameters:foundry-embeddings-api-key`. If unset, Foundry uses `DefaultAzureCredential`; Aspire does not prompt. |
-| `RequestTimeoutSeconds` | AppHost → `Concierge.WorkflowServer` | `18` (chat) / `8` (embeddings) | Chat: 1–18; embeddings: 1–8. The call, including its concurrency-slot wait, must finish inside the Temporal activity attempt that retries it (20 s model, 10 s retrieval, less a 2 s margin). Options defaults are the maximums. Provisional; see [Step 6 timeouts](docs/step-6-concierge-actions.md#implemented-bounds-timeout-and-retry-policy-2026-10-23). |
-| `AI:Embeddings:IngestionRequestTimeoutSeconds` | AppHost → `Concierge.WorkflowServer` | not set (`60`) | 1–298. Bounds each hotel-setup section embedding inside the 5-minute setup activity attempt. Retrieval keeps `RequestTimeoutSeconds`. |
-| `MaxConcurrentRequests` | AppHost → `Concierge.WorkflowServer` | `2` | Must be positive. Options default `4`. |
-| `AI:Chat:ContextWindowTokens` | AppHost → `Concierge.WorkflowServer` | `32768` | Validates that the configured chat context covers the worst-case prompt budget. Ollama's actual `num_ctx` is set by the derived model's Modelfile. |
-| `AI:Chat:ReasoningEffort` | AppHost → `Concierge.WorkflowServer` | `low` | Responses API effort; accepts `low` or `none`. Both Ollama and Foundry use `low` by default; `none` may be selected explicitly for supported models. |
-| `AI:Embeddings:Dimensions` | AppHost → `Concierge.WorkflowServer` | `768` | Must be `768`. The schema uses `vector(768)`. |
-
-The AppHost's Ollama defaults are in `src/Concierge.AppHost/appsettings.Development.json`.
-The Ollama chat model is a derived model so its context window does not depend on
-per-request options sent through the shared Responses API client. Create it after
-pulling the base model:
+To switch embeddings too:
 
 ```bash
-ollama create concierge-chat -f models/ollama/Modelfile.concierge-chat
+dotnet user-secrets set "AI:Embeddings:Provider" "Foundry" --project src/Concierge.AppHost
+dotnet user-secrets set "AI:Embeddings:Endpoint" "https://<resource>.openai.azure.com/" --project src/Concierge.AppHost
+dotnet user-secrets set "AI:Embeddings:Model" "<embedding-deployment>" --project src/Concierge.AppHost
+dotnet user-secrets set "Parameters:foundry-embeddings-api-key" "<your-key>" --project src/Concierge.AppHost
 ```
 
-The checked-in Modelfile starts from `qwen3.8:27b-mlx` and fixes
-`PARAMETER num_ctx 32768`. Re-run the command if the Modelfile changes. Starting
-the application does not create or modify models in the local Ollama installation.
-To use Foundry for a capability, override its keys in the AppHost
-user-secrets store. For example, for chat:
+The embedding deployment must support **768 dimensions**. If a Foundry API key
+is omitted, the application uses `DefaultAzureCredential` and requires an
+appropriately authorized Azure identity.
+
+## Tests and evaluation
+
+Docker must be running for the integration tests. Run `just` to list all recipes.
 
 ```bash
-aspire secret set "AI:Chat:Provider" "Foundry" --apphost src/Concierge.AppHost
-aspire secret set "AI:Chat:Endpoint" "https://<resource>.openai.azure.com/" --apphost src/Concierge.AppHost
-aspire secret set "AI:Chat:Model" "<deployment>" --apphost src/Concierge.AppHost
-aspire secret set "AI:Chat:RequestTimeoutSeconds" "15" --apphost src/Concierge.AppHost
+just test
+just live-place-weather      # Geoapify/Open-Meteo check; uses the AppHost user-secret key
+just live-concierge-actions  # action checks against the running app
+just eval-validate
+just eval-run                # saves a new result; optional run ID: just eval-run my-run
 ```
 
-Temporal owns model and embedding retries; the SDK clients send each request
-once. On 2026-10-23, Foundry `gpt-5-mini` chat attempts had a 5.2-second P95
-and a 12.9-second slowest success. A 15-second timeout fails a stalled attempt
-so Temporal retries the model activity (3 attempts within the 180-second turn)
-instead of holding the turn. The Development limit (`18`) has not been measured
-against local Ollama; load the model before use rather than raising the limit.
+Browser audio worklet tests use
+`node --test tests/voice-play-worklet.test.mjs` (requires Node.js).
 
-Startup validation rejects a value above the maximum and names the key and
-limit. If an older user secret sets `AI:Embeddings:RequestTimeoutSeconds` above
-`8` (for example `60`), the worker stops at startup; lower or remove it:
+## Troubleshooting and reset
+
+| Problem | Action |
+| --- | --- |
+| Tunnel authentication requested | Run `devtunnel user login`, then retry startup. |
+| HTTPS certificate not trusted | Run `dotnet dev-certs https --trust`. |
+| Hotel location fails at startup | Check the Geoapify key and `Hotel:Address`; inspect WorkflowServer logs in Aspire. |
+| Missing AI endpoint/model | Set both values for the selected provider; Foundry uses deployment names. |
+| Timeout setting rejected | Keep chat at 18 seconds or less and retrieval embeddings at 8 or less. |
+| Demo stays expired or a schema/workflow change requires fresh data | Reset local data using the command below. |
+
+**Reset deletes local Postgres data and Temporal history.** Use it when you want
+a fresh demo, then start the app again:
 
 ```bash
-aspire secret set "AI:Embeddings:RequestTimeoutSeconds" "8" --apphost src/Concierge.AppHost
+just reset
+just run
 ```
 
-With Ollama, the AppHost creates no Foundry parameters, so none appear on the
-dashboard. Ollama does not use `ApiKey` or Azure credentials.
+## Implementation details
 
-Under Aspire, all configured AI settings reach the workflow server as
-environment variables. Change defaults only in the AppHost settings files;
-AppHost user-secrets and environment variables can override them. The
-[retrieval evaluation runner](tests/Concierge.Evaluation/README.md#run-the-comparison)
-loads those same central Development defaults, with environment overrides.
-
-The Deepgram credential belongs to Web. It is optional for the current text-only
-app and defaults to empty so startup does not prompt for it. Browser voice is not
-implemented yet; set the key when that integration is implemented. A configured
-AppHost user-secret overrides the empty default.
-
-| AppHost user-secrets key | Target | Notes |
-| --- | --- | --- |
-| `Parameters:deepgram-api-key` | `Deepgram:ApiKey` in `Concierge.Web` | Optional for text-only use; required when browser voice is implemented. |
-
-The AppHost's base `appsettings.json` selects Foundry, uses `768` embedding
-dimensions, a `32768` chat context window, a `15`-second chat timeout, an
-`8`-second embeddings timeout, and concurrency `4`. Its endpoints and models are deliberately empty: outside `Development`,
-configure `AI:Chat:Endpoint`, `AI:Chat:Model`, `AI:Embeddings:Endpoint`, and
-`AI:Embeddings:Model`. "Missing endpoint or model" means the service URL or
-deployment name has not been supplied, not that the deployed model is missing.
-AppHost stops with an error naming the required key and central settings file;
-it never silently falls back to Ollama. Switching a Development capability to
-Foundry also requires overriding both its endpoint and model. The worker's
-existing validators enforce HTTPS for Foundry, dimensions, and request limits.
-
-### Standalone WorkflowServer
-
-Without Aspire, supply AI settings explicitly through environment variables
-(`AI__Chat__Endpoint`, etc.), command-line configuration, or local configuration.
-The worker does not automatically load AppHost files or AppHost user-secrets.
-For Foundry, set each capability's `Endpoint` and `Model`, plus
-`AI__Embeddings__Dimensions=768`; `Provider` defaults to `Foundry`. Set
-`AI__Chat__ApiKey` / `AI__Embeddings__ApiKey` only for API-key authentication;
-omitting them uses `DefaultAzureCredential`.
-
-For Ollama, also set both `Provider` values to `Ollama`, with the local service
-URL and model names from the table above. Create `concierge-chat` using the
-command above before running the chat workflow. Timeout, concurrency, and
-context window are optional: the options defaults are `18` (chat) / `8`
-(embeddings) seconds, `60` seconds for ingestion embeddings, concurrency `4`,
-and `32768`. To reproduce Aspire Development's request limits, set each
-capability's `MaxConcurrentRequests=2`; the Development timeouts equal the
-defaults.
-Standalone execution also requires the normal database and Temporal connection
-configuration. WorkflowServer has no separate user-secrets store.
-The worker does not load AppHost settings outside Aspire, so standalone
-WorkflowServer must also receive `Geoapify__ApiKey` from secure deployment
-configuration and `Hotel__Address` and `Hotel__TimeZoneId` as configuration
-values.
-
-Other settings:
-
-| Key | Owner | Default | Notes |
-| --- | --- | --- | --- |
-| `Concierge:Persistence:FlushIntervalSeconds` | `Concierge.Web` | `30` | How often transcript turns are written to PostgreSQL. 1–600. It applies to stays started after the change. |
-| `Concierge:Persistence:FlushBatchSize` | `Concierge.Web` | `5` | Completed turns that trigger an early transcript write; whichever of batch size or interval comes first wins. 1–100. It applies to stays started after the change. |
-| `Setup:KnowledgeDirectory` | `Concierge.WorkflowServer` | `knowledge/hotel-zgy` | Markdown folder to ingest at startup. |
-| `Setup:OverwriteExistingSeedRecords` | `Concierge.WorkflowServer` | `false` | Updates existing demo guest and stay records on startup. |
-| `Hotel:Address` | AppHost → `Concierge.WorkflowServer` | `2217 NW Miami Court, Miami, FL 33127` | Real address the fictional Hotel ZGY is pinned to. Required. Geocoded once at WorkflowServer startup (see below) and shown to guests as "Hotel ZGY, <address>". To re-pin the hotel, change this and `Hotel:TimeZoneId` and restart. |
-| `Hotel:TimeZoneId` | AppHost → `Concierge.WorkflowServer`, `Concierge.RideService` | `America/New_York` | Must be a time zone available on the host. Open-Meteo forecasts and today/tonight/tomorrow dates use this hotel-local zone. |
-| `Geoapify:ApiKey` | AppHost secret parameter → `Concierge.WorkflowServer` | no default; required | Set `Parameters:geoapify-api-key` in AppHost user-secrets. The key is passed only to WorkflowServer and is not included in application logs or outbound HTTP traces. |
-
-Hotel coordinates are not configured. After migrations and before Temporal
-workers start, WorkflowServer geocodes `Hotel:Address` with an unbiased,
-US-only Geoapify search and accepts exactly one `building` or `amenity` match
-with confidence ≥ 0.9. The lookup uses the standard Aspire HTTP resilience
-policy (retries on 5xx/429, not on 401/403). If it fails, startup stops with an
-error naming `Hotel:Address` and the reason. Geoapify's own name for the
-address is never shown to guests.
-
-Geoapify place searches use the resolved hotel coordinates as a proximity
-bias. A result is eligible only when it is in the United States and Florida,
-and either belongs to Miami-Dade County or is within 60 km of the hotel; results
-below provider confidence `0.5` are ignored. Geoapify scores "name, street address"
-text without a city (for example "Walgreens, 3103 Biscayne Boulevard") at confidence
-`0` even when it matches. For a `full_match` the building-level confidence is used
-instead, but only when the query itself names that result's venue and its house
-number and street (street abbreviations such as "NW" and "St" are expanded).
-Geoapify documents building-level confidence as building-position accuracy, not
-a venue match ([forward geocoding](https://apidocs.geoapify.com/docs/geocoding/forward-geocoding/)).
-A single eligible match resolves. Geoapify can also return nameless building
-records alongside the named venue for one address, with no shared provider id.
-They merge into one place only when every eligible match has the same house
-number and street, all lie within 75 m, and the query names the identity they
-share: either a venue name that every named record carries (the merged place is
-that venue), or, when the query names no venue, the house number and street (the
-merged place is the address record). Zero matches, or nearby venues and branches
-the query does not identify, return a clarification-needed result rather than
-selecting a potentially wrong place. The Geoapify API key is required at
-WorkflowServer startup, which geocodes the hotel address.
-
-Nearby-place questions ("What is the nearest pharmacy?") use the `FindNearbyPlaces`
-tool. The model picks one category from a fixed list (pharmacy, grocery, restaurant,
-cafe, bar, ATM, hospital, and others); each maps to
-[Geoapify Places categories](https://apidocs.geoapify.com/docs/places/#categories).
-One Geoapify Places request searches within 8 km of the resolved hotel coordinates,
-sorted by proximity to the hotel. The workflow replies with the three closest named
-places, giving addresses and distances in miles. The search always starts at the
-hotel. The tool activity runs once, with a 15-second limit.
-
-Weather requests use Open-Meteo's read-only forecast API without an API key.
-The service requests daily high/low temperature in Fahrenheit and maximum wind
-speed in mph, with the configured hotel time zone. `Today` and `Tonight` select
-the current hotel-local date; `Tomorrow` selects the next hotel-local date.
-For "the next N days" (2–7, "few", "couple", "N-day forecast") the workflow
-ignores the model's chosen periods and fetches one day each, starting today
-(or tomorrow when the guest says "starting", "beginning", or "from tomorrow"), in
-parallel, never past day+6; days 2–6 use workflow-only `day+N` periods and are reported by weekday.
-A weekday start ("starting Friday") uses workflow-only `{weekday}+N` periods that the
-weather activity resolves against the hotel-local date; days past day+6 are reported
-as not yet forecast. Unmapped starts ("starting next Friday") are not rewritten.
-When a place is given, Geoapify must resolve it before Open-Meteo is called;
-without a place, the resolved hotel coordinates are used. Provider HTTP
-requests have a fixed 5-second client timeout; this is code-defined, not an
-application setting.
-
-To configure the required Geoapify secret under Aspire:
-
-```bash
-aspire secret set "Parameters:geoapify-api-key" "<key>" --apphost src/Concierge.AppHost
-```
-
-Never put the key in checked-in configuration or include its value in logs.
-The hotel's base defaults live in
-`src/Concierge.AppHost/appsettings.json`; AppHost configuration overrides may
-use `Hotel__Address` and `Hotel__TimeZoneId`.
-
-Aspire supplies `ConnectionStrings:concierge` to `Concierge.WorkflowServer` and
-Temporal settings to both `Concierge.WorkflowServer` and `Concierge.Web`.
-Temporal defaults to `localhost:7233` for the address. Set these connection
-settings yourself only when running a service outside the AppHost.
-
-## Retrieval evaluation
-
-The Hotel ZGY evaluation package is in
-[tests/Concierge.Evaluation](tests/Concierge.Evaluation).
-
-```bash
-just eval-validate          # validate the package against its schema
-just eval-run               # run the comparison (run id: local-<timestamp>)
-just eval-run my-run-id     # or choose a run id
-```
-
-`eval-run` requires Docker and the Ollama models above. Results go to
-`tests/Concierge.Evaluation/results/`. The runner won't overwrite an existing
-run, so each run needs a new run id.
+- [Stay workflow and conversation memory](src/Concierge.WorkflowServer/Workflows/ConciergeStayWorkflow.cs)
+- [Browser voice integration](src/Concierge.Web/Voice/)
+- [Knowledge-base Markdown](knowledge/hotel-zgy/)
