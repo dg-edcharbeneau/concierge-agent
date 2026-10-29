@@ -448,7 +448,16 @@ public sealed class HomeSessionTests
 
         var elements = harness.RenderedElements();
         var header = elements.First(element => element.Tag == "header");
+        var headerActions = Assert.Single(elements, element =>
+            element.Tag == "div"
+            && Equals(element.Attributes.GetValueOrDefault("class"), "header-actions voice-header-actions"));
+        var controls = Assert.Single(elements, element =>
+            element.Tag == "div"
+            && Equals(element.Attributes.GetValueOrDefault("class"), "voice-header-controls has-voice-mode"));
         var themePicker = Assert.Single(elements, element =>
+            element.Tag == "label"
+            && Equals(element.Attributes.GetValueOrDefault("class"), "theme-picker compact-theme-picker"));
+        var themeSelect = Assert.Single(elements, element =>
             element.Tag == "select"
             && Equals(element.Attributes.GetValueOrDefault("aria-label"), "Color theme"));
         var endChat = Assert.Single(elements, element =>
@@ -459,11 +468,16 @@ public sealed class HomeSessionTests
             && Equals(element.Attributes.GetValueOrDefault("aria-label"), "End voice"));
         Assert.True(endVoice.Index < endChat.Index);
         Assert.Equal(endChat.Index, endVoice.EndIndex);
-        Assert.True(themePicker.Index > endChat.EndIndex && themePicker.Index < header.EndIndex);
-        Assert.False(themePicker.Attributes.ContainsKey("disabled"));
+        Assert.Equal(header.Index, headerActions.ParentIndex);
+        Assert.Equal(headerActions.Index, controls.ParentIndex);
+        Assert.Equal(controls.Index, endVoice.ParentIndex);
+        Assert.Equal(controls.Index, endChat.ParentIndex);
+        Assert.Equal(controls.Index, themePicker.ParentIndex);
+        Assert.True(themePicker.Index > endChat.Index);
+        Assert.Equal(themePicker.Index, themeSelect.ParentIndex);
+        Assert.False(themeSelect.Attributes.ContainsKey("disabled"));
         var options = elements
-            .Where(element => element.Tag == "option"
-                && element.Index > themePicker.Index && element.Index < themePicker.EndIndex)
+            .Where(element => element.Tag == "option" && element.ParentIndex == themeSelect.Index)
             .Select(element => element.Attributes.GetValueOrDefault("value"));
         Assert.Equal(["system", "light", "dark"], options);
     }
@@ -924,6 +938,7 @@ public sealed class HomeSessionTests
         public List<RenderedElement> RenderedElements()
         {
             var frames = renderer.Frames(componentId);
+            var parentIndices = renderer.ElementParentIndices(componentId);
             var elements = new List<RenderedElement>();
             for (var index = 0; index < frames.Count; index++)
             {
@@ -943,7 +958,7 @@ public sealed class HomeSessionTests
                     var attribute = frames[attributeIndex];
                     attributes[attribute.AttributeName] = attribute.AttributeValue;
                 }
-                elements.Add(new RenderedElement(frame.ElementName, attributes, index, endIndex));
+                elements.Add(new RenderedElement(frame.ElementName, attributes, index, endIndex, parentIndices[index]));
             }
 
             return elements;
@@ -960,7 +975,8 @@ public sealed class HomeSessionTests
             string Tag,
             Dictionary<string, object> Attributes,
             int Index,
-            int EndIndex);
+            int EndIndex,
+            int? ParentIndex);
 
         /// <summary>Sets private component state without adding production test surfaces.</summary>
         public void Set(string name, object value)
@@ -1062,6 +1078,43 @@ public sealed class HomeSessionTests
                 if (frame.FrameType == RenderTreeFrameType.Component) frames.AddRange(Frames(frame.ComponentId));
             }
             return frames;
+        }
+        public Dictionary<int, int?> ElementParentIndices(int componentId)
+        {
+            var parentIndices = new Dictionary<int, int?>();
+            var flattenedIndex = 0;
+            Append(componentId, null);
+            return parentIndices;
+
+            void Append(int id, int? parentIndex)
+            {
+                var current = GetCurrentRenderTreeFrames(id);
+                AppendRange(current.Array, 0, current.Count, parentIndex);
+            }
+
+            void AppendRange(RenderTreeFrame[] frames, int start, int end, int? parentIndex)
+            {
+                for (var index = start; index < end;)
+                {
+                    var frame = frames[index];
+                    var renderIndex = flattenedIndex++;
+                    if (frame.FrameType == RenderTreeFrameType.Element)
+                    {
+                        parentIndices.Add(renderIndex, parentIndex);
+                        var subtreeEnd = index + frame.ElementSubtreeLength;
+                        AppendRange(frames, index + 1, subtreeEnd, renderIndex);
+                        index = subtreeEnd;
+                        continue;
+                    }
+
+                    if (frame.FrameType == RenderTreeFrameType.Component)
+                    {
+                        Append(frame.ComponentId, parentIndex);
+                    }
+
+                    index++;
+                }
+            }
         }
         protected override void HandleException(Exception exception) => throw exception;
         protected override Task UpdateDisplayAsync(in RenderBatch renderBatch) => Task.FromCanceled(new CancellationToken(true));
