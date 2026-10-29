@@ -1,0 +1,20 @@
+<label class="theme-picker compact-theme-picker">
+    <span class="visually-hidden">Theme</span>
+    <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5l1.5 1.5M5 19l1.5-1.5M17.5 6.5 19 5" />
+    </svg>
+    <select aria-label="Color theme" value="@Theme" @onchange="ThemeChanged">
+        <option value="system">System</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+    </select>
+</label>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Theme { get; set; } = "system";
+
+    [Parameter, EditorRequired]
+    public EventCallback<ChangeEventArgs> ThemeChanged { get; set; }
+}

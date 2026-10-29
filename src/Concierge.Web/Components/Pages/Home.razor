@@ -7,72 +7,81 @@
 <div class="page-shell" @onkeydown="HandlePageKeyDown">
     @if (showEndConfirmation || chatEnded)
     {
-        <main class="end-flow-main">
-            <section class="end-flow-shell">
-                <header class="end-flow-header">
-                    <a class="hotel-brand" href="/" aria-label="Hotel ZGY Miami">
-                        <strong>Hotel ZGY</strong><span>/ Miami</span>
-                    </a>
-                    <label class="theme-picker compact-theme-picker">
-                        <span class="visually-hidden">Theme</span>
-                        <select aria-label="Color theme" value="@theme" @onchange="ChangeThemeAsync">
-                            <option value="system">System</option>
-                            <option value="light">Light</option>
-                            <option value="dark">Dark</option>
-                        </select>
-                    </label>
-                </header>
-                <section class="end-state-card" role="@(showEndConfirmation ? "alertdialog" : "status")"
-                         aria-modal="@(showEndConfirmation ? "true" : null)"
-                         aria-labelledby="end-state-title" aria-describedby="end-state-description">
-                    <span class="wave-icon end-wave-icon" aria-hidden="true">
-                        <svg viewBox="0 0 32 24" focusable="false">
-                            <path d="M2 9c4.7 0 4.7-5 9.3-5s4.7 5 9.4 5S25.4 4 30 4M2 18c4.7 0 4.7-5 9.3-5s4.7 5 9.4 5 4.7-5 9.3-5" />
-                        </svg>
-                    </span>
-                    <h1 id="end-state-title">@(chatEnded ? "Chat ended" : "End this chat?")</h1>
-                    <p id="end-state-description">
-                        @(chatEnded
-                            ? "Your stay conversation history has not been deleted. Verify your stay again to resume while eligible."
-                            : "This ends your current interaction, not your stay conversation history. You can verify your stay again to resume while eligible.")
-                    </p>
+        <FocusPage Theme="@theme" ThemeChanged="ChangeThemeAsync">
+            <FocusCard Modifier="focus-card-end"
+                       TitleId="end-state-title"
+                       Title="@(chatEnded
+                           ? "Chat ended"
+                           : "End this chat?")"
+                       DescriptionId="end-state-description"
+                       Description="@(chatEnded
+                           ? "Your stay conversation history has not been deleted. Verify your stay again to resume while eligible."
+                           : "This ends your current interaction, not your stay conversation history. You can verify your stay again to resume while eligible.")"
+                       role="@(showEndConfirmation ? "alertdialog" : "status")"
+                       aria-modal="@(showEndConfirmation ? "true" : null)"
+                       aria-labelledby="end-state-title"
+                       aria-describedby="end-state-description">
+                @if (showEndConfirmation && !string.IsNullOrWhiteSpace(endError))
+                {
+                    <div class="inline-error end-error" role="alert">
+                        <span class="error-symbol" aria-hidden="true">!</span>
+                        <span>@endError</span>
+                    </div>
+                }
 
-                    @if (showEndConfirmation && !string.IsNullOrWhiteSpace(endError))
-                    {
-                        <div class="inline-error end-error" role="alert">
-                            <span class="error-symbol" aria-hidden="true">!</span>
-                            <span>@endError</span>
-                        </div>
-                    }
-
-                    @if (chatEnded)
-                    {
-                        <button class="primary-button end-flow-primary" type="button" @onclick="VerifyStayAgain">
-                            Verify stay again
-                        </button>
-                    }
-                    else
-                    {
-                        <button class="primary-button end-flow-primary" type="button"
-                                @onclick="EndInteractionAsync" disabled="@isEnding">
-                            @(isEnding ? "Ending…" : "End chat")
-                        </button>
-                        <button class="secondary-button end-flow-secondary" type="button"
-                                @onclick="CancelEndChat" disabled="@isEnding">
-                            Keep chatting
-                        </button>
-                    }
-                </section>
-            </section>
-        </main>
+                @if (chatEnded)
+                {
+                    <button class="primary-button focus-card-action" type="button" @onclick="VerifyStayAgain">
+                        Verify stay again
+                    </button>
+                }
+                else
+                {
+                    <button class="primary-button focus-card-action" type="button"
+                            @onclick="EndInteractionAsync" disabled="@isEnding">
+                        @(isEnding ? "Ending…" : "End chat")
+                    </button>
+                    <button class="secondary-button focus-card-action focus-card-secondary-action" type="button"
+                            @onclick="CancelEndChat" disabled="@isEnding">
+                        Keep chatting
+                    </button>
+                }
+            </FocusCard>
+        </FocusPage>
+    }
+    else if (ready && session?.Credential is null)
+    {
+        <FocusPage Theme="@theme" ThemeChanged="ChangeThemeAsync">
+            <FocusCard TitleId="verify-title"
+                       Title="Verify your stay"
+                       Description="Enter your last name and room number to continue."
+                       aria-labelledby="verify-title">
+                @if (!string.IsNullOrWhiteSpace(verificationError))
+                {
+                    <div class="inline-error verification-error" role="alert">
+                        <span class="error-symbol" aria-hidden="true">!</span>
+                        <span>@verificationError</span>
+                    </div>
+                }
+                <form class="verification-form" @onsubmit="VerifyAsync" @onsubmit:preventDefault>
+                    <label for="last-name">Last name</label>
+                    <input id="last-name" type="text" placeholder="Last name"
+                           autocomplete="family-name" maxlength="@(global::Concierge.Contracts.ConciergeVerifiedGuest.MaxNameLength)" @bind="lastName" />
+                    <label for="room-number">Room number</label>
+                    <input id="room-number" type="text" placeholder="Room number"
+                           inputmode="numeric" autocomplete="off" maxlength="4" @bind="roomNumber" />
+                    <p class="field-hint">Enter the room number exactly as provided.</p>
+                    <button class="primary-button focus-card-action" type="submit" disabled="@isVerifying">
+                        @(isVerifying ? "Verifying…" : "Verify and continue")
+                    </button>
+                </form>
+            </FocusCard>
+        </FocusPage>
     }
     else
     {
-        <header class="site-header @(session?.Credential is not null ? "voice-site-header" : "")">
-            <a class="hotel-brand" href="/" aria-label="Hotel ZGY Miami">
-                <strong>Hotel ZGY</strong><span>/ Miami</span>
-            </a>
-            <div class="header-actions voice-header-actions">
+        <SiteHeader VoiceChrome="@(session?.Credential is not null)">
+            <Actions>
                 @if (voiceMode)
                 {
                     <div class="voice-status voice-@voiceState @(voiceMuted ? "is-muted" : "")"
@@ -167,57 +176,15 @@
                             <span>End chat</span>
                         </button>
                     }
-                    <label class="theme-picker compact-theme-picker">
-                        <span class="visually-hidden">Theme</span>
-                        <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <circle cx="12" cy="12" r="4" />
-                            <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5l1.5 1.5M5 19l1.5-1.5M17.5 6.5 19 5" />
-                        </svg>
-                        <select aria-label="Color theme" value="@theme" @onchange="ChangeThemeAsync">
-                            <option value="system">System</option>
-                            <option value="light">Light</option>
-                            <option value="dark">Dark</option>
-                        </select>
-                    </label>
+                    <ThemePicker Theme="@theme" ThemeChanged="ChangeThemeAsync" />
                 </div>
-            </div>
-        </header>
+            </Actions>
+        </SiteHeader>
 
-        <main class="main-content @(ready && session?.Credential is null ? "verification-main" : "") @(activityOpen ? "activity-main-content" : "")">
+        <main class="main-content @(ready && session?.Credential is null ? "focus-main" : "") @(activityOpen ? "activity-main-content" : "")">
             @if (!ready)
             {
                 <div class="startup-message" role="status">Preparing your chat…</div>
-            }
-            else if (session?.Credential is null)
-            {
-                <section class="verification-card" aria-labelledby="verify-title">
-                    <span class="wave-icon verification-wave-icon" aria-hidden="true">
-                        <svg viewBox="0 0 32 24" focusable="false">
-                            <path d="M2 9c4.7 0 4.7-5 9.3-5s4.7 5 9.4 5S25.4 4 30 4M2 18c4.7 0 4.7-5 9.3-5s4.7 5 9.4 5 4.7-5 9.3-5" />
-                        </svg>
-                    </span>
-                    <h1 id="verify-title">Verify your stay</h1>
-                    <p class="verification-intro">Enter your last name and room number to continue.</p>
-                    @if (!string.IsNullOrWhiteSpace(verificationError))
-                    {
-                        <div class="inline-error verification-error" role="alert">
-                            <span class="error-symbol" aria-hidden="true">!</span>
-                            <span>@verificationError</span>
-                        </div>
-                    }
-                    <form class="verification-form" @onsubmit="VerifyAsync" @onsubmit:preventDefault>
-                        <label for="last-name">Last name</label>
-                        <input id="last-name" type="text" placeholder="Last name"
-                               autocomplete="family-name" maxlength="@(global::Concierge.Contracts.ConciergeVerifiedGuest.MaxNameLength)" @bind="lastName" />
-                        <label for="room-number">Room number</label>
-                        <input id="room-number" type="text" placeholder="Room number"
-                               inputmode="numeric" autocomplete="off" maxlength="4" @bind="roomNumber" />
-                        <p class="field-hint">Enter the room number exactly as provided.</p>
-                        <button class="primary-button verify-button" type="submit" disabled="@isVerifying">
-                            @(isVerifying ? "Verifying…" : "Verify and continue")
-                        </button>
-                    </form>
-                </section>
             }
             else
             {

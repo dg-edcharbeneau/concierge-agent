@@ -1,0 +1,30 @@
+@*
+    Shared page template for stay verification and end-of-chat states.
+    Keeping the header controls and focus area together prevents the two
+    focused views from drifting apart.
+*@
+<SiteHeader>
+    <Actions>
+        <div class="voice-header-controls" role="group" aria-label="Chat controls">
+            <ThemePicker Theme="@Theme" ThemeChanged="ThemeChanged" />
+        </div>
+    </Actions>
+</SiteHeader>
+
+<main class="main-content focus-main">
+    @ChildContent
+</main>
+
+@code {
+    /// <summary>The selected light, dark, or system theme.</summary>
+    [Parameter, EditorRequired]
+    public string Theme { get; set; } = "system";
+
+    /// <summary>Persists a selection from the shared focus-page theme picker.</summary>
+    [Parameter, EditorRequired]
+    public EventCallback<ChangeEventArgs> ThemeChanged { get; set; }
+
+    /// <summary>Page-specific focus card.</summary>
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+}

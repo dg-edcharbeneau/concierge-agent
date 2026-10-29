@@ -482,6 +482,112 @@ public sealed class HomeSessionTests
         Assert.Equal(["system", "light", "dark"], options);
     }
 
+    [Fact]
+    public async Task VerificationAndEndedViewsShareFocusedPageChrome()
+    {
+        await using var verificationHarness = new Harness();
+        await verificationHarness.Call("StateHasChanged");
+
+        var verificationElements = verificationHarness.RenderedElements();
+        var verificationHeader = Assert.Single(verificationElements, element => element.Tag == "header");
+        var verificationControls = Assert.Single(verificationElements, element =>
+            element.Tag == "div"
+            && element.Index > verificationHeader.Index && element.Index < verificationHeader.EndIndex
+            && Equals(element.Attributes.GetValueOrDefault("class"), "voice-header-controls"));
+        var verificationPicker = Assert.Single(verificationElements, element =>
+            element.Tag == "label"
+            && element.Index > verificationControls.Index && element.Index < verificationControls.EndIndex
+            && Equals(element.Attributes.GetValueOrDefault("class"), "theme-picker compact-theme-picker"));
+        var verificationSelect = Assert.Single(verificationElements, element =>
+            element.Tag == "select"
+            && element.Index > verificationPicker.Index && element.Index < verificationPicker.EndIndex);
+        var verificationMain = Assert.Single(verificationElements, element =>
+            element.Tag == "main" && Equals(element.Attributes.GetValueOrDefault("class"), "main-content focus-main"));
+
+        Assert.Equal("site-header", verificationHeader.Attributes.GetValueOrDefault("class"));
+        Assert.Equal("Chat controls", verificationControls.Attributes.GetValueOrDefault("aria-label"));
+        Assert.Equal("Color theme", verificationSelect.Attributes.GetValueOrDefault("aria-label"));
+        Assert.Contains("Verify your stay", string.Concat(verificationHarness.RenderedContent().Text));
+        Assert.Contains("Verify and continue", string.Concat(verificationHarness.RenderedContent().Text));
+        Assert.Contains(verificationHarness.RenderedContent().Markup, markup =>
+            markup.Contains("class=\"theme-icon\"", StringComparison.Ordinal));
+        Assert.Equal(
+            ["system", "light", "dark"],
+            verificationElements
+                .Where(element => element.Tag == "option"
+                    && element.Index > verificationSelect.Index && element.Index < verificationSelect.EndIndex)
+                .Select(element => element.Attributes.GetValueOrDefault("value")));
+
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        harness.Set("draft", "Save my draft.");
+        await harness.Call("EndChatAsync");
+        await harness.Call("StateHasChanged");
+
+        var confirmationElements = harness.RenderedElements();
+        var confirmation = Assert.Single(confirmationElements, element =>
+            element.Tag == "section" && Equals(element.Attributes.GetValueOrDefault("role"), "alertdialog"));
+        Assert.Equal("true", confirmation.Attributes.GetValueOrDefault("aria-modal"));
+        var (confirmationText, confirmationMarkup) = harness.RenderedContent();
+        var confirmationContent = string.Concat(confirmationText.Concat(confirmationMarkup));
+        Assert.Contains("End this chat?", confirmationContent);
+        Assert.Contains("Keep chatting", confirmationContent);
+
+        harness.Service.End = _ => throw new ConciergeApiException("unavailable", "Try again.", 503);
+        await harness.Call("EndInteractionAsync");
+        await harness.Call("StateHasChanged");
+        var failedEndElements = harness.RenderedElements();
+        Assert.Contains(failedEndElements, element =>
+            element.Tag == "section"
+            && Equals(element.Attributes.GetValueOrDefault("role"), "alertdialog")
+            && Equals(element.Attributes.GetValueOrDefault("aria-modal"), "true"));
+        Assert.Contains(failedEndElements, element =>
+            element.Tag == "div" && Equals(element.Attributes.GetValueOrDefault("role"), "alert"));
+        Assert.Equal("Try again.", harness.Get<string>("endError"));
+
+        harness.Service.End = _ => Task.CompletedTask;
+        await harness.Call("EndInteractionAsync");
+        await harness.Call("StateHasChanged");
+
+        var elements = harness.RenderedElements();
+        var header = Assert.Single(elements, element => element.Tag == "header");
+        var controls = Assert.Single(elements, element =>
+            element.Tag == "div"
+            && element.Index > header.Index && element.Index < header.EndIndex
+            && Equals(element.Attributes.GetValueOrDefault("class"), "voice-header-controls"));
+        var picker = Assert.Single(elements, element =>
+            element.Tag == "label"
+            && element.Index > controls.Index && element.Index < controls.EndIndex
+            && Equals(element.Attributes.GetValueOrDefault("class"), "theme-picker compact-theme-picker"));
+        var select = Assert.Single(elements, element =>
+            element.Tag == "select"
+            && element.Index > picker.Index && element.Index < picker.EndIndex);
+        var main = Assert.Single(elements, element =>
+            element.Tag == "main" && Equals(element.Attributes.GetValueOrDefault("class"), "main-content focus-main"));
+
+        Assert.Equal(verificationHeader.Attributes.GetValueOrDefault("class"), header.Attributes.GetValueOrDefault("class"));
+        Assert.Equal(verificationControls.Attributes.GetValueOrDefault("class"), controls.Attributes.GetValueOrDefault("class"));
+        Assert.Equal(verificationControls.Attributes.GetValueOrDefault("aria-label"), controls.Attributes.GetValueOrDefault("aria-label"));
+        Assert.Equal(verificationPicker.Attributes.GetValueOrDefault("class"), picker.Attributes.GetValueOrDefault("class"));
+        Assert.Equal("Color theme", select.Attributes.GetValueOrDefault("aria-label"));
+        Assert.False(select.Attributes.ContainsKey("disabled"));
+        Assert.Equal(verificationMain.Attributes.GetValueOrDefault("class"), main.Attributes.GetValueOrDefault("class"));
+        Assert.Contains("Chat ended", string.Concat(harness.RenderedContent().Text));
+        Assert.Single(elements, element =>
+            element.Tag == "button"
+            && Equals(element.Attributes.GetValueOrDefault("class"), "primary-button focus-card-action"));
+        Assert.Contains(harness.RenderedContent().Markup, markup =>
+            markup.Contains("Verify stay again", StringComparison.Ordinal));
+        Assert.Contains(harness.RenderedContent().Markup, markup =>
+            markup.Contains("class=\"theme-icon\"", StringComparison.Ordinal));
+        Assert.Equal(
+            ["system", "light", "dark"],
+            elements
+                .Where(element => element.Tag == "option"
+                    && element.Index > select.Index && element.Index < select.EndIndex)
+                .Select(element => element.Attributes.GetValueOrDefault("value")));
+    }
+
     [Theory]
     [InlineData("paused", "Resume voice")]
     [InlineData("disconnected", "Reconnect voice")]

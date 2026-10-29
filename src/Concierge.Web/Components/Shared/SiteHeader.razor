@@ -1,0 +1,22 @@
+@*
+    The page header shared by the verification, chat, and end-of-chat views:
+    the hotel brand on the left and caller-supplied actions on the right.
+*@
+<header class="@(VoiceChrome ? "site-header voice-site-header" : "site-header")">
+    <a class="hotel-brand" href="/" aria-label="Hotel ZGY Miami">
+        <strong>Hotel ZGY</strong><span>/ Miami</span>
+    </a>
+    <div class="header-actions voice-header-actions">
+        @Actions
+    </div>
+</header>
+
+@code {
+    /// <summary>Applies the compact voice-chat header chrome.</summary>
+    [Parameter]
+    public bool VoiceChrome { get; set; }
+
+    /// <summary>Right-hand header actions, such as the chat controls and theme picker.</summary>
+    [Parameter]
+    public RenderFragment? Actions { get; set; }
+}
