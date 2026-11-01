@@ -47,6 +47,7 @@ internal sealed class VoiceRelay(
     private const int MaxAgentMessageBytes = 256 * 1024;
     private const int AgentQueueCapacity = MicQueueFrames + 1; // One reserved slot for FunctionCallResponse.
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan IdleWarningLead = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan CloseBound = TimeSpan.FromSeconds(3);
     private static readonly byte[] KeepAliveMessage = """{"type":"KeepAlive"}"""u8.ToArray();
     private readonly Channel<AgentOutbound> toAgent = Channel.CreateBounded<AgentOutbound>(
@@ -72,6 +73,7 @@ internal sealed class VoiceRelay(
     private bool farewellResponseStarted;
     private bool farewellAudioDone;
     private bool endChatAfterPlaybackRequested;
+    private bool idleWarningActive;
 
     internal bool EndChatFlowRequested => Volatile.Read(ref endChatRequested) != 0;
 
@@ -269,20 +271,44 @@ internal sealed class VoiceRelay(
 
     internal void CheckEndChatTimers()
     {
-        var now = clock.GetUtcNow();
-        if (!connection.HasEndChatResult && connection.IsIdle(idleLimit))
+        lock (endChatRequestGate)
         {
-            RequestEndChat(afterPlayback: false, "idle_timeout");
+            if (stopping.IsCancellationRequested || connection.Revoked.IsCancellationRequested)
+            {
+                return;
+            }
+
+            var now = clock.GetUtcNow();
+            if (!connection.HasEndChatResult && connection.IsIdle(idleLimit))
+            {
+                RequestEndChat(afterPlayback: false, "idle_timeout");
+            }
+
+            // Use the same speech clock and reply eligibility as the actual timeout, not mic traffic.
+            SetIdleWarning(endChatRequested == 0
+                && !connection.HasEndChatResult
+                && connection.IsIdle(idleLimit - IdleWarningLead));
+
+            if (connection.EndChatResultReceivedAtUtc is { } resultAt
+                && now - resultAt >= TimeSpan.FromSeconds(15))
+            {
+                // Do not cut off queued farewell audio if Deepgram omits its normal completion events.
+                RequestEndChat(afterPlayback: true, "farewell_fallback");
+            }
+        }
+    }
+
+    // Called under endChatRequestGate so speech cannot be followed by a stale timer warning.
+    private void SetIdleWarning(bool active)
+    {
+        if (idleWarningActive == active)
+        {
+            return;
         }
 
-        if (connection.EndChatResultReceivedAtUtc is { } resultAt
-            && now - resultAt >= TimeSpan.FromSeconds(15))
-        {
-            // Deepgram normally emits ConversationText and AgentAudioDone for the farewell.
-            // If it does not, ask the browser to end after playback drains (or immediately
-            // when there is no active playback) rather than cutting off queued farewell audio.
-            RequestEndChat(afterPlayback: true, "farewell_fallback");
-        }
+        idleWarningActive = active;
+        toBrowser.ForceEnqueue(new PlaybackItem(true, JsonSerializer.SerializeToUtf8Bytes(
+            new { type = "IdleWarning", active })));
     }
 
     private async Task ReadAgentAsync(ClientWebSocket agent)
@@ -404,6 +430,7 @@ internal sealed class VoiceRelay(
                     // New speech supersedes any reply left in progress by the previous utterance
                     // (including one carried across a voice reconnect).
                     connection.RecordReplyCompleted();
+                    SetIdleWarning(false);
                     farewellCancelled = connection.CancelPendingEndChatFarewell();
                     if (farewellCancelled)
                     {
@@ -437,6 +464,7 @@ internal sealed class VoiceRelay(
                 lock (endChatRequestGate)
                 {
                     connection.RecordSpeech();
+                    SetIdleWarning(false);
                     if (connection.CancelPendingEndChatFarewell())
                     {
                         VoiceTelemetry.RecordEndChat(logger, "cancelled", connection, "user_speech");
@@ -614,9 +642,10 @@ internal sealed class VoiceRelay(
 
             endChatRequested = 1;
             endChatAfterPlaybackRequested = afterPlayback;
+            SetIdleWarning(false);
             VoiceTelemetry.RecordEndChat(logger, "requested", connection, reason);
             toBrowser.ForceEnqueue(new PlaybackItem(true, JsonSerializer.SerializeToUtf8Bytes(
-                new { type = afterPlayback ? "EndChatAfterPlayback" : "EndChatRequested" }),
+                new { type = afterPlayback ? "EndChatAfterPlayback" : "EndChatRequested", reason }),
                 reason, connection.EndChatCallId));
         }
     }

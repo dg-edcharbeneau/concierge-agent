@@ -11,7 +11,7 @@
             <FocusCard Modifier="focus-card-end"
                        TitleId="end-state-title"
                        Title="@(chatEnded
-                           ? "Chat ended"
+                           ? (chatEndedForInactivity ? "Chat ended due to inactivity" : "Chat ended")
                            : "End this chat?")"
                        DescriptionId="end-state-description"
                        Description="@(chatEnded
@@ -90,7 +90,7 @@
                         <strong>@(voiceMuted ? "Muted" : VoiceStateLabel)</strong>
                     </div>
                 }
-                <div class="voice-header-controls @(voiceMode ? "has-voice-mode" : "")" role="group" aria-label="Chat controls">
+                <div class="@HeaderControlsClass" role="group" aria-label="Chat controls">
                     @if (session?.Credential is not null && !hasExpired)
                     {
                         <button class="voice-control-button activity-button" type="button"
@@ -304,6 +304,28 @@
                             <div>
                                 <strong>We couldn’t end the chat.</strong>
                                 <p>@endError</p>
+                            </div>
+                        </div>
+                    }
+
+                    @if (voiceMode && (voiceIdleWarning || voiceEndReason == "idle_timeout"))
+                    {
+                        <div class="session-expired" role="status" aria-live="polite" aria-atomic="true">
+                            <span class="expired-icon" aria-hidden="true">!</span>
+                            <div class="expired-copy">
+                                @if (voiceIdleWarning)
+                                {
+                                    <strong>Chat ending soon</strong>
+                                    <span>This chat will end within 30 seconds due to inactivity.</span>
+                                    <small>@(voiceState == "paused" ? "Resume voice and speak to continue."
+                                        : voiceMuted ? "Unmute your microphone and speak to continue."
+                                        : "Speak to continue.")</small>
+                                }
+                                else
+                                {
+                                    <strong>Voice stopped after inactivity</strong>
+                                    <span>@(isEnding ? "Ending this chat…" : "Reconnect voice to speak again, or continue with text.")</span>
+                                }
                             </div>
                         </div>
                     }

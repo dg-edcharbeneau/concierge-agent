@@ -143,6 +143,26 @@ public sealed class VoiceSessionRegistry(
         return subscription;
     }
 
+    public IDisposable SubscribeTurns(Guid voiceSessionId, Action<VoiceTurnProgress> onTurn)
+    {
+        ArgumentNullException.ThrowIfNull(onTurn);
+        return sessions.TryGetValue(voiceSessionId, out var session)
+            ? session.SubscribeTurns(progress =>
+            {
+                try
+                {
+                    onTurn(progress);
+                }
+                catch (Exception exception)
+                {
+                    // Presentation failures must not fail admitted Temporal work.
+                    logger?.LogWarning(exception,
+                        "Voice transcript subscriber failed for session {VoiceSessionId}.", voiceSessionId);
+                }
+            })
+            : ClosedSubscription.None;
+    }
+
     /// <summary>
     /// Revokes every voice bearer of a chat session and forgets its voice sessions. Admitted turns
     /// keep running; only new Think requests are refused.
@@ -280,6 +300,8 @@ public sealed class VoiceSessionRegistry(
 public sealed class VoiceSession
 {
     private readonly Dictionary<string, Task<ConciergeTurnResult>> inFlight = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, VoiceTurnProgress> pendingTranscripts = new(StringComparer.Ordinal);
+    private event Action<VoiceTurnProgress>? TurnProgress;
     private readonly LinkedList<ReplyRegistration> repliesAwaitingPlayback = [];
     private readonly HashSet<string> playbackTurnIds = new(StringComparer.Ordinal);
     private readonly HashSet<int> playbackInterruptions = [];
@@ -501,7 +523,10 @@ public sealed class VoiceSession
     /// Joins the in-flight turn with <paramref name="turnId"/> or starts it with <paramref name="submit"/>.
     /// Deepgram can retry a Think call with the same history, so one ID must not submit twice.
     /// </summary>
-    public Task<ConciergeTurnResult> JoinOrStart(string turnId, Func<Task<ConciergeTurnResult>> submit)
+    public Task<ConciergeTurnResult> JoinOrStart(
+        string turnId,
+        Func<Task<ConciergeTurnResult>> submit,
+        string? userMessage = null)
     {
         ArgumentNullException.ThrowIfNull(submit);
         lock (Gate)
@@ -511,26 +536,75 @@ public sealed class VoiceSession
                 return running;
             }
 
-            var task = RunAsync(turnId, submit);
+            var task = RunAsync(turnId, submit, userMessage);
             inFlight[turnId] = task;
             return task;
         }
     }
 
-    private async Task<ConciergeTurnResult> RunAsync(string turnId, Func<Task<ConciergeTurnResult>> submit)
+    private async Task<ConciergeTurnResult> RunAsync(
+        string turnId, Func<Task<ConciergeTurnResult>> submit, string? userMessage)
     {
         // Yielding keeps submission work out of the caller's lock and guarantees the entry is
         // registered before the finally block can remove it.
         await Task.Yield();
         try
         {
-            return await submit();
+            var task = submit();
+            if (userMessage is not null)
+            {
+                NotifyTurn(new VoiceTurnProgress(turnId, userMessage, DateTimeOffset.UtcNow));
+            }
+            return await task;
         }
         finally
         {
+            VoiceTurnProgress? finished;
             lock (Gate)
             {
                 inFlight.Remove(turnId);
+                pendingTranscripts.Remove(turnId, out finished);
+            }
+            if (finished is not null)
+            {
+                NotifyTurn(finished with { Finished = true });
+            }
+        }
+    }
+
+    // Only authenticated Think requests enter here. These are pending presentation state,
+    // not persisted transcript turns; history remains the authority for completed replies.
+    private void NotifyTurn(VoiceTurnProgress progress)
+    {
+        Action<VoiceTurnProgress>? notify;
+        lock (Gate)
+        {
+            if (!progress.Finished) pendingTranscripts[progress.TurnId] = progress;
+            notify = TurnProgress;
+        }
+        notify?.Invoke(progress);
+    }
+
+    internal IDisposable SubscribeTurns(Action<VoiceTurnProgress> onTurn)
+    {
+        lock (Gate)
+        {
+            TurnProgress += onTurn;
+            // Queue the snapshot before a concurrent completion can notify this subscriber.
+            foreach (var progress in pendingTranscripts.Values) onTurn(progress);
+        }
+        return new TurnSubscription(this, onTurn);
+    }
+
+    private sealed class TurnSubscription(VoiceSession session, Action<VoiceTurnProgress> callback) : IDisposable
+    {
+        private Action<VoiceTurnProgress>? handler = callback;
+        public void Dispose()
+        {
+            lock (session.Gate)
+            {
+                if (handler is not null) session.TurnProgress -= handler;
+                handler = null;
             }
         }
     }
@@ -543,13 +617,19 @@ public sealed class VoiceSession
     }
 }
 
+public sealed record VoiceTurnProgress(
+    string TurnId, string UserMessage, DateTimeOffset SubmittedAtUtc, bool Finished = false);
+
 /// <summary>One Deepgram connection: its Think bearer, number, and revocation signal.</summary>
 public sealed class VoiceConnection
 {
     private readonly CancellationTokenSource revocation;
     private readonly TimeProvider timeProvider;
     private readonly object endChatGate = new();
+    private readonly Dictionary<string, string> endChatTurns = new(StringComparer.Ordinal);
+    private readonly HashSet<string> supersededEndChatTurns = new(StringComparer.Ordinal);
     private string? endChatCallId;
+    private string? endChatTurnId;
     private bool endChatConfirmed;
     private bool endChatCancelled;
     private bool endChatResultReceived;
@@ -617,7 +697,37 @@ public sealed class VoiceConnection
         }
     }
 
-    internal bool RegisterEndChatCall(string callId)
+    internal void AdmitEndChatTurn(string turnId, string userMessage)
+    {
+        var identity = VoiceUtterance.FromTurnId(turnId, userMessage);
+        if (identity is null || identity.SessionId != Session.Id || identity.Connection != Number)
+        {
+            throw new ArgumentException("Use this connection's server-generated voice turn ID.", nameof(turnId));
+        }
+
+        lock (endChatGate)
+        {
+            // An exact retry of superseded text must never reactivate its callback authority.
+            if (supersededEndChatTurns.Contains(turnId))
+            {
+                return;
+            }
+
+            if (endChatTurns.TryGetValue(identity.Family, out var previous)
+                && !StringComparer.Ordinal.Equals(previous, turnId))
+            {
+                supersededEndChatTurns.Add(previous);
+                if (StringComparer.Ordinal.Equals(endChatTurnId, previous))
+                {
+                    CancelEndChatCall(endChatCallId!);
+                }
+            }
+
+            endChatTurns[identity.Family] = turnId;
+        }
+    }
+
+    internal bool RegisterEndChatCall(string callId, string turnId)
     {
         if (string.IsNullOrWhiteSpace(callId))
         {
@@ -626,11 +736,18 @@ public sealed class VoiceConnection
 
         lock (endChatGate)
         {
+            // Admission and registration share the gate: an old model completion cannot race
+            // a revision and restore an already revoked call.
+            if (!endChatTurns.ContainsValue(turnId))
+            {
+                return false;
+            }
+
             if (endChatCallId is not null)
             {
                 if (StringComparer.Ordinal.Equals(endChatCallId, callId))
                 {
-                    return !endChatCancelled;
+                    return !endChatCancelled && StringComparer.Ordinal.Equals(endChatTurnId, turnId);
                 }
 
                 if (!endChatCancelled)
@@ -640,6 +757,7 @@ public sealed class VoiceConnection
             }
 
             endChatCallId = callId;
+            endChatTurnId = turnId;
             endChatCancelled = false;
             endChatConfirmed = false;
             endChatResultReceived = false;

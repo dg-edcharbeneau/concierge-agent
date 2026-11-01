@@ -46,7 +46,9 @@ public static class NearbyPlaceCategories
     }
 }
 
-public sealed record NearbyPlace(string Name, string? Address, double DistanceMeters);
+public sealed record NearbyPlace(
+    string Name, string? Address, double DistanceMeters,
+    string? ProviderId = null, double? Latitude = null, double? Longitude = null);
 
 /// <summary>
 /// Finds the closest places of one category around Hotel ZGY with the Geoapify Places API.
@@ -131,7 +133,8 @@ public sealed class GeoapifyNearbyPlacesService(
                 : DistanceMeters(hotel.Latitude, hotel.Longitude, latitude, longitude);
             var id = ReadString(properties, "place_id")
                 ?? string.Create(CultureInfo.InvariantCulture, $"{placeName}:{latitude:F5}:{longitude:F5}");
-            places.Add((id, new NearbyPlace(placeName, ReadAddress(properties, placeName), distance)));
+            places.Add((id, new NearbyPlace(placeName, ReadAddress(properties, placeName), distance,
+                id, latitude, longitude)));
         }
 
         return places

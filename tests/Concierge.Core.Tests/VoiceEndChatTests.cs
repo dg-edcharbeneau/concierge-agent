@@ -13,6 +13,183 @@ namespace Concierge.Core.Tests;
 public sealed class VoiceEndChatTests
 {
     [Theory]
+    [InlineData(1, false)]
+    [InlineData(2, true)]
+    public async Task LateModelCompletionCannotRegisterForARevisedFamily(int revisionOrdinal, bool allowed)
+    {
+        var connection = NewConnection();
+        var old = AdmitTurn(connection);
+        if (revisionOrdinal != 1) AdmitTurn(connection, "Unrelated fragment", revisionOrdinal);
+        var model = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<bool> CompleteModelAsync()
+        {
+            await model.Task;
+            return connection.RegisterEndChatCall("late-call", old);
+        }
+        var registration = CompleteModelAsync();
+        AdmitTurn(connection, "Where is breakfast?", revisionOrdinal);
+        // Even a new delivery of the old text must not undo the revision.
+        Assert.Equal(old, AdmitTurn(connection));
+        model.SetResult();
+
+        Assert.Equal(allowed, await registration);
+        Assert.Equal(allowed, connection.ConfirmEndChatCall("late-call"));
+        Assert.Equal(allowed, connection.AcceptEndChatToolResult("late-call"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RevisionRevokesConfirmedCallAndAnyAcceptedFarewell(bool resultAlreadyReceived)
+    {
+        var connection = NewConnection();
+        var old = AdmitTurn(connection);
+        Assert.True(connection.RegisterEndChatCall("old-call", old));
+        Assert.True(connection.ConfirmEndChatCall("old-call"));
+        if (resultAlreadyReceived) Assert.True(connection.AcceptEndChatToolResult("old-call"));
+
+        var current = AdmitTurn(connection, "Where is breakfast?");
+
+        Assert.False(connection.HasEndChatResult);
+        Assert.Null(connection.EndChatResultReceivedAtUtc);
+        Assert.False(connection.TryClaimEndChatFlow(farewellOnly: true));
+        Assert.False(connection.RegisterEndChatCall("old-call", old));
+        Assert.False(connection.ConfirmEndChatCall("old-call"));
+        Assert.False(connection.AcceptEndChatToolResult("old-call"));
+        Assert.True(connection.RegisterEndChatCall("current-call", current));
+        Assert.True(connection.ConfirmEndChatCall("current-call"));
+        Assert.True(connection.AcceptEndChatToolResult("current-call"));
+    }
+
+    [Fact]
+    public void ExactRetryPreservesTheConfirmedCall()
+    {
+        var connection = NewConnection();
+        var turn = AdmitTurn(connection);
+        Assert.True(connection.RegisterEndChatCall("retry-call", turn));
+        Assert.True(connection.ConfirmEndChatCall("retry-call"));
+        Assert.Equal(turn, AdmitTurn(connection));
+        Assert.True(connection.RegisterEndChatCall("retry-call", turn));
+        Assert.True(connection.AcceptEndChatToolResult("retry-call"));
+    }
+
+    [Fact]
+    public void AdmissionRequiresValidatedProvenanceForThisConnection()
+    {
+        var connection = NewConnection();
+        var turn = ThinkRequest.TurnId(connection.Session.Id, connection.Number, 1, "Goodbye");
+        Assert.Throws<ArgumentException>(() => connection.AdmitEndChatTurn(turn, "Different text"));
+        var foreign = ThinkRequest.TurnId(Guid.NewGuid(), connection.Number, 1, "Goodbye");
+        Assert.Throws<ArgumentException>(() => connection.AdmitEndChatTurn(foreign, "Goodbye"));
+        Assert.False(connection.RegisterEndChatCall("unadmitted-call", turn));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task IdleWarningIsSentOnceAtThirtySecondsBeforeTheUnchangedDeadline(int idleMinutes)
+    {
+        var time = new FakeTimeProvider();
+        var connection = NewConnection(time);
+        var relay = new VoiceRelay(
+            WebSocket.CreateFromStream(new MemoryStream(), new WebSocketCreationOptions()),
+            connection, NullLogger.Instance, time, TimeSpan.FromMinutes(idleMinutes));
+        time.Advance(TimeSpan.FromSeconds(idleMinutes * 60 - 31));
+        relay.CheckEndChatTimers();
+        Assert.Equal(0, BrowserEventCount(relay));
+        time.Advance(TimeSpan.FromSeconds(1));
+        relay.CheckEndChatTimers();
+        relay.CheckEndChatTimers();
+        Assert.Equal(1, BrowserEventCount(relay));
+        Assert.True((await NextBrowserEvent(relay)).GetProperty("active").GetBoolean());
+        time.Advance(TimeSpan.FromSeconds(29));
+        relay.CheckEndChatTimers();
+        Assert.False(relay.EndChatFlowRequested);
+        time.Advance(TimeSpan.FromSeconds(1));
+        relay.CheckEndChatTimers();
+        Assert.True(relay.EndChatFlowRequested);
+        Assert.False((await NextBrowserEvent(relay)).GetProperty("active").GetBoolean());
+        var ended = await NextBrowserEvent(relay);
+        Assert.Equal("EndChatRequested", ended.GetProperty("type").GetString());
+        Assert.Equal("idle_timeout", ended.GetProperty("reason").GetString());
+    }
+
+    [Theory]
+    [InlineData("""{"type":"UserStartedSpeaking"}""")]
+    [InlineData("""{"type":"ConversationText","role":"user"}""")]
+    public async Task SpeechClearsTheWarningAndRestartsItsDeadline(string speech)
+    {
+        var time = new FakeTimeProvider();
+        var connection = NewConnection(time);
+        var relay = NewRelay(connection, time);
+        time.Advance(TimeSpan.FromSeconds(90));
+        relay.CheckEndChatTimers();
+        Assert.True((await NextBrowserEvent(relay)).GetProperty("active").GetBoolean());
+        relay.HandleAgentEvent(Encoding.UTF8.GetBytes(speech));
+        var cleared = await NextBrowserEvent(relay);
+        Assert.Equal("IdleWarning", cleared.GetProperty("type").GetString());
+        Assert.False(cleared.GetProperty("active").GetBoolean());
+        relay.HandleAgentEvent("""{"type":"AgentAudioDone"}"""u8.ToArray());
+        time.Advance(TimeSpan.FromSeconds(89));
+        relay.CheckEndChatTimers();
+        Assert.False(relay.EndChatFlowRequested);
+        // Only the forwarded speech and AudioDone events remain, not another warning.
+        Assert.Equal(2, BrowserEventCount(relay));
+    }
+
+    [Fact]
+    public async Task ReplyEligibilitySuppressesWarningAndReconnectRestartsTheClock()
+    {
+        var time = new FakeTimeProvider();
+        var registry = new VoiceSessionRegistry(time);
+        var stay = new ConciergeSessionContext(Guid.NewGuid(), Guid.NewGuid(), time.GetUtcNow().AddDays(1));
+        var connection = registry.Open(stay, null);
+        var relay = NewRelay(connection, time);
+        connection.RecordReplyStarted();
+        time.Advance(TimeSpan.FromSeconds(100));
+        relay.CheckEndChatTimers();
+        Assert.Equal(0, BrowserEventCount(relay));
+        connection.RecordReplyCompleted();
+        relay.CheckEndChatTimers();
+        Assert.True((await NextBrowserEvent(relay)).GetProperty("active").GetBoolean());
+        connection.RecordReplyStarted();
+        relay.CheckEndChatTimers();
+        Assert.False((await NextBrowserEvent(relay)).GetProperty("active").GetBoolean());
+        time.Advance(TimeSpan.FromMinutes(2));
+        relay.CheckEndChatTimers();
+        Assert.False(relay.EndChatFlowRequested);
+        var reconnected = registry.Open(stay, connection.Session.Id);
+        reconnected.RecordReplyCompleted();
+        var newRelay = NewRelay(reconnected, time);
+        newRelay.CheckEndChatTimers();
+        Assert.Equal(0, BrowserEventCount(newRelay));
+        time.Advance(TimeSpan.FromSeconds(90));
+        newRelay.CheckEndChatTimers();
+        Assert.True((await NextBrowserEvent(newRelay)).GetProperty("active").GetBoolean());
+        registry.Close(reconnected);
+        time.Advance(TimeSpan.FromMinutes(2));
+        newRelay.CheckEndChatTimers();
+        Assert.False(newRelay.EndChatFlowRequested);
+        Assert.Equal(0, BrowserEventCount(newRelay));
+    }
+
+    private static PlaybackQueue BrowserQueue(VoiceRelay relay) =>
+        (PlaybackQueue)typeof(VoiceRelay).GetField("toBrowser", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(relay)!;
+
+    private static int BrowserEventCount(VoiceRelay relay) =>
+        ((LinkedList<PlaybackItem>)typeof(PlaybackQueue)
+            .GetField("items", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(BrowserQueue(relay))!).Count;
+
+    private static async Task<JsonElement> NextBrowserEvent(VoiceRelay relay)
+    {
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var item = await BrowserQueue(relay).DequeueAsync(new PlaybackPacer(9120), bound.Token);
+        using var document = JsonDocument.Parse(item.Data);
+        return document.RootElement.Clone();
+    }
+
+    [Theory]
     [InlineData("idle_timeout", "concierge.voice.end_chat.requested")]
     [InlineData("farewell_fallback", "concierge.voice.end_chat.requested")]
     [InlineData("farewell_playback_ready", "concierge.voice.end_chat.requested")]
@@ -30,7 +207,7 @@ public sealed class VoiceEndChatTests
             connection, logs.CreateLogger("VoiceRelay"), time);
         if (reason != "idle_timeout")
         {
-            Assert.True(connection.RegisterEndChatCall("call-observed"));
+            Assert.True(connection.RegisterEndChatCall("call-observed", AdmitTurn(connection)));
             Assert.True(connection.ConfirmEndChatCall("call-observed"));
             Assert.True(connection.AcceptEndChatToolResult("call-observed"));
         }
@@ -79,7 +256,7 @@ public sealed class VoiceEndChatTests
         using var traces = new EndChatTraceCapture();
         using var logs = new CapturedLogs();
         var connection = NewConnection();
-        Assert.True(connection.RegisterEndChatCall("call-observed"));
+        Assert.True(connection.RegisterEndChatCall("call-observed", AdmitTurn(connection)));
         var relay = new VoiceRelay(
             WebSocket.CreateFromStream(new MemoryStream(), new WebSocketCreationOptions()),
             connection, logs.CreateLogger("VoiceRelay"));
@@ -155,7 +332,7 @@ public sealed class VoiceEndChatTests
     public void DeepgramMustReturnTheDeferredClientSideCallWithEmptyArguments()
     {
         var connection = NewConnection();
-        Assert.True(connection.RegisterEndChatCall("call-1"));
+        Assert.True(connection.RegisterEndChatCall("call-1", AdmitTurn(connection)));
 
         var partial = """{"type":"FunctionCallRequest","functions":[{"id":"call-1","name":"end_chat","client_side":false,"arguments":"{}"}]}""";
         Assert.False(DeepgramFunctionProtocol.TryCreateEndChatResponse(
@@ -181,7 +358,7 @@ public sealed class VoiceEndChatTests
     public void FunctionCallCancellationIsHonoredAndServerEchoDoesNotEndChat()
     {
         var connection = NewConnection();
-        Assert.True(connection.RegisterEndChatCall("call-cancel"));
+        Assert.True(connection.RegisterEndChatCall("call-cancel", AdmitTurn(connection)));
         var relay = NewRelay(connection);
         relay.HandleAgentEvent(Encoding.UTF8.GetBytes(
             """{"type":"FunctionCallCancelled","functions":[{"id":"call-cancel","name":"end_chat"}]}"""));
@@ -191,7 +368,7 @@ public sealed class VoiceEndChatTests
         Assert.False(connection.HasEndChatResult);
 
         var echoedConnection = NewConnection();
-        Assert.True(echoedConnection.RegisterEndChatCall("call-echo"));
+        Assert.True(echoedConnection.RegisterEndChatCall("call-echo", AdmitTurn(echoedConnection)));
         Assert.True(echoedConnection.ConfirmEndChatCall("call-echo"));
         NewRelay(echoedConnection).HandleAgentEvent(Encoding.UTF8.GetBytes(
             """{"type":"FunctionCallResponse","id":"call-echo","name":"end_chat","content":"End chat confirmed."}"""));
@@ -204,7 +381,7 @@ public sealed class VoiceEndChatTests
     public void ConfirmedFunctionCallCanStillBeCancelledBeforeFarewellCompletes()
     {
         var connection = NewConnection();
-        Assert.True(connection.RegisterEndChatCall("call-barge-in"));
+        Assert.True(connection.RegisterEndChatCall("call-barge-in", AdmitTurn(connection)));
         Assert.True(connection.ConfirmEndChatCall("call-barge-in"));
         Assert.True(connection.AcceptEndChatToolResult("call-barge-in"));
         var relay = NewRelay(connection);
@@ -222,7 +399,7 @@ public sealed class VoiceEndChatTests
     {
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-10-17T12:00:00Z"));
         var connection = NewConnection(time);
-        Assert.True(connection.RegisterEndChatCall("call-interrupted-farewell"));
+        Assert.True(connection.RegisterEndChatCall("call-interrupted-farewell", AdmitTurn(connection)));
         Assert.True(connection.ConfirmEndChatCall("call-interrupted-farewell"));
         Assert.True(connection.AcceptEndChatToolResult("call-interrupted-farewell"));
         var relay = NewRelay(connection, time);
@@ -249,7 +426,7 @@ public sealed class VoiceEndChatTests
         var now = DateTimeOffset.Parse("2026-10-17T12:00:00Z");
         var time = new FakeTimeProvider(now);
         var connection = NewConnection(time);
-        Assert.True(connection.RegisterEndChatCall("call-no-audio"));
+        Assert.True(connection.RegisterEndChatCall("call-no-audio", AdmitTurn(connection)));
         Assert.True(connection.ConfirmEndChatCall("call-no-audio"));
         Assert.True(connection.AcceptEndChatToolResult("call-no-audio"));
         var relay = NewRelay(connection, time);
@@ -279,6 +456,13 @@ public sealed class VoiceEndChatTests
         relay.HandleAgentEvent(Encoding.UTF8.GetBytes("""{"type":"UserStartedSpeaking"}"""));
 
         Assert.False(connection.IsIdle(TimeSpan.FromMinutes(2)));
+    }
+
+    internal static string AdmitTurn(VoiceConnection connection, string text = "Goodbye", int ordinal = 1)
+    {
+        var turnId = ThinkRequest.TurnId(connection.Session.Id, connection.Number, ordinal, text);
+        connection.AdmitEndChatTurn(turnId, text);
+        return turnId;
     }
 
     private static VoiceConnection NewConnection() =>

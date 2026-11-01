@@ -16,6 +16,163 @@ public sealed class CancellationOutcomeRecallTests(PostgreSqlFixture postgreSql)
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task RevisedSpokenConfirmationCannotReopenConsumedBooking(bool confirmed, bool continueAsNew)
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql,
+            devServerArgs: continueAsNew
+                ? ["--dynamic-config-value", "limit.historyCount.suggestContinueAsNew=50"] : null,
+            flushBatchSize: 1);
+        var (stayId, handle) = await StartAsync(host);
+        var firstRun = (await handle.DescribeAsync()).RunId;
+        var session = Guid.NewGuid();
+        Select(host, ConciergeToolDefinitions.ProposeRide,
+            new() { ["dropoff"] = "South Beach", ["immediate"] = true });
+        await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 10, "Offer"), "A ride to South Beach.");
+        if (!confirmed)
+            host.ActionTools.QueueResult(ConciergeToolDefinitions.ConfirmRide, JsonSerializer.Serialize(
+                new ConciergeRideActionResult(true, "The booking outcome is unknown.", null, []), JsonOptions));
+        Select(host, ConciergeToolDefinitions.ConfirmRide);
+        const string partial = "Okay. Can you book the ride?";
+        var original = await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 11, partial), partial);
+        if (continueAsNew)
+        {
+            for (var wait = 0; wait < 50 && (await handle.DescribeAsync()).RunId == firstRun; wait++)
+                await Task.Delay(100);
+            Assert.NotEqual(firstRun, (await handle.DescribeAsync()).RunId);
+        }
+
+        // The live failure: revised text has a different hash but the same spoken ordinal.
+        const string revised = "Okay. Can you book the ride? To arrive in about five minutes?";
+        Select(host, ConciergeToolDefinitions.ProposeRide,
+            new() { ["dropoff"] = "South Beach", ["immediate"] = true });
+        var response = await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 11, revised), revised);
+        if (confirmed)
+        {
+            const string pickupTime = "Tuesday, October 20 at 12:00 PM hotel time";
+            Assert.Contains("Hotel ZGY", original.AssistantMessage, StringComparison.Ordinal);
+            Assert.Contains("South Beach, Miami Beach", original.AssistantMessage, StringComparison.Ordinal);
+            Assert.Contains("at Hotel ZGY now", original.AssistantMessage, StringComparison.Ordinal);
+            Assert.DoesNotContain(pickupTime, original.AssistantMessage, StringComparison.Ordinal);
+            Assert.Equal(
+                $"Your ride from Hotel ZGY to South Beach, Miami Beach is booked for pickup on {pickupTime} (status: Booked).",
+                response.AssistantMessage);
+        }
+        else
+        {
+            Assert.Equal("The booking outcome is unknown.", original.AssistantMessage);
+            Assert.Equal(original.AssistantMessage, response.AssistantMessage);
+            Assert.DoesNotContain("is booked", response.AssistantMessage, StringComparison.Ordinal);
+        }
+        Assert.DoesNotContain("No ride has been booked", response.AssistantMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("You're all set", response.AssistantMessage, StringComparison.Ordinal);
+
+        // Another revision cannot turn the consumed utterance into a scheduled replacement either.
+        const string laterRevision = "Book the ride for ten minutes from now.";
+        Select(host, ConciergeToolDefinitions.ProposeRide, new()
+        {
+            ["dropoff"] = "South Beach", ["immediate"] = false,
+            ["pickupAt"] = DateTimeOffset.UtcNow.AddMinutes(10).ToString("O"),
+        });
+        var laterResponse = await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 11, laterRevision), laterRevision);
+        Assert.Equal(response.AssistantMessage, laterResponse.AssistantMessage);
+        Select(host, ConciergeToolDefinitions.ConfirmRide);
+        await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 12, "Book it"), "Book it");
+        Assert.Single(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+        Assert.Single(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ProposeRide);
+
+        // A genuinely new spoken request can still book the same route after fresh confirmation.
+        Select(host, ConciergeToolDefinitions.ProposeRide,
+            new() { ["dropoff"] = "South Beach", ["immediate"] = true });
+        await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 13, "A new ride"), "Please book a new ride.");
+        Select(host, ConciergeToolDefinitions.ConfirmRide);
+        await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 14, "Yes"), "Yes");
+        Assert.Equal(2, host.ActionTools.Calls.Count(call => call.Name == ConciergeToolDefinitions.ConfirmRide));
+        await ReplayAsync(handle);
+        if (continueAsNew)
+            await ReplayAsync(host.Environment.Client.GetWorkflowHandle<ConciergeStayWorkflow>(handle.Id, firstRun));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NewSpokenRequestToBookedDestinationWarnsAndCanBookAfterFreshConfirmation(bool continueAsNew)
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql,
+            devServerArgs: continueAsNew
+                ? ["--dynamic-config-value", "limit.historyCount.suggestContinueAsNew=80"] : null,
+            flushBatchSize: 1);
+        var (stayId, handle) = await StartAsync(host);
+        var firstRun = (await handle.DescribeAsync()).RunId;
+        var session = Guid.NewGuid();
+        Select(host, ConciergeToolDefinitions.ProposeRide,
+            new() { ["dropoff"] = "Wayan Miami", ["immediate"] = true });
+        await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 10, "Offer"), "A ride to Wayan Miami.");
+        Select(host, ConciergeToolDefinitions.ConfirmRide);
+        await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 11, "Book"), "Okay. Can you book the ride?");
+
+        // Even an exact overlapping request is a new offer, not an edit to the earlier booking.
+        var pickupAt = new DateTimeOffset(2026, 10, 20, 16, 0, 0, TimeSpan.Zero);
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.ProposeRide, JsonSerializer.Serialize(
+            new ConciergeRideProposalToolResult(
+                "Available", null, [],
+                new ConciergeRideProposalDraft(
+                    new ConciergeRidePlace("Hotel ZGY", 25.7984634, -80.1956016),
+                    new ConciergeRidePlace("Wayan Miami, 50 NW 24th St", 25.8003, -80.1957),
+                    false, pickupAt, 720),
+                null, null, null,
+                ExistingRides: [
+                    new RideSummary(Guid.NewGuid(), "Booked", "Hotel ZGY", "Wayan Miami, 50 NW 24th St",
+                        pickupAt, null, null, null),
+                ]), JsonOptions));
+        Select(host, ConciergeToolDefinitions.ProposeRide, new()
+        {
+            ["dropoff"] = "Wayan Miami", ["immediate"] = false,
+            ["pickupAt"] = pickupAt.ToString("O"),
+        });
+        const string again = "Can you book the ride to arrive in ten minutes?";
+        var offered = await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 12, again), again);
+        Assert.Contains("ADDITIONAL ride, not a change", offered.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("confirmation on a later turn", offered.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("Shall I book it", offered.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("No ride has been booked.", offered.AssistantMessage, StringComparison.Ordinal);
+        Assert.Single(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+
+        if (continueAsNew)
+        {
+            for (var wait = 0; wait < 50 && (await handle.DescribeAsync()).RunId == firstRun; wait++)
+                await Task.Delay(100);
+            Assert.NotEqual(firstRun, (await handle.DescribeAsync()).RunId);
+            var history = await handle.FetchHistoryAsync();
+            var input = await host.Environment.Client.Options.DataConverter
+                .ToSingleValueAsync<ConciergeStayWorkflowInput>(
+                    history.Events.First().WorkflowExecutionStartedEventAttributes.Input.Payloads_);
+            Assert.Equal(pickupAt, input.PendingRideProposal?.PickupAtUtc);
+            Assert.Equal("Wayan Miami, 50 NW 24th St", input.PendingRideProposal?.Dropoff.Name);
+        }
+
+        Select(host, ConciergeToolDefinitions.ConfirmRide);
+        var bookNow = await SubmitAsync(handle, stayId, ThinkRequest.TurnId(session, 1, 13, "Book it now"),
+            "Book it now, please.");
+        Assert.Contains("You're all set", bookNow.AssistantMessage, StringComparison.Ordinal);
+        var bookings = host.ActionTools.Calls.Where(call => call.Name == ConciergeToolDefinitions.ConfirmRide).ToArray();
+        Assert.Equal(2, bookings.Length);
+        Assert.NotEqual(bookings[0].Arguments["proposalId"], bookings[1].Arguments["proposalId"]);
+        var additional = JsonSerializer.Deserialize<ConciergeRideProposal>(
+            bookings[1].Arguments[ConciergeToolDefinitions.TrustedProposalKey]!.ToString()!, JsonOptions)!;
+        Assert.Equal(pickupAt, additional.PickupAtUtc);
+        var proposals = host.ActionTools.Calls.Where(call => call.Name == ConciergeToolDefinitions.ProposeRide).ToArray();
+        Assert.Equal(2, proposals.Length);
+        Assert.All(proposals, call => Assert.Equal(
+            stayId.ToString("D"), call.Arguments[ConciergeToolDefinitions.TrustedStayIdKey]?.ToString()));
+        await ReplayAsync(handle);
+        if (continueAsNew)
+            await ReplayAsync(host.Environment.Client.GetWorkflowHandle<ConciergeStayWorkflow>(handle.Id, firstRun));
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task ConsumedBookingGuardSurvivesImmediateContinueAsNew(bool confirmed)
@@ -450,12 +607,13 @@ public sealed class CancellationOutcomeRecallTests(PostgreSqlFixture postgreSql)
     }
 
     [Theory]
-    [InlineData("South Beach, Miami Beach, FL 33139, United States of America", 0, true)]
-    [InlineData("South Beach, Miami Beach, FL 33139", 0, true)]
-    [InlineData("Airport", 0, false)]
-    [InlineData("South Beach, Miami Beach, FL 33139", 60, false)]
+    [InlineData("South Beach, Miami Beach, FL 33139, United States of America", 0, true, false)]
+    [InlineData("South Beach, Miami Beach, FL 33139", 0, true, false)]
+    [InlineData("Airport", 0, false, false)]
+    [InlineData("South Beach, Miami Beach, FL 33139", 60, false, false)]
+    [InlineData("South Beach, Miami Beach, FL 33139", 0, true, true)]
     public async Task MatchingReplacementOfferStatesCancellationAndRequiresFreshConfirmation(
-        string destination, int minutesLater, bool matchesCancelledTrip)
+        string destination, int minutesLater, bool matchesCancelledTrip, bool hasAnotherActiveRide)
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
         var (stayId, handle) = await StartAsync(host);
@@ -467,7 +625,10 @@ public sealed class CancellationOutcomeRecallTests(PostgreSqlFixture postgreSql)
         var pickup = DateTimeOffset.Parse("2026-10-24T10:00:00-04:00").AddMinutes(minutesLater);
         host.ActionTools.QueueResult(ConciergeToolDefinitions.ProposeRide, JsonSerializer.Serialize(
             new ConciergeRideProposalToolResult("Available", null, [], new ConciergeRideProposalDraft(
-                new("Hotel ZGY", 25.8, -80.2), new(destination, 25.7, -80.1), false, pickup, 720), null, null, null), JsonOptions));
+                new("Hotel ZGY", 25.8, -80.2), new(destination, 25.7, -80.1), false, pickup, 720), null, null, null,
+                ExistingRides: hasAnotherActiveRide
+                    ? [new RideSummary(Guid.NewGuid(), "Booked", "Hotel ZGY", destination, pickup, null, null, null)]
+                    : []), JsonOptions));
         Select(host, ConciergeToolDefinitions.ProposeRide,
             new() { ["dropoff"] = destination, ["immediate"] = false, ["pickupAt"] = pickup.ToString("O") });
 
@@ -476,10 +637,18 @@ public sealed class CancellationOutcomeRecallTests(PostgreSqlFixture postgreSql)
         if (matchesCancelledTrip)
         {
             Assert.Contains("already cancelled", proposed.AssistantMessage, StringComparison.Ordinal);
-            Assert.Contains("Would you like a new booking", proposed.AssistantMessage, StringComparison.Ordinal);
-            Assert.Contains("No new ride has been booked", proposed.AssistantMessage, StringComparison.Ordinal);
+            if (!hasAnotherActiveRide)
+            {
+                Assert.Contains("Would you like a new booking", proposed.AssistantMessage, StringComparison.Ordinal);
+                Assert.Contains("No new ride has been booked", proposed.AssistantMessage, StringComparison.Ordinal);
+            }
         }
-        else
+        if (hasAnotherActiveRide)
+        {
+            Assert.Contains("ADDITIONAL ride, not a change", proposed.AssistantMessage, StringComparison.Ordinal);
+            Assert.Contains("confirmation on a later turn", proposed.AssistantMessage, StringComparison.Ordinal);
+        }
+        if (!matchesCancelledTrip)
         {
             Assert.DoesNotContain("already cancelled", proposed.AssistantMessage, StringComparison.Ordinal);
             Assert.Contains(destination == "Airport" ? "Airport" : "South Beach, Miami Beach",

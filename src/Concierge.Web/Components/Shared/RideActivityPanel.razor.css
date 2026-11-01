@@ -229,6 +229,13 @@
     line-height: 1.45;
 }
 
+.ride-activity-arrival {
+    margin: 7px 0 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
 .ride-activity-driver {
     display: grid;
     gap: 4px;

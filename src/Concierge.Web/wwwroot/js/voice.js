@@ -18,6 +18,12 @@
         voice.dotNet.invokeMethodAsync("OnVoiceState", state, message, code).catch(() => {});
     }
 
+    function setIdleWarning(voice, active) {
+        if (Boolean(voice.idleWarning) === active) return;
+        voice.idleWarning = active;
+        voice.dotNet.invokeMethodAsync("OnVoiceIdleWarning", active).catch(() => {});
+    }
+
     async function createPlayback(voice) {
         const context = new AudioContext({ sampleRate: 24000, latencyHint: "interactive" });
         voice.playContext = context;
@@ -60,6 +66,7 @@
     }
 
     function onPlayback(voice, message) {
+        if (voice.stopped) return;
         switch (message.type) {
             case "played":
                 if (voice.socket?.readyState === WebSocket.OPEN) {
@@ -67,6 +74,7 @@
                 }
                 break;
             case "speaking":
+                setIdleWarning(voice, false);
                 notify(voice, "speaking");
                 break;
             case "silenced":
@@ -91,6 +99,7 @@
     }
 
     function onSocketMessage(voice, event) {
+        if (voice.stopped) return;
         if (typeof event.data !== "string") {
             voice.playbackActive = true;
             const playbackToken = voice.pendingPlaybackToken ?? null;
@@ -112,6 +121,9 @@
         // A segment token applies only to the immediately following binary PCM message.
         voice.pendingPlaybackToken = null;
         switch (message.type) {
+            case "IdleWarning":
+                setIdleWarning(voice, message.active === true);
+                break;
             case "VoiceSession":
                 voice.dotNet.invokeMethodAsync("OnVoiceSession", message.voiceSessionId).catch(() => {});
                 break;
@@ -124,8 +136,10 @@
                 });
                 break;
             case "UserStartedSpeaking":
+                setIdleWarning(voice, false);
                 voice.endAfterPlayback = false;
                 voice.endRequested = false;
+                voice.endReason = null;
                 voice.playNode.port.postMessage({
                     type: "flush",
                     interruptionNumber: message.interruptionNumber,
@@ -133,29 +147,39 @@
                 notify(voice, "listening");
                 break;
             case "ConversationText":
+                setIdleWarning(voice, false);
                 if (message.role === "user") notify(voice, "thinking");
                 break;
+            case "AgentStartedSpeaking":
+                setIdleWarning(voice, false);
+                break;
             case "AgentThinking":
+                setIdleWarning(voice, false);
                 notify(voice, "thinking");
                 break;
             case "EndChatRequested":
+                voice.endReason = message.reason;
                 requestEndChat(voice);
                 break;
             case "EndChatAfterPlayback":
+                setIdleWarning(voice, false);
+                voice.endReason = message.reason;
                 voice.endAfterPlayback = true;
                 if (!voice.playbackActive) requestEndChat(voice);
                 break;
             case "CancelEndChat":
                 voice.endAfterPlayback = false;
                 voice.endRequested = false;
+                voice.endReason = null;
                 break;
         }
     }
 
     function requestEndChat(voice) {
         if (voice.endRequested || voice.stopped) return;
+        setIdleWarning(voice, false);
         voice.endRequested = true;
-        voice.dotNet.invokeMethodAsync("OnVoiceEndRequested").catch(() => {});
+        voice.dotNet.invokeMethodAsync("OnVoiceEndRequested", voice.endReason ?? null).catch(() => {});
     }
 
     function release(voice) {
@@ -166,6 +190,7 @@
 
     function end(voice, state, message, code) {
         if (voice.stopped) return;
+        setIdleWarning(voice, false);
         voice.stopped = true;
         if (current === voice) current = null;
         try {
@@ -174,7 +199,8 @@
             // The socket is already gone.
         }
         release(voice);
-        if (state) notify(voice, state, message, code);
+        // End Chat owns the next UI state; a close racing its callback must not overwrite it.
+        if (state && !voice.endRequested) notify(voice, state, message, code);
     }
 
     function onVisibilityChange() {

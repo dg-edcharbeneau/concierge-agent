@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Concierge.Contracts;
@@ -85,10 +84,10 @@ internal static class ThinkEndpoint
 
         connection.RecordSpeech();
         var turnId = ThinkRequest.TurnId(session.Id, connection.Number, request.UserOrdinal, request.UserMessage);
+        connection.AdmitEndChatTurn(turnId, request.UserMessage);
         var concierge = services.GetRequiredService<IConciergeService>();
         var started = Stopwatch.GetTimestamp();
-        // The turn ID is also the Temporal update ID, so the request span can be matched to the
-        // UpdateWorkflow span when a Deepgram retry joins an earlier request's turn.
+        // Logical turn identity remains stable across distinct RPC deliveries and exact retries.
         Activity.Current?
             .SetTag("concierge.voice.turn_id", turnId)
             .SetTag("concierge.voice.connection", connection.Number)
@@ -97,7 +96,8 @@ internal static class ThinkEndpoint
         // The shared task outlives this request: a Deepgram abort or retry must not cancel or
         // resubmit admitted Temporal work. ConciergeService holds no disposable scoped state.
         var turn = session.JoinOrStart(turnId, () => concierge.SubmitVoiceTurnAsync(
-            session.Stay, turnId, request.UserMessage, CancellationToken.None, enableEndChatFunction: true));
+            session.Stay, turnId, request.UserMessage, CancellationToken.None, enableEndChatFunction: true),
+            request.UserMessage);
 
         ConciergeTurnResult result;
         try
@@ -140,7 +140,7 @@ internal static class ThinkEndpoint
         if (result.EndChatFunctionCall is { } endChatCall)
         {
             if (!StringComparer.Ordinal.Equals(endChatCall.Name, ConciergeEndChat.FunctionName)
-                || !connection.RegisterEndChatCall(endChatCall.Id))
+                || !connection.RegisterEndChatCall(endChatCall.Id, turnId))
             {
                 VoiceTelemetry.RecordEndChat(logger, "call_rejected", connection, "invalid_or_conflicting_call", endChatCall.Id);
                 await WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable,
@@ -443,8 +443,7 @@ internal sealed record ThinkRequest(
     /// </summary>
     public static string TurnId(Guid voiceSessionId, int connectionNumber, int userOrdinal, string userMessage)
     {
-        var messageHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(userMessage)));
-        return $"v:{voiceSessionId:N}:{connectionNumber}:{userOrdinal}:{messageHash}";
+        return new VoiceUtterance(voiceSessionId, connectionNumber, userOrdinal).TurnId(userMessage);
     }
 
     /// <summary>Assistant-role chunk, one content chunk, the stop chunk, then <c>[DONE]</c>.</summary>

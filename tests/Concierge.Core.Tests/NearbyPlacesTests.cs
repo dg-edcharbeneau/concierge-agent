@@ -94,6 +94,30 @@ public sealed class NearbyPlacesTests
     }
 
     [Fact]
+    public async Task ProductionToolPreservesEveryBranchInModelContextIndependentlyOfVoice()
+    {
+        var tool = CreateTool(_ => Json(new
+        {
+            features = new[]
+            {
+                new { properties = new { name = "First Cafe", street = "First Street", housenumber = "1", lat = 25.799, lon = -80.198, distance = 200, place_id = "first" } },
+                new { properties = new { name = "Panther Coffee", street = "Northwest 2nd Avenue", housenumber = "2390", lat = 25.801, lon = -80.199, distance = 300, place_id = "panther" } },
+            },
+        }));
+        var serialized = await tool.FindNearbyPlacesAsync("cafe", CancellationToken.None);
+        var interpretation = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.FindNearbyPlaces, serialized)
+            .Interpret(new ConciergeTurnSubmission("nearby", "What cafes are nearby?", "voice"),
+                new Dictionary<string, object?> { ["category"] = "cafe" }, false);
+
+        Assert.NotEqual(interpretation.GuestFacingText, interpretation.CompactModelContext);
+        using var facts = JsonDocument.Parse(interpretation.CompactModelContext);
+        var alternate = facts.RootElement.GetProperty("places")[1];
+        Assert.Equal("2390 Northwest 2nd Avenue", alternate.GetProperty("address").GetString());
+        Assert.Equal("panther", alternate.GetProperty("providerId").GetString());
+        Assert.Equal(25.801, alternate.GetProperty("latitude").GetDouble());
+    }
+
+    [Fact]
     public async Task ToolResultReportsMilesAndNoResults()
     {
         var found = CreateTool(_ => Json(new
@@ -112,7 +136,7 @@ public sealed class NearbyPlacesTests
 
         Assert.Equal("Available", result.Status);
         Assert.Equal("pharmacy", result.Category);
-        Assert.Equal(new ConciergeNearbyPlace("CVS", "120 NW 20th Street", 0.5), Assert.Single(result.Places));
+        Assert.Equal(new ConciergeNearbyPlace("CVS", "120 NW 20th Street", 0.5, "cvs", 25.799, -80.198), Assert.Single(result.Places));
         Assert.Equal("NoResults", none.Status);
         Assert.Empty(none.Places);
     }
@@ -127,6 +151,24 @@ public sealed class NearbyPlacesTests
 
         await Assert.ThrowsAsync<ArgumentException>(
             () => tool.FindNearbyPlacesAsync(category, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SingularNearestPresentationKeepsAllModelFactsButSpeaksOnlyNearest()
+    {
+        var serialized = await ProductionCafeResultAsync();
+        foreach (var channel in new[] { "voice", "web" })
+        {
+            var interpreted = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.FindNearbyPlaces, serialized)
+                .Interpret(new("nearest", "What's the nearest coffee shop?", channel),
+                    new Dictionary<string, object?> { ["category"] = "cafe", ["presentation"] = "nearest" }, false);
+            Assert.Contains("Suite Havana", interpreted.GuestFacingText);
+            Assert.DoesNotContain("Panther Coffee", interpreted.GuestFacingText);
+            using var facts = JsonDocument.Parse(interpreted.CompactModelContext);
+            Assert.Equal(3, facts.RootElement.GetProperty("places").GetArrayLength());
+            Assert.Contains("Northwest 2nd Avenue", interpreted.CompactModelContext);
+            if (channel == "voice") Assert.DoesNotContain("**", interpreted.GuestFacingText);
+        }
     }
 
     [Fact]
@@ -209,6 +251,22 @@ public sealed class NearbyPlacesTests
             ConciergeToolDefinitions.FindNearbyPlaces, arguments, out _));
     }
 
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    [InlineData("true", false)]
+    public void PolicyAcceptsOnlyBooleanNearbyRideIntent(object forRideProposal, bool expected)
+    {
+        var arguments = new Dictionary<string, object?>
+        {
+            ["category"] = "pharmacy",
+            ["forRideProposal"] = forRideProposal,
+        };
+
+        Assert.Equal(expected, ConciergeToolCallPolicy.TryValidateArguments(
+            ConciergeToolDefinitions.FindNearbyPlaces, arguments, out _));
+    }
+
     [Fact]
     public async Task MovieTheatersUseGeoapifyCinemaCategory()
     {
@@ -238,8 +296,11 @@ public sealed class NearbyPlacesTests
         Assert.Equal(
             NearbyPlaceCategories.Keys,
             properties.GetProperty("category").GetProperty("enum").EnumerateArray().Select(value => value.GetString()!));
-        Assert.Equal(["category"], properties.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(["category", "forRideProposal", "presentation"], properties.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(["nearest", "alternatives"],
+            properties.GetProperty("presentation").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
         Assert.Equal(["category"], schema.GetProperty("required").EnumerateArray().Select(value => value.GetString()!));
+        Assert.Equal("boolean", properties.GetProperty("forRideProposal").GetProperty("type").GetString());
         Assert.False(ConciergeToolCallPolicy.IsRideTool(ConciergeToolDefinitions.FindNearbyPlaces));
     }
 
@@ -255,6 +316,17 @@ public sealed class NearbyPlacesTests
                 includeRideIdsForCancellation: false)
             .GuestFacingText;
     }
+
+    internal static Task<string> ProductionCafeResultAsync(bool duplicateName = false) =>
+        CreateTool(_ => Json(new
+        {
+            features = new[]
+            {
+                new { properties = new { name = "Suite Havana Café", street = "Northwest 23rd Street", housenumber = "105", lat = 25.799, lon = -80.198, distance = 200, place_id = "havana" } },
+                new { properties = new { name = "Panther Coffee", street = "Northwest 2nd Avenue", housenumber = "2390", lat = 25.801, lon = -80.199, distance = 300, place_id = "panther-wynwood" } },
+                new { properties = new { name = duplicateName ? "Panther Coffee" : "Third Cafe", street = "Purdy Avenue", housenumber = "1875", lat = 25.795, lon = -80.144, distance = 450, place_id = "third" } },
+            },
+        })).FindNearbyPlacesAsync("cafe", CancellationToken.None);
 
     private static NearbyPlaceCategory Category(string key) =>
         NearbyPlaceCategories.TryGet(key, out var category) ? category : throw new ArgumentException(key);

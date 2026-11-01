@@ -12,13 +12,16 @@ public sealed class DeepgramVoiceOptions
     public string? ApiKey { get; set; }
 
     /// <summary>Speech-to-text model.</summary>
-    public string ListenModel { get; set; } = "nova-3";
+    public string ListenModel { get; set; } = "flux-general-en";
 
     /// <summary>Text-to-speech voice model.</summary>
-    public string SpeakModel { get; set; } = "aura-2-thalia-en";
+    public string SpeakModel { get; set; } = "flux-sienna-en";
 
     /// <summary>Minutes without speech before ending an otherwise idle chat.</summary>
     public int IdleTimeoutMinutes { get; set; } = 2;
+
+    /// <summary>TTS speech rate (0.5 to 1.5, default 1.0).</summary>
+    public double Speed { get; set; } = 1.2;
 }
 
 /// <summary>Builds the Voice Agent <c>Settings</c> message for one relay connection.</summary>
@@ -78,7 +81,15 @@ internal static class VoiceAgentSettings
                         headers = new Dictionary<string, string> { ["Authorization"] = "Bearer " + bearer },
                     },
                 },
-                speak = new { provider = new { type = "deepgram", model = options.SpeakModel } },
+                speak = new
+                {
+                    provider = new
+                    {
+                        type = "deepgram",
+                        model = options.SpeakModel,
+                        speed = options.Speed,
+                    },
+                },
             },
         });
 

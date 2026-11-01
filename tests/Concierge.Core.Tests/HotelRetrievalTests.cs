@@ -133,6 +133,25 @@ public sealed class HotelRetrievalTests(PostgreSqlFixture postgres)
         });
     }
 
+    [Theory]
+    [InlineData("Where is the hotel gym, and when is it open?")]
+    [InlineData("Where is the gym and when is it open?")]
+    public async Task FacetedQuestionMatchingOnlyOneSiblingFactFallsBackAndRetainsBothSections(
+        string query)
+    {
+        // Full-text AND semantics let "open" exclude the location fact, leaving one
+        // matching record. The sibling fact on the same authored topic still applies.
+        await using var fixture = await RetrievalFixture.StartAsync(postgres, ingestKnowledge: true);
+
+        var result = await fixture.RetrieveAsync(query);
+
+        Assert.Equal(HotelRetrievalPath.Hybrid, result.Path);
+        Assert.Contains(result.Evidence, evidence =>
+            evidence.EvidenceKey == "zgy-amenities#gym-location");
+        Assert.Contains(result.Evidence, evidence =>
+            evidence.EvidenceKey == "zgy-amenity-hours#gym-hours");
+    }
+
     [Fact]
     public async Task AmbiguousExactTermFallsBackAndFusesLexicalAndVectorRanks()
     {
@@ -407,7 +426,9 @@ public sealed class HotelRetrievalTests(PostgreSqlFixture postgres)
         private static float[] VectorFor(string value)
         {
             var vector = new float[EmbeddingModelIdentity.MigratedSchemaDimensions];
-            if (value.Contains("gym, and when can I use it", StringComparison.OrdinalIgnoreCase))
+            if (value.Contains("gym, and when can I use it", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("gym, and when is it open", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("gym and when is it open", StringComparison.OrdinalIgnoreCase))
             {
                 vector[1] = 1;
                 vector[2] = 1;

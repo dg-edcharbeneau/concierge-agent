@@ -6,6 +6,7 @@ using Concierge.WorkflowServer.Workflows;
 using Microsoft.Extensions.AI;
 using Temporalio.Client;
 using Temporalio.Common;
+using Temporalio.Converters;
 using Temporalio.Exceptions;
 using Temporalio.Workflows;
 
@@ -42,6 +43,7 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
             },
             request.Tools);
         Assert.False(request.HasActionToolsMarker);
+        Assert.False(request.AllowMultipleToolCalls);
         Assert.Empty(host.ActionTools.Calls);
     }
 
@@ -71,6 +73,41 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
         Assert.Contains(history.Events, historyEvent =>
             historyEvent.EventType == Temporalio.Api.Enums.V1.EventType.ActivityTaskScheduled);
         await ReplayAsync(history);
+    }
+
+    [Fact]
+    public async Task CurrentWeatherToolPassesExplicitPeriodAndReturnsObservationNotDailyExtremes()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ActionTools.QueueResult(
+            ConciergeToolDefinitions.GetWeather,
+            JsonSerializer.Serialize(
+                new ConciergeWeatherToolResult(
+                    "Available", null, [], "Hotel ZGY, Miami", null, "partly cloudy",
+                    null, null, null, null,
+                    CurrentTemperatureFahrenheit: 86,
+                    ApparentTemperatureFahrenheit: 91,
+                    RelativeHumidityPercent: 68,
+                    CurrentWindMph: 9,
+                    CurrentPrecipitationInches: 0.03,
+                    ObservedAt: new DateTimeOffset(2026, 10, 21, 14, 15, 0, TimeSpan.FromHours(-4))),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "current-weather",
+            ConciergeToolDefinitions.GetWeather,
+            new Dictionary<string, object?> { ["period"] = "current" }));
+
+        var result = await SubmitAsync(
+            host, handle, stayId, "current-weather", "What's the weather right now?", "voice");
+
+        Assert.Contains("Currently partly cloudy at Hotel ZGY", result.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("86°F", result.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("2:15 PM local time", result.AssistantMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("high around", result.AssistantMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("low near", result.AssistantMessage, StringComparison.Ordinal);
+        Assert.Equal("current", Assert.Single(host.ActionTools.Calls).Arguments["period"]?.ToString());
+        await ReplayAsync(handle);
     }
 
     [Fact]
@@ -159,6 +196,72 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
         Assert.Equal(ConciergeToolDefinitions.FindNearbyPlaces, call.Name);
         Assert.Equal("pharmacy", call.Arguments["category"]);
         await ReplayAsync(await handle.FetchHistoryAsync());
+    }
+
+    [Fact]
+    public async Task BookingNearestPlaceContinuesFromNearbyResultsToProposalWithoutBooking()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "nearby-ride",
+            ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?>
+            {
+                ["category"] = "pharmacy",
+                ["forRideProposal"] = true,
+            }));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "propose-nearest-pharmacy",
+            ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?>
+            {
+                ["dropoff"] = "Scripted Pharmacy",
+                ["immediate"] = true,
+            }));
+
+        var result = await SubmitAsync(
+            host, handle, stayId, "nearest-pharmacy-ride", "Book me a ride to the nearest pharmacy.");
+
+        Assert.Equal(2, host.ChatClient.Requests.Count);
+        Assert.All(host.ChatClient.Requests, request => Assert.False(request.AllowMultipleToolCalls));
+        Assert.Equal(
+            [ConciergeToolDefinitions.FindNearbyPlaces, ConciergeToolDefinitions.ProposeRide],
+            host.ActionTools.Calls.Select(call => call.Name));
+        Assert.Equal("pharmacy", host.ActionTools.Calls[0].Arguments["category"]);
+        Assert.Equal("Scripted Pharmacy", host.ActionTools.Calls[1].Arguments["dropoff"]);
+        Assert.True(host.ActionTools.Calls[1].Arguments.ContainsKey(ConciergeToolDefinitions.TrustedDestinationKey));
+        Assert.Contains("Scripted Pharmacy", result.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("No ride has been booked.", result.AssistantMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+        await ReplayAsync(await handle.FetchHistoryAsync());
+    }
+
+    [Fact]
+    public async Task RideLookupWithNoNearbyResultsDoesNotRequestAnotherModelRound()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ActionTools.QueueResult(
+            ConciergeToolDefinitions.FindNearbyPlaces,
+            JsonSerializer.Serialize(
+                new ConciergeNearbyPlacesToolResult("NoResults", "pharmacy", []),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "no-nearby-pharmacy",
+            ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?>
+            {
+                ["category"] = "pharmacy",
+                ["forRideProposal"] = true,
+            }));
+
+        var result = await SubmitAsync(
+            host, handle, stayId, "no-nearest-pharmacy", "Book a ride to the nearest pharmacy.");
+
+        Assert.Single(host.ChatClient.Requests);
+        Assert.Single(host.ActionTools.Calls);
+        Assert.Contains("couldn't find", result.AssistantMessage, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -370,6 +473,80 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
     }
 
     [Fact]
+    public async Task CinemaLookupWithUnsolicitedWeatherRejectsWholeBatchWithoutDispatchOrRetry()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCalls(
+            ("cinema", ConciergeToolDefinitions.FindNearbyPlaces,
+                new Dictionary<string, object?> { ["category"] = "cinema" }),
+            ("unsolicited-weather", ConciergeToolDefinitions.GetWeather,
+                new Dictionary<string, object?> { ["period"] = "today" })));
+
+        var result = await SubmitAsync(host, handle, stayId, "cinema-mixed", "Where is the nearest movie theater?");
+
+        Assert.Contains("safely process", result.AssistantMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(host.ActionTools.Calls);
+        Assert.False(Assert.Single(host.ChatClient.Requests).AllowMultipleToolCalls);
+        await ReplayAsync(await handle.FetchHistoryAsync());
+    }
+
+    [Fact]
+    public async Task CinemaLookupDefaultsOmittedRidePurposeToFalseWithoutAnExtraModelRound()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.FindNearbyPlaces,
+            JsonSerializer.Serialize(new ConciergeNearbyPlacesToolResult(
+                "Available", "cinema", [new ConciergeNearbyPlace("Scripted Cinema", "101 Main Street", 0.6)]),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "cinema-only", ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?> { ["category"] = "cinema" }));
+
+        var result = await SubmitAsync(host, handle, stayId, "cinema-only", "Where is the nearest movie theater?");
+
+        Assert.False(Assert.Single(host.ChatClient.Requests).AllowMultipleToolCalls);
+        Assert.Equal(ConciergeToolDefinitions.FindNearbyPlaces, Assert.Single(host.ActionTools.Calls).Name);
+        Assert.Contains("Scripted Cinema", result.AssistantMessage, StringComparison.Ordinal);
+        var history = await handle.FetchHistoryAsync();
+        var scheduled = Assert.Single(history.Events, entry =>
+            entry.ActivityTaskScheduledEventAttributes?.ActivityType.Name ==
+            "TemporalCommunity.Extensions.AI.InvokeFunction");
+        var input = await host.Environment.Client.Options.DataConverter
+            .ToSingleValueAsync<JsonElement>(scheduled.ActivityTaskScheduledEventAttributes.Input.Payloads_);
+        Assert.False(input.GetProperty("arguments").GetProperty("forRideProposal").GetBoolean());
+        await ReplayAsync(history);
+    }
+
+    [Fact]
+    public async Task FailedActiveRideCheckClosesAnOlderOfferInsteadOfLeavingItConfirmable()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "first-offer", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "South Beach", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "first-offer", "A ride to South Beach.");
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.ProposeRide,
+            JsonSerializer.Serialize(new ConciergeRideProposalToolResult(
+                "ActiveRidesUnavailable", null, [], null, null, null, null),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "failed-offer", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "Wayan Miami", ["immediate"] = true }));
+
+        var failed = await SubmitAsync(host, handle, stayId, "failed-offer", "Actually, a ride to Wayan Miami.");
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "confirm-failed-offer", ConciergeToolDefinitions.ConfirmRide, new Dictionary<string, object?>()));
+        await SubmitAsync(host, handle, stayId, "confirm-failed-offer", "Yes, book it.");
+
+        Assert.Contains("haven't offered a new one", failed.AssistantMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+        await ReplayAsync(await handle.FetchHistoryAsync());
+    }
+
+    [Fact]
     public async Task VoiceEndChatAlonePreservesTheClientHandshake()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
@@ -560,7 +737,7 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
                 ConciergeToolDefinitions.ProposeRide,
                 "Could I get a ride to South Beach?",
                 new Dictionary<string, object?> { ["dropoff"] = "South Beach", ["immediate"] = true },
-                TimeSpan.FromSeconds(18)),
+                TimeSpan.FromSeconds(30)),
             (
                 ConciergeToolDefinitions.ConfirmRide,
                 "Please confirm the ride.",
@@ -1091,6 +1268,157 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
     }
 
     [Fact]
+    public async Task RevisedVoiceBookingRequestReturnsKnownReceiptWithoutAnotherBooking()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "revise-proposal",
+            ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "South Beach", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "revise-proposal", "Book me a ride to South Beach.");
+
+        var voiceSessionId = Guid.NewGuid().ToString("N");
+        var confirmationId = $"v:{voiceSessionId}:1:1:{new string('a', 64)}";
+        var revisedId = $"v:{voiceSessionId}:1:1:{new string('b', 64)}";
+        var ride = new RideSummary(
+            Guid.NewGuid(), "Booked", "Hotel ZGY", "South Beach, Miami Beach, Florida",
+            DateTimeOffset.Parse("2026-10-30T09:45:00-04:00"), null, null, null);
+        host.ActionTools.QueueResult(
+            ConciergeToolDefinitions.ConfirmRide,
+            JsonSerializer.Serialize(
+                new ConciergeRideActionResult(true, null, ride, []),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "confirm-ride", ConciergeToolDefinitions.ConfirmRide, new Dictionary<string, object?>()));
+        var confirmed = await SubmitAsync(host, handle, stayId, confirmationId, "Okay, book it.", "voice");
+        Assert.Contains("You're all set.", confirmed.AssistantMessage, StringComparison.Ordinal);
+
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "revised-proposal",
+            ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "South Beach", ["immediate"] = true }));
+        var revised = await SubmitAsync(
+            host, handle, stayId, revisedId, "Okay. Now, please book it.", "voice");
+
+        Assert.Contains("Your ride from Hotel ZGY to South Beach, Miami Beach is booked", revised.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("Friday, October 30 at 9:45 AM hotel time", revised.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("status: Booked", revised.AssistantMessage, StringComparison.Ordinal);
+        Assert.Equal(
+            [ConciergeToolDefinitions.ProposeRide, ConciergeToolDefinitions.ConfirmRide],
+            host.ActionTools.Calls.Select(call => call.Name));
+        Assert.Equal(3, host.ChatClient.Requests.Count);
+        await ReplayAsync(handle);
+    }
+
+    [Fact]
+    public async Task RevisedVoiceBookingRequestDoesNotClaimSuccessWhenOutcomeIsUncertain()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "uncertain-proposal",
+            ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "South Beach", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "uncertain-proposal", "Book me a ride to South Beach.");
+
+        var voiceSessionId = Guid.NewGuid().ToString("N");
+        var confirmationId = $"v:{voiceSessionId}:1:1:{new string('c', 64)}";
+        var revisedId = $"v:{voiceSessionId}:1:1:{new string('d', 64)}";
+        const string uncertainMessage = "The ride service did not confirm the outcome. Check your ride history before trying again.";
+        host.ActionTools.QueueResult(
+            ConciergeToolDefinitions.ConfirmRide,
+            JsonSerializer.Serialize(
+                new ConciergeRideActionResult(true, uncertainMessage, null, []),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "uncertain-confirm", ConciergeToolDefinitions.ConfirmRide, new Dictionary<string, object?>()));
+        await SubmitAsync(host, handle, stayId, confirmationId, "Okay, book it.", "voice");
+
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "uncertain-revised-confirm",
+            ConciergeToolDefinitions.ConfirmRide,
+            new Dictionary<string, object?>()));
+        var revised = await SubmitAsync(
+            host, handle, stayId, revisedId, "Okay. Now, please book it.", "voice");
+
+        Assert.Equal(uncertainMessage, revised.AssistantMessage);
+        Assert.DoesNotContain("booked", revised.AssistantMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            [ConciergeToolDefinitions.ProposeRide, ConciergeToolDefinitions.ConfirmRide],
+            host.ActionTools.Calls.Select(call => call.Name));
+        Assert.Equal(3, host.ChatClient.Requests.Count);
+        await ReplayAsync(handle);
+    }
+
+    [Fact]
+    public async Task ConfirmedBookingOutcomeSurvivesContinueAsNewForARevisedVoiceRequest()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(
+            postgreSql,
+            devServerArgs:
+            [
+                "--dynamic-config-value",
+                "limit.historyCount.suggestContinueAsNew=80",
+            ]);
+        var stayId = await SeedStayAsync(host);
+        var handle = await host.StartStayAsync(
+            stayId,
+            ConciergeTestHost.HotelMidnightUtc(ConciergeTestHost.HotelToday.AddDays(2)));
+        var initialRunId = (await handle.DescribeAsync()).RunId;
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "continue-proposal",
+            ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "South Beach", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "continue-proposal", "Book me a ride to South Beach.");
+
+        var voiceSessionId = Guid.NewGuid().ToString("N");
+        var confirmationId = $"v:{voiceSessionId}:1:1:{new string('e', 64)}";
+        var revisedId = $"v:{voiceSessionId}:1:1:{new string('f', 64)}";
+        var ride = new RideSummary(
+            Guid.NewGuid(), "Booked", "Hotel ZGY", "South Beach, Miami Beach, Florida",
+            DateTimeOffset.Parse("2026-10-30T09:45:00-04:00"), null, null, null);
+        host.ActionTools.QueueResult(
+            ConciergeToolDefinitions.ConfirmRide,
+            JsonSerializer.Serialize(
+                new ConciergeRideActionResult(true, null, ride, []),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "continue-confirm", ConciergeToolDefinitions.ConfirmRide, new Dictionary<string, object?>()));
+        await SubmitAsync(host, handle, stayId, confirmationId, "Okay, book it.", "voice");
+
+        for (var index = 0; index < 6 && (await handle.DescribeAsync()).RunId == initialRunId; index++)
+        {
+            await SubmitAsync(host, handle, stayId, $"continue-{index}", $"Question {index}?");
+            await WaitUntilAsync(
+                async () => (await handle.DescribeAsync()).RunId != initialRunId,
+                TimeSpan.FromSeconds(2),
+                throwOnTimeout: false);
+        }
+
+        Assert.NotEqual(initialRunId, (await handle.DescribeAsync()).RunId);
+        var continued = await ReadRunInputAsync(host, handle);
+        Assert.Equal(confirmationId, continued.ConsumedRideConfirmationOutcome?.TurnId);
+        Assert.True(continued.ConsumedRideConfirmationOutcome?.Confirmed);
+        Assert.Equal(ride.Id, continued.ConsumedRideConfirmationOutcome?.RideId);
+        Assert.Equal(ride.PickupAt, continued.ConsumedRideConfirmationOutcome?.PickupAt);
+
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "continue-revised-confirm",
+            ConciergeToolDefinitions.ConfirmRide,
+            new Dictionary<string, object?>()));
+        var revised = await SubmitAsync(
+            host, handle, stayId, revisedId, "Okay. Now, please book it.", "voice");
+
+        Assert.Contains("Your ride from Hotel ZGY to South Beach, Miami Beach is booked", revised.AssistantMessage, StringComparison.Ordinal);
+        Assert.Contains("status: Booked", revised.AssistantMessage, StringComparison.Ordinal);
+        Assert.Equal(
+            [ConciergeToolDefinitions.ProposeRide, ConciergeToolDefinitions.ConfirmRide],
+            host.ActionTools.Calls.Select(call => call.Name));
+        await ReplayAsync(await handle.FetchHistoryAsync());
+    }
+
+    [Fact]
     public async Task AnswerToTheRideTimingQuestionCarriesTheGuestsBookingRequest()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
@@ -1276,7 +1604,7 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
             host.ChatClient.Requests[^1].Messages,
             message => message.Role == ChatRole.System
                 && message.Text.Contains(
-                    "booked a car from Hotel ZGY to Wynwood, Miami Beach picking up now; closed. Don't repeat. New explicit ride (same route too): ProposeRide. No offer: no ConfirmRide/ConfirmRideCancellation.",
+                    "Ride offer state: a car from Hotel ZGY to Wynwood, Miami Beach picking up now; closed. Confirmed (Booked); receipt is in the prior answer.",
                     StringComparison.Ordinal));
         await ReplayAsync(handle);
     }
@@ -1416,6 +1744,7 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
             host.ActionTools.Calls.Select(call => call.Arguments["period"]?.ToString()).Order());
         Assert.Contains("Expect partly cloudy today at Hotel ZGY", result.AssistantMessage, StringComparison.Ordinal);
         Assert.Contains("Expect partly cloudy tomorrow at Hotel ZGY", result.AssistantMessage, StringComparison.Ordinal);
+        Assert.False(host.ChatClient.Requests[0].AllowMultipleToolCalls);
         Assert.DoesNotContain("couldn't safely", result.AssistantMessage, StringComparison.Ordinal);
         await ReplayAsync(handle);
     }
@@ -1962,6 +2291,315 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
         Assert.DoesNotContain("+00:00", result.AssistantMessage, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("voice", "web")]
+    [InlineData("web", "voice")]
+    public async Task ProductionNearbyAlternateSurvivesAcrossChannelsAsTrustedEndpoint(string searchChannel, string rideChannel)
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        var serialized = await NearbyPlacesTests.ProductionCafeResultAsync();
+        var places = JsonSerializer.Deserialize<ConciergeNearbyPlacesToolResult>(serialized,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        var alternate = places.Places[1];
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.FindNearbyPlaces, serialized);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("cafes", ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?> { ["category"] = "cafe", ["presentation"] = "alternatives" }));
+        await SubmitAsync(host, handle, stayId, "cafes", "What cafes are nearby?", searchChannel);
+        Assert.Single(host.ChatClient.Requests);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("select-panther", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = alternate.Name, ["immediate"] = true }));
+
+        var answer = await SubmitAsync(host, handle, stayId, "panther", "Can you book me a ride to Panther Coffee?", rideChannel);
+
+        Assert.Equal(2, host.ChatClient.Requests.Count);
+        Assert.Equal([ConciergeToolDefinitions.FindNearbyPlaces, ConciergeToolDefinitions.ProposeRide],
+            host.ActionTools.Calls.Select(call => call.Name));
+        var input = string.Join("\n", host.ChatClient.Requests[1].Messages.Select(message => message.Text));
+        Assert.Contains(alternate.Address!, input);
+        Assert.Contains(places.Places[2].Address!, input);
+        var selected = JsonSerializer.Deserialize<ConciergeCanonicalPlace>(
+            host.ActionTools.Calls[1].Arguments[ConciergeToolDefinitions.TrustedDestinationKey]!.ToString()!,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(alternate.Latitude, selected.Latitude);
+        Assert.Equal(alternate.Longitude, selected.Longitude);
+        Assert.Equal(alternate.ProviderId, selected.ProviderId);
+        Assert.Contains("Shall I book it", answer.AssistantMessage);
+        Assert.Contains("No ride has been booked.", answer.AssistantMessage);
+        await ReplayAsync(handle);
+    }
+
+    [Fact]
+    public async Task PlaceContinuityCarriesOriginalExpiryAcrossTwoContinueAsNewRunsAndReplays()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql,
+            devServerArgs: ["--dynamic-config-value", "limit.historyCount.suggestContinueAsNew=160"],
+            flushBatchSize: 1);
+        var (stayId, handle) = await StartStayAsync(host);
+        var firstRun = (await handle.DescribeAsync()).RunId;
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.FindNearbyPlaces, await NearbyPlacesTests.ProductionCafeResultAsync());
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("carry-places", ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?> { ["category"] = "cafe", ["presentation"] = "alternatives" }));
+        await SubmitAsync(host, handle, stayId, "carry-places", "What cafes are nearby?", "voice");
+
+        async Task<ConciergeStayWorkflowInput> ContinueAsync(string previousRun)
+        {
+            for (var index = 0; index < 70 && (await handle.DescribeAsync()).RunId == previousRun; index++)
+            {
+                await handle.ExecuteUpdateAsync(workflow => workflow.AdvanceRideActivityReadOffsetAsync(new(0)));
+                await Task.Delay(20);
+            }
+            Assert.NotEqual(previousRun, (await handle.DescribeAsync()).RunId);
+            await ReplayAsync(host.Environment.Client.GetWorkflowHandle<ConciergeStayWorkflow>(handle.Id, previousRun));
+            var history = await handle.FetchHistoryAsync();
+            return await host.Environment.Client.Options.DataConverter.ToSingleValueAsync<ConciergeStayWorkflowInput>(
+                history.Events.First().WorkflowExecutionStartedEventAttributes.Input.Payloads_);
+        }
+
+        var first = await ContinueAsync(firstRun);
+        Assert.NotNull(first.NearbyPlaces);
+        Assert.Equal(0, first.NearbyPlaces.Sequence);
+        Assert.Equal(3, first.NearbyPlaces.Places.Count);
+        var secondRun = (await handle.DescribeAsync()).RunId;
+        var second = await ContinueAsync(secondRun);
+        Assert.Equal(first.NearbyPlaces.ExpiresAtUtc, second.NearbyPlaces!.ExpiresAtUtc);
+        Assert.Equal(first.NearbyPlaces.Sequence, second.NearbyPlaces.Sequence);
+        Assert.Equal(first.NearbyPlaces.Places, second.NearbyPlaces.Places);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("carried-panther", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "Panther Coffee", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "carried-panther", "Book me a ride to Panther Coffee.", "web");
+        Assert.True(host.ActionTools.Calls.Last().Arguments.ContainsKey(ConciergeToolDefinitions.TrustedDestinationKey));
+        await ReplayAsync(handle);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ExpiredPlaceContinuityDoesNotInjectStaleCoordinates(bool expireByTime)
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var stayId = await SeedStayAsync(host);
+        var place = new ConciergeCanonicalPlace("Panther Coffee", "2390 Northwest 2nd Avenue", "panther", 25.801, -80.199);
+        var state = new ConciergePlacePresentation([place],
+            DateTimeOffset.UtcNow.AddMinutes(expireByTime ? -1 : 10), 0, 1, "cafe");
+        var input = new ConciergeStayWorkflowInput(
+                stayId, DateTimeOffset.UtcNow.AddDays(1), 30, NextSequence: expireByTime ? 1 : 7,
+                VerifiedGuest: ConciergeTestHost.VerifiedGuest(stayId), NearbyPlaces: state);
+        var handle = await host.Environment.Client.StartWorkflowAsync(
+            (ConciergeStayWorkflow workflow) => workflow.RunAsync(input),
+            new WorkflowOptions($"expired-place-{Guid.NewGuid():N}", TemporalWorkerConnection.TaskQueue));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("expired-place", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "Panther Coffee", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "expired-place", "Book me a ride to that one.", "voice");
+        var call = Assert.Single(host.ActionTools.Calls);
+        Assert.Equal(ConciergeToolDefinitions.ProposeRide, call.Name);
+        Assert.False(call.Arguments.ContainsKey(ConciergeToolDefinitions.TrustedDestinationKey));
+        Assert.DoesNotContain(host.ChatClient.Requests.Single().Messages,
+            message => message.Text.Contains("Verified place continuity", StringComparison.Ordinal));
+        await ReplayAsync(handle);
+    }
+
+    [Fact]
+    public async Task ClarificationBranchSelectionUsesStoredCandidatesWithoutGeocodingAgain()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        ConciergeCanonicalPlace[] branches =
+        [
+            new("Panther Coffee", "2390 Northwest 2nd Avenue", "wynwood", 25.801, -80.199),
+            new("Panther Coffee", "1875 Purdy Avenue", "beach", 25.795, -80.144),
+        ];
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.ProposeRide, JsonSerializer.Serialize(
+            new ConciergeRideProposalToolResult("NeedsClarification", null,
+                branches.Select(place => $"{place.Name}, {place.Address}, Miami, FL, United States of America").ToArray(),
+                null, null, null, null, CanonicalCandidates: branches),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("ambiguous-panther", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "Panther Coffee", ["immediate"] = true }));
+        var question = await SubmitAsync(host, handle, stayId, "ambiguous-panther", "Book me a ride to Panther Coffee.", "voice");
+        Assert.Contains("2390 Northwest 2nd Avenue", question.AssistantMessage);
+        Assert.Contains("1875 Purdy Avenue", question.AssistantMessage);
+        Assert.DoesNotContain("United States", question.AssistantMessage);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("choose-branch", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "Panther Coffee, 1875 Purdy Avenue", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "choose-branch", "I mean the one on Purdy Avenue.", "web");
+        var selected = JsonSerializer.Deserialize<ConciergeCanonicalPlace>(
+            host.ActionTools.Calls.Last().Arguments[ConciergeToolDefinitions.TrustedDestinationKey]!.ToString()!,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(branches[1], selected);
+        Assert.Equal(2, host.ChatClient.Requests.Count);
+        Assert.Equal(2, host.ActionTools.Calls.Count);
+        await ReplayAsync(handle);
+    }
+
+    [Fact]
+    public async Task ProductionNearbyContinuationRetainsStructuredAlternatesInActualSecondModelInput()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        var serialized = await NearbyPlacesTests.ProductionCafeResultAsync();
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.FindNearbyPlaces, serialized);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("nearest-cafe", ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?>
+            {
+                ["category"] = "cafe", ["presentation"] = "nearest", ["forRideProposal"] = true,
+            }));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("offer-cafe", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "Suite Havana Café", ["immediate"] = true }));
+
+        var answer = await SubmitAsync(host, handle, stayId, "nearest-cafe", "Book me a ride to the nearest coffee shop.", "voice");
+
+        Assert.Equal(2, host.ChatClient.Requests.Count);
+        Assert.Equal(2, host.ActionTools.Calls.Count);
+        var resultContent = Assert.Single(host.ChatClient.Requests[1].Messages.SelectMany(message => message.Contents)
+            .OfType<FunctionResultContent>());
+        using var facts = JsonDocument.Parse(resultContent.Result!.ToString()!);
+        var original = JsonSerializer.Deserialize<ConciergeNearbyPlacesToolResult>(serialized,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(original.Places[1].Address, facts.RootElement.GetProperty("places")[1].GetProperty("address").GetString());
+        Assert.Equal(original.Places[2].Address, facts.RootElement.GetProperty("places")[2].GetProperty("address").GetString());
+        Assert.True(host.ActionTools.Calls[1].Arguments.ContainsKey(ConciergeToolDefinitions.TrustedDestinationKey));
+        Assert.Contains("Shall I book it", answer.AssistantMessage);
+        Assert.DoesNotContain(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+        await ReplayAsync(handle);
+    }
+
+    [Theory]
+    [InlineData("Book me a ride to Panther Coffee.", "Panther Coffee", false)]
+    [InlineData("Book me a ride to Panther Coffee on Purdy Avenue.", "Panther Coffee, 1875 Purdy Avenue", true)]
+    [InlineData("Book me a ride to the second one.", "Panther Coffee, 2390 Northwest 2nd Avenue", true)]
+    [InlineData("Book me a ride to that one.", "Panther Coffee", false)]
+    public async Task ProductionNearbySelectionClarifiesAmbiguousModelDestination(
+        string guest, string destination, bool allowed)
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.FindNearbyPlaces, await NearbyPlacesTests.ProductionCafeResultAsync(true));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("branches", ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?> { ["category"] = "cafe", ["presentation"] = "alternatives" }));
+        await SubmitAsync(host, handle, stayId, "branches", "What cafes are nearby?", "voice");
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("branch-ride", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = destination, ["immediate"] = true }));
+        var answer = await SubmitAsync(host, handle, stayId, "branch-ride", guest, "voice");
+
+        Assert.Equal(allowed ? 2 : 1, host.ActionTools.Calls.Count);
+        Assert.Equal(2, host.ChatClient.Requests.Count);
+        if (allowed)
+        {
+            Assert.True(host.ActionTools.Calls[1].Arguments.ContainsKey(ConciergeToolDefinitions.TrustedDestinationKey));
+        }
+        else
+        {
+            Assert.Equal(ConciergePlaceContinuity.Clarify, answer.AssistantMessage);
+        }
+        await ReplayAsync(handle);
+    }
+
+    [Theory]
+    [InlineData("voice")]
+    [InlineData("web")]
+    public async Task NaturalPharmacyReferenceReachesCanonicalProposalAndRequiresLaterConfirmation(string channel)
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        var pharmacy = new ConciergeCanonicalPlace(
+            "Healthi Rx Pharmacy", "2318 Northeast 2nd Avenue", "healthi", 25.799, -80.191);
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.FindNearbyPlaces, JsonSerializer.Serialize(
+            new ConciergeNearbyPlacesToolResult("Available", "pharmacy",
+                [new(pharmacy.Name, pharmacy.Address, 0.1, pharmacy.ProviderId, pharmacy.Latitude, pharmacy.Longitude)]),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("pharmacy", ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?> { ["category"] = "pharmacy", ["presentation"] = "nearest" }));
+        await SubmitAsync(host, handle, stayId, "pharmacy", "What is the nearest pharmacy?", channel);
+        const string guest = "Okay. Great. Could you get me... Book me a ride to that pharmacy to leave right now? I'm really in a hurry.";
+        var pickup = new ConciergeRidePlace("Hotel ZGY", 25.8, -80.2);
+        var dropoff = new ConciergeRidePlace(
+            $"{pharmacy.Name}, {pharmacy.Address}", pharmacy.Latitude, pharmacy.Longitude);
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.ProposeRide, JsonSerializer.Serialize(
+            new ConciergeRideProposalToolResult("Available", null, [],
+                new(pickup, dropoff, true, null, 180), null, null, null),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("pharmacy-offer", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?>
+            {
+                ["dropoff"] = "Healthi Rx Pharmacy, 2318 Northeast 2nd Avenue", ["immediate"] = true,
+            }));
+
+        var offer = await SubmitAsync(host, handle, stayId, "pharmacy-offer", guest, channel);
+
+        Assert.Equal(2, host.ChatClient.Requests.Count); // One model call for the retained-place proposal.
+        Assert.Equal([ConciergeToolDefinitions.FindNearbyPlaces, ConciergeToolDefinitions.ProposeRide],
+            host.ActionTools.Calls.Select(call => call.Name));
+        var modelInput = string.Join("\n", host.ChatClient.Requests[1].Messages.Select(message => message.Text));
+        Assert.Contains(guest, modelInput);
+        Assert.Contains(pharmacy.Address!, modelInput);
+        Assert.Contains("\"PresentedCount\":1", modelInput);
+        Assert.Contains("\"FocusIndex\":0", modelInput);
+        var proposal = host.ActionTools.Calls[1];
+        var canonical = JsonSerializer.Deserialize<ConciergeCanonicalPlace>(
+            proposal.Arguments[ConciergeToolDefinitions.TrustedDestinationKey]!.ToString()!,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.Equal(pharmacy, canonical);
+        Assert.Equal(stayId.ToString("D"), proposal.StayId);
+        Assert.Contains("No ride has been booked", offer.AssistantMessage);
+        Assert.Contains("Shall I book it", offer.AssistantMessage);
+        Assert.Contains(dropoff.Name, offer.AssistantMessage);
+        Assert.DoesNotContain(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("pharmacy-confirm", ConciergeToolDefinitions.ConfirmRide,
+            new Dictionary<string, object?>()));
+        var booked = new RideSummary(Guid.NewGuid(), "Booked", pickup.Name, dropoff.Name,
+            new(2026, 10, 30, 19, 57, 0, TimeSpan.FromHours(-4)), null, null, null);
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.ConfirmRide, JsonSerializer.Serialize(
+            new ConciergeRideActionResult(true, null, booked, []), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var receipt = await SubmitAsync(host, handle, stayId, "pharmacy-confirm", "Yes, book that ride now.", channel);
+        Assert.Equal(ConciergeToolDefinitions.ConfirmRide, host.ActionTools.Calls.Last().Name);
+        Assert.Single(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+        Assert.Contains($"take you to {(channel == "voice" ? pharmacy.Name : dropoff.Name)}.", receipt.AssistantMessage);
+        Assert.Contains(channel == "voice" ? "at Hotel ZGY now" : "Friday, October 30 at 7:57 PM hotel time",
+            receipt.AssistantMessage);
+
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("pharmacy-status", ConciergeToolDefinitions.GetRideStatus,
+            new Dictionary<string, object?> { ["rideId"] = booked.Id.ToString("D") }));
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.GetRideStatus, JsonSerializer.Serialize(
+            new ConciergeRideActionResult(true, null, booked, []), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var status = await SubmitAsync(host, handle, stayId, "pharmacy-status", "Is my ride almost here?", channel);
+        Assert.Contains($"to {(channel == "voice" ? pharmacy.Name : dropoff.Name)} is booked", status.AssistantMessage);
+        if (channel == "voice")
+        {
+            Assert.DoesNotContain(pharmacy.Address!, receipt.AssistantMessage);
+            Assert.DoesNotContain(pharmacy.Address!, status.AssistantMessage);
+            Assert.DoesNotContain("October", status.AssistantMessage);
+        }
+        Assert.Single(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+        Assert.Equal(4, host.ChatClient.Requests.Count);
+        await ReplayAsync(handle);
+    }
+
+    [Theory]
+    [InlineData("Panther Coffee, Another Street")]
+    [InlineData("Miami International Airport")]
+    public async Task ChangedOrNewModelDestinationUsesNormalResolution(string destination)
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ActionTools.QueueResult(ConciergeToolDefinitions.FindNearbyPlaces, await NearbyPlacesTests.ProductionCafeResultAsync());
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("nearby-change", ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?> { ["category"] = "cafe" }));
+        await SubmitAsync(host, handle, stayId, "nearby-change", "What cafes are nearby?");
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall("changed-destination", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = destination, ["immediate"] = true }));
+
+        await SubmitAsync(host, handle, stayId, "changed-destination", $"Actually, take me to {destination} instead.");
+
+        var call = host.ActionTools.Calls.Last();
+        Assert.Equal(ConciergeToolDefinitions.ProposeRide, call.Name);
+        Assert.Equal(destination, call.Arguments["dropoff"]?.ToString());
+        Assert.False(call.Arguments.ContainsKey(ConciergeToolDefinitions.TrustedDestinationKey));
+        Assert.DoesNotContain(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+        await ReplayAsync(handle);
+    }
+
     private static async Task<(Guid StayId, WorkflowHandle<ConciergeStayWorkflow> Handle)> StartStayAsync(
         ConciergeTestHost host)
     {
@@ -2033,6 +2671,38 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
             .OfType<FunctionResultContent>()
             .LastOrDefault()
             ?.Result?.ToString() ?? "No tool result.";
+
+    private static async Task<ConciergeStayWorkflowInput> ReadRunInputAsync(
+        ConciergeTestHost host,
+        WorkflowHandle<ConciergeStayWorkflow> handle)
+    {
+        var history = await handle.FetchHistoryAsync();
+        return await host.Environment.Client.Options.DataConverter
+            .ToSingleValueAsync<ConciergeStayWorkflowInput>(
+                history.Events.First().WorkflowExecutionStartedEventAttributes.Input.Payloads_);
+    }
+
+    private static async Task WaitUntilAsync(
+        Func<Task<bool>> condition,
+        TimeSpan timeout,
+        bool throwOnTimeout = true)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (!await condition())
+        {
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                if (throwOnTimeout)
+                {
+                    throw new TimeoutException("Condition was not met in time.");
+                }
+
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(100));
+        }
+    }
 
     private const string GuidPattern = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 

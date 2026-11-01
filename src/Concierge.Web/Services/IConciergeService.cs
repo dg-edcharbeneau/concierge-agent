@@ -82,7 +82,8 @@ public interface IConciergeService
 
     /// <summary>
     /// Submits a voice turn for an already authorized session through the same stay workflow update as text.
-    /// The same <paramref name="turnId"/> and message return the original reply.
+    /// Exact retries join the same workflow attempt. A superseded voice attempt remains terminal;
+    /// its retry cannot reactivate it or return an obsolete conversational reply.
     /// Throws a 401 <see cref="ConciergeApiException"/> when the session has no verified guest profile.
     /// </summary>
     Task<ConciergeTurnResult> SubmitVoiceTurnAsync(

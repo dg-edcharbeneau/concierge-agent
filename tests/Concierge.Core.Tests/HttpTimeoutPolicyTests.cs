@@ -244,7 +244,7 @@ public sealed class HttpTimeoutPolicyTests
         Assert.True(Tool(ConciergeToolDefinitions.FindNearbyPlaces) >= location + Margin);
         Assert.True(Tool(ConciergeToolDefinitions.GetPlaceOpeningHours) >= location + Margin);
         Assert.True(Tool(ConciergeToolDefinitions.GetRoute) >= 3 * location + Margin);
-        Assert.True(Tool(ConciergeToolDefinitions.ProposeRide) >= 3 * location + Margin);
+        Assert.True(Tool(ConciergeToolDefinitions.ProposeRide) >= 3 * location + ride + Margin);
 
         // Ride tools: one ride-service call bounded by the client timeout.
         foreach (var name in new[]

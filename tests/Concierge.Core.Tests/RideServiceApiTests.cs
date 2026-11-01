@@ -296,6 +296,74 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
         Assert.Equal(0L, await host.ScalarAsync<long>("SELECT count(*) FROM ride_events;"));
     }
 
+    [Theory]
+    [InlineData(60, false)]
+    [InlineData(8, true)]
+    public async Task CancellationIsInStayFeedBeforeTerminalWorkflowClosesAndReconnectDeduplicates(
+        int pickupInMinutes, bool assigned)
+    {
+        var now = DateTimeOffset.UtcNow;
+        await using var host = await RideTestHost.StartAsync(postgreSql, now);
+        var checkoutDate = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(now, HotelTimeZone).DateTime).AddDays(1);
+        var response = await host.BookAsync(Booking(
+            "cancel-feed", now.AddMinutes(pickupInMinutes), checkoutDate: checkoutDate));
+        var ride = (await ReadRideAsync(response))!;
+        using var cancelled = await host.DeleteAsync(ride.Id, GuestId, StayId);
+        Assert.Equal(HttpStatusCode.NoContent, cancelled.StatusCode);
+        var workflow = host.Environment.Client.GetWorkflowHandle<RideBookingWorkflow>(ride.Id.ToString("N"));
+        await workflow.GetResultAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        string[] expected = assigned ? ["Booked", "DriverAssigned", "Cancelled"] : ["Booked", "Cancelled"];
+        Assert.Equal(expected, await host.EventStatusesAsync(ride.Id));
+        Assert.Equal("Cancelled", (await ReadOwnedRideAsync(host, ride.Id))!.Status);
+
+        // Subscribe only after closure: a connected browser must not be needed to retain it.
+        var stayId = ConciergeStayWorkflowIds.ForStay(StayId);
+        await using var client = new WorkflowStreamClient(host.Environment.Client, stayId);
+        using var readDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var subscription = client.GetTopic<RideActivityEntry>(RideActivityFeed.Topic)
+            .SubscribeAsync(0).GetAsyncEnumerator(readDeadline.Token);
+        var entries = new List<RideActivityEntry>();
+        while (entries.All(entry => entry.Status != "Cancelled"))
+        {
+            Assert.True(await subscription.MoveNextAsync());
+            entries.Add(subscription.Current.Value);
+        }
+        Assert.Equal(expected, entries.Select(entry => entry.Status));
+        Assert.Equal(Enumerable.Range(1, expected.Length), entries.Select(entry => entry.Sequence));
+
+        await using var retry = new WorkflowStreamClient(host.Environment.Client, stayId);
+        retry.GetTopic<RideActivityEntry>(RideActivityFeed.Topic).Publish(entries[^1], forceFlush: true);
+        await retry.FlushAsync();
+        Assert.True(await subscription.MoveNextAsync());
+        entries.Add(subscription.Current.Value);
+        var window = new Concierge.Web.Services.ConciergeRideActivityWindow(
+            new Concierge.Web.Services.ConciergeRideActivitySnapshot(
+                new Concierge.Contracts.ConciergeRideReadState(0, 0, 0), []));
+        for (var index = 0; index < entries.Count; index++)
+        {
+            window.Apply(new Concierge.Web.Services.ConciergeRideActivityItem(index, entries[index]));
+        }
+        Assert.Equal(expected, window.Entries.Select(item => item.Entry.Status));
+        await using var renderingServices = new ServiceCollection().AddLogging().BuildServiceProvider();
+        await using var renderer = new Microsoft.AspNetCore.Components.Web.HtmlRenderer(
+            renderingServices, renderingServices.GetRequiredService<ILoggerFactory>());
+        var html = await renderer.Dispatcher.InvokeAsync(async () =>
+        {
+            var panel = await renderer.RenderComponentAsync<Concierge.Web.Components.Shared.RideActivityPanel>(
+                Microsoft.AspNetCore.Components.ParameterView.FromDictionary(new Dictionary<string, object?>
+                {
+                    ["Entries"] = window.Entries.Select(item => item.Entry).ToArray(),
+                    ["IsOpen"] = true,
+                }));
+            return panel.ToHtmlString();
+        });
+        Assert.Matches("<h3[^>]*>Cancelled</h3>", html);
+        Assert.Equal(expected.Length, html.Split("<li class=\"ride-activity-entry").Length - 1);
+        using var repeated = await host.DeleteAsync(ride.Id, GuestId, StayId);
+        Assert.Equal(HttpStatusCode.NoContent, repeated.StatusCode);
+        Assert.Equal(expected, await host.EventStatusesAsync(ride.Id));
+    }
+
     [Fact]
     public async Task ImmediateRidePublishesOrderedEntriesAndConsumersDeduplicateByRideSequence()
     {
@@ -334,6 +402,8 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
             received.Select(entry => entry.Status));
         Assert.Equal([1, 2, 3, 4], received.Select(entry => entry.Sequence));
         Assert.Equal(ride.Id, Assert.Single(received.Select(entry => entry.RideId).Distinct()));
+        Assert.Equal(ride.PickupAt.ToUniversalTime().AddSeconds(request.RouteDurationSeconds),
+            received[0].ArrivalAtUtc);
         Assert.Equal("Alex Rivera", received[1].DriverName);
         Assert.Equal("ZGY Sedan", received[1].Car);
         Assert.Equal("ZGY-4821", received[1].Plate);
@@ -700,9 +770,11 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
             WorkflowType: RideWorkflowNames.BookingWorkflow);
 
     /// <summary>Commits the ride, then outlives every attempt so Temporal reports failure.</summary>
-    public sealed class PersistThenTimeOutRideBookingActivities(RideRepository repository)
+    public sealed class PersistThenTimeOutRideBookingActivities(
+        RideRepository repository,
+        RideStreamPublishingActivities publisher)
     {
-        private readonly RideBookingActivities inner = new(repository);
+        private readonly RideBookingActivities inner = new(repository, publisher);
 
         [Activity(RideWorkflowNames.StoreBookingActivity)]
         public async Task<RideResponse> StoreBookingAsync(RideBookingCommand booking)
@@ -809,6 +881,7 @@ public sealed class RideServiceApiTests(PostgreSqlFixture postgreSql)
             builder.Services.AddSingleton(HotelTimeZone);
             builder.Services.AddSingleton<RideRepository>();
             builder.Services.AddSingleton<RideBookingService>();
+            builder.Services.AddScoped<RideStreamPublishingActivities>();
             builder.Services.AddOptions<RideSchedulingOptions>()
                 .Configure(options =>
                 {

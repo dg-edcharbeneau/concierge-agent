@@ -124,3 +124,98 @@ test("mute set before microphone setup keeps the newly acquired track disabled",
     assert.deepEqual(socket.sent, []);
     assert.equal(socket.readyState, 1);
 });
+
+test("idle warning follows server events, not mic frames, mute, or resume", async () => {
+    const harness = createVoiceHarness();
+    const calls = [];
+    await harness.voice.start("credential", null, {
+        invokeMethodAsync: async (...args) => { calls.push(args); },
+    });
+    const socket = harness.sockets[0];
+    const emit = message => socket.onmessage({ data: JSON.stringify(message) });
+    emit({ type: "SettingsApplied" });
+    await flushMicrotasks();
+    emit({ type: "IdleWarning", active: true });
+    const microphone = harness.audioNodes.find(node => node.name === "concierge-mic");
+    microphone.port.onmessage({ data: new ArrayBuffer(640) });
+    harness.voice.setMuted(true);
+    harness.voice.setMuted(false);
+    await harness.voice.resume();
+    assert.deepEqual(calls.filter(call => call[0] === "OnVoiceIdleWarning"), [
+        ["OnVoiceIdleWarning", true],
+    ]);
+    emit({ type: "IdleWarning", active: false });
+    emit({ type: "IdleWarning", active: true });
+    emit({ type: "UserStartedSpeaking", interruptionNumber: 1 });
+    emit({ type: "IdleWarning", active: true });
+    emit({ type: "AgentThinking" });
+    assert.deepEqual(calls.filter(call => call[0] === "OnVoiceIdleWarning").map(call => call[1]),
+        [true, false, true, false, true, false]);
+});
+
+test("idle ending carries its reason and a socket close cannot replace it with generic disconnect", async () => {
+    const harness = createVoiceHarness();
+    const calls = [];
+    await harness.voice.start("credential", null, {
+        invokeMethodAsync: async (...args) => { calls.push(args); },
+    });
+    const socket = harness.sockets[0];
+    socket.onmessage({ data: '{"type":"EndChatRequested","reason":"idle_timeout"}' });
+    socket.onclose({ code: 4401 });
+    assert.deepEqual(calls.filter(call => call[0] === "OnVoiceEndRequested"),
+        [["OnVoiceEndRequested", "idle_timeout"]]);
+    assert.equal(calls.some(call => call[0] === "OnVoiceState" && call[1] === "disconnected"), false);
+});
+
+test("stopped or replaced sockets cannot restore an idle warning or end the new chat", async () => {
+    const harness = createVoiceHarness();
+    const calls = [];
+    const dotNet = { invokeMethodAsync: async (...args) => { calls.push(args); } };
+    await harness.voice.start("credential", null, dotNet);
+    const stale = harness.sockets[0];
+    stale.onmessage({ data: '{"type":"IdleWarning","active":true}' });
+    await harness.voice.start("credential", "session", dotNet);
+    stale.onmessage({ data: '{"type":"IdleWarning","active":true}' });
+    stale.onmessage({ data: '{"type":"EndChatRequested","reason":"idle_timeout"}' });
+    assert.deepEqual(calls.filter(call => call[0] === "OnVoiceIdleWarning").map(call => call[1]), [true, false]);
+    assert.equal(calls.some(call => call[0] === "OnVoiceEndRequested"), false);
+    harness.sockets[1].onmessage({ data: '{"type":"IdleWarning","active":true}' });
+    harness.voice.stop();
+    assert.equal(calls.filter(call => call[0] === "OnVoiceIdleWarning").at(-1)[1], false);
+});
+
+test("farewell still waits for playback and is cancellable by speech", async () => {
+    const harness = createVoiceHarness();
+    const calls = [];
+    await harness.voice.start("credential", null, {
+        invokeMethodAsync: async (...args) => { calls.push(args); },
+    });
+    const socket = harness.sockets[0];
+    const playback = harness.audioNodes.find(node => node.name === "concierge-play");
+    const emit = message => socket.onmessage({ data: JSON.stringify(message) });
+    socket.onmessage({ data: new ArrayBuffer(2) });
+    emit({ type: "EndChatAfterPlayback", reason: "farewell_playback_ready" });
+    assert.equal(calls.some(call => call[0] === "OnVoiceEndRequested"), false);
+    emit({ type: "UserStartedSpeaking", interruptionNumber: 1 });
+    playback.port.onmessage({ data: { type: "drained" } });
+    assert.equal(calls.some(call => call[0] === "OnVoiceEndRequested"), false);
+    socket.onmessage({ data: new ArrayBuffer(2) });
+    emit({ type: "EndChatAfterPlayback", reason: "farewell_playback_ready" });
+    playback.port.onmessage({ data: { type: "drained" } });
+    assert.deepEqual(calls.filter(call => call[0] === "OnVoiceEndRequested"),
+        [["OnVoiceEndRequested", "farewell_playback_ready"]]);
+});
+
+test("unexpected disconnect clears the warning and still reports the connection failure", async () => {
+    const harness = createVoiceHarness();
+    const calls = [];
+    await harness.voice.start("credential", null, {
+        invokeMethodAsync: async (...args) => { calls.push(args); },
+    });
+    const socket = harness.sockets[0];
+    socket.onmessage({ data: '{"type":"IdleWarning","active":true}' });
+    socket.onclose({ code: 4000 });
+    assert.deepEqual(calls.filter(call => call[0] === "OnVoiceIdleWarning").map(call => call[1]), [true, false]);
+    assert.deepEqual(calls.at(-1), ["OnVoiceState", "disconnected", "Voice disconnected.", 4000]);
+    assert.equal(calls.some(call => call[0] === "OnVoiceEndRequested"), false);
+});

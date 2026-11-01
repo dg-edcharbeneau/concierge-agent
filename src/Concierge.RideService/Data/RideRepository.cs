@@ -265,7 +265,8 @@ public sealed class RideRepository(NpgsqlDataSource dataSource, TimeZoneInfo hot
             return new RideCancellationResult(
                 true,
                 ride.Status,
-                ToActivityEntry(ride, priorSequence, "Cancelled", occurredAt));
+                ToActivityEntry(ride, priorSequence, "Cancelled", occurredAt),
+                ride.StayWorkflowId);
         }
 
         if (ride.Status is not ("Booked" or "DriverAssigned"))
@@ -301,7 +302,7 @@ public sealed class RideRepository(NpgsqlDataSource dataSource, TimeZoneInfo hot
             transaction,
             cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return new RideCancellationResult(true, "Cancelled", entry);
+        return new RideCancellationResult(true, "Cancelled", entry, ride.StayWorkflowId);
     }
 
     public async Task<RideResponse?> GetOwnedAsync(
@@ -447,7 +448,7 @@ public sealed class RideRepository(NpgsqlDataSource dataSource, TimeZoneInfo hot
         await using var command = new NpgsqlCommand(
             """
             SELECT id, guest_id, pickup_name, dropoff_name, pickup_at_utc,
-                   status, driver_name, driver_car, driver_plate
+                   status, driver_name, driver_car, driver_plate, stay_workflow_id
             FROM rides
             WHERE id = $1
             FOR UPDATE;
@@ -470,7 +471,8 @@ public sealed class RideRepository(NpgsqlDataSource dataSource, TimeZoneInfo hot
             reader.GetString(5),
             reader.IsDBNull(6) ? null : reader.GetString(6),
             reader.IsDBNull(7) ? null : reader.GetString(7),
-            reader.IsDBNull(8) ? null : reader.GetString(8));
+            reader.IsDBNull(8) ? null : reader.GetString(8),
+            reader.GetString(9));
     }
 
     private static async Task<RideEvent?> ReadEventAsync(
@@ -572,7 +574,8 @@ public sealed class RideRepository(NpgsqlDataSource dataSource, TimeZoneInfo hot
         string Status,
         string? DriverName,
         string? Car,
-        string? Plate);
+        string? Plate,
+        string StayWorkflowId);
 
     private sealed record RideEvent(string Status, DateTimeOffset OccurredAtUtc);
 

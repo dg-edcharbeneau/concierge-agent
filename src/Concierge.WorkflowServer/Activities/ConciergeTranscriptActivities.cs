@@ -34,8 +34,9 @@ public sealed class ConciergeTranscriptActivities(NpgsqlDataSource dataSource)
                     guest_message,
                     assistant_message,
                     occurred_at_utc,
-                    interrupted)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    interrupted,
+                    superseded)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (stay_id, turn_id) DO NOTHING;
                 """,
                 connection,
@@ -49,6 +50,7 @@ public sealed class ConciergeTranscriptActivities(NpgsqlDataSource dataSource)
             insert.Parameters.AddWithValue(turn.AssistantMessage);
             insert.Parameters.AddWithValue(turn.OccurredAtUtc);
             insert.Parameters.AddWithValue(turn.Interrupted);
+            insert.Parameters.AddWithValue(turn.Superseded);
 
             if (await insert.ExecuteNonQueryAsync(cancellationToken) == 0)
             {
@@ -75,7 +77,7 @@ public sealed class ConciergeTranscriptActivities(NpgsqlDataSource dataSource)
         await using var command = dataSource.CreateCommand(
             """
             SELECT turn_id, turn_sequence, channel, guest_message,
-                   assistant_message, occurred_at_utc, interrupted
+                   assistant_message, occurred_at_utc, interrupted, superseded
             FROM transcript_turns
             WHERE stay_id = $1
             ORDER BY turn_sequence, turn_id;
@@ -120,7 +122,7 @@ public sealed class ConciergeTranscriptActivities(NpgsqlDataSource dataSource)
         await using var command = dataSource.CreateCommand(
             """
             SELECT turn_id, turn_sequence, channel, guest_message,
-                   assistant_message, occurred_at_utc, interrupted
+                   assistant_message, occurred_at_utc, interrupted, superseded
             FROM transcript_turns
             WHERE stay_id = $1 AND turn_id = $2;
             """);
@@ -158,7 +160,22 @@ public sealed class ConciergeTranscriptActivities(NpgsqlDataSource dataSource)
             reader.GetString(3),
             reader.GetString(4),
             reader.GetFieldValue<DateTimeOffset>(5),
-            reader.GetBoolean(6));
+            reader.GetBoolean(6),
+            reader.GetBoolean(7));
+
+    /// <summary>Monotonic audit marker; never rewrites guest text, answer text, or action outcomes.</summary>
+    [Activity(nameof(MarkSupersededAsync))]
+    public async Task MarkSupersededAsync(MarkTranscriptTurnSupersededRequest request)
+    {
+        await using var command = dataSource.CreateCommand(
+            """
+            UPDATE transcript_turns SET superseded = TRUE
+            WHERE stay_id = $1 AND turn_id = $2 AND channel = 'voice';
+            """);
+        command.Parameters.AddWithValue(request.StayId);
+        command.Parameters.AddWithValue(request.TurnId);
+        await command.ExecuteNonQueryAsync(ActivityExecutionContext.Current.CancellationToken);
+    }
 
     private static async Task EnsureExistingTurnMatchesAsync(
         NpgsqlConnection connection,

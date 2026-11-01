@@ -29,7 +29,26 @@ public sealed record ConciergeStayWorkflowInput(
     ConciergeRideCancellationProposal? PendingRideCancellationProposal = null,
     ConciergeRideCancellationOutcome? LastConfirmedCancellation = null,
     ConciergeRideProposal? ConsumedRideOffer = null,
-    long ConsumedRideOfferSequence = -1);
+    long ConsumedRideOfferSequence = -1,
+    string? ConsumedRideOfferSpokenRequestKey = null,
+    ConciergeRideConfirmationOutcome? ConsumedRideConfirmationOutcome = null,
+    ConciergePlacePresentation? NearbyPlaces = null,
+    ConciergePlacePresentation? PlaceClarification = null,
+    IReadOnlyList<ConciergeVoiceRevision>? VoiceRevisions = null,
+    ConciergeVoiceRevisionCheckpoint? VoiceRevisionCheckpoint = null);
+
+/// <summary>Activity-verified places, never model-supplied coordinates or identifiers.</summary>
+public sealed record ConciergeCanonicalPlace(
+    string Name, string? Address, string? ProviderId, double Latitude, double Longitude);
+
+/// <summary>At most three records with absolute expiry and original turn provenance.</summary>
+public sealed record ConciergePlacePresentation(
+    IReadOnlyList<ConciergeCanonicalPlace> Places,
+    DateTimeOffset ExpiresAtUtc,
+    long Sequence,
+    int PresentedCount,
+    string? Category = null,
+    int? FocusIndex = null);
 
 /// <summary>
 /// A route-reviewed ride offer that stays open for the next two guest turns, so one pause does not
@@ -67,6 +86,21 @@ public sealed record ConciergeRideCancellationOutcome(
     string TurnId,
     long Sequence);
 
+/// <summary>
+/// The authoritative result of one consumed ride-confirmation attempt. An uncertain result is
+/// retained separately from the consumed offer so a revised voice utterance cannot imply success.
+/// </summary>
+public sealed record ConciergeRideConfirmationOutcome(
+    bool Confirmed,
+    Guid? RideId,
+    string? Status,
+    string? Pickup,
+    string? Dropoff,
+    DateTimeOffset? PickupAt,
+    string? Message,
+    string TurnId,
+    long Sequence);
+
 public sealed record ConciergeRidePlace(
     string Name,
     double Latitude,
@@ -89,9 +123,13 @@ public sealed record ConciergeTurnSubmission(
     string UserMessage,
     string Channel,
     ConciergeVerifiedGuest? VerifiedGuest = null,
-    bool EnableEndChatFunction = false);
+    bool EnableEndChatFunction = false,
+    VoiceUtterance? VoiceUtterance = null);
 
-/// <summary>A completed guest/assistant exchange; failed turns are never recorded.</summary>
+/// <summary>
+/// Immutable audit of a completed answer or dispatched action outcome. Superseded exchanges
+/// are excluded from effective history; their original text and action evidence remain intact.
+/// </summary>
 public sealed record ConciergeTranscriptTurn(
     string TurnId,
     long Sequence,
@@ -99,7 +137,8 @@ public sealed record ConciergeTranscriptTurn(
     string GuestMessage,
     string AssistantMessage,
     DateTimeOffset OccurredAtUtc,
-    bool Interrupted = false);
+    bool Interrupted = false,
+    bool Superseded = false);
 
 public sealed record ConciergeTurnResult(
     string TurnId,
@@ -141,3 +180,5 @@ public sealed record ReadNextTranscriptSequenceRequest(Guid StayId);
 public sealed record FindTranscriptTurnRequest(Guid StayId, string TurnId);
 
 public sealed record MarkTranscriptTurnInterruptedRequest(Guid StayId, string TurnId);
+
+public sealed record MarkTranscriptTurnSupersededRequest(Guid StayId, string TurnId);

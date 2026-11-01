@@ -305,7 +305,7 @@ internal static class ConciergeToolCallPolicy
                 if (!HasOnlyKeys(arguments, "place", "period")
                     || !TryOptionalString(arguments, "place", 200, out _)
                     || !TryOptionalString(arguments, "period", 16, out var period)
-                    || period is not (null or "today" or "tonight" or "tomorrow")
+                    || period is not (null or "current" or "now" or "right now" or "today" or "tonight" or "tomorrow")
                         && !TryParseWeatherDayOffset(period, out _)
                         && !TryParseWeatherWeekdayPeriod(period, out _, out _)
                         && !TryParseWeatherWeekendPeriod(period, out _))
@@ -325,8 +325,13 @@ internal static class ConciergeToolCallPolicy
                 return true;
 
             case ConciergeToolDefinitions.FindNearbyPlaces:
-                if (!HasOnlyKeys(arguments, "category")
+                if (!HasOnlyKeys(arguments, "category", "forRideProposal", "presentation")
                     || !TryString(arguments, "category", 32, out var category)
+                    || (arguments.ContainsKey("presentation")
+                        && (!TryString(arguments, "presentation", 16, out var presentation)
+                            || presentation is not ("nearest" or "alternatives")))
+                    || (arguments.ContainsKey("forRideProposal")
+                        && !TryBoolean(arguments, "forRideProposal", out _))
                     || !Location.NearbyPlaceCategories.TryGet(category, out _))
                 {
                     error = "I can't search for that kind of place. I can find nearby pharmacies, grocery stores, restaurants, cafes, bars, ATMs, banks, hospitals, clinics, gas stations, shopping malls, museums, parks, beaches, attractions, and post offices.";
@@ -509,7 +514,7 @@ internal static class ConciergeToolCallPolicy
         }
     }
 
-    private static bool TryBoolean(IDictionary<string, object?> arguments, string key, out bool result)
+    internal static bool TryBoolean(IDictionary<string, object?> arguments, string key, out bool result)
     {
         result = false;
         if (!arguments.TryGetValue(key, out var raw))

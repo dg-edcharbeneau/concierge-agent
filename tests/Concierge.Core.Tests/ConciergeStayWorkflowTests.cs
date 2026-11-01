@@ -208,23 +208,6 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
         Assert.Equal(["batch-1", "batch-2"], await host.ReadPersistedTurnIdsAsync(stayId));
     }
 
-    [Theory]
-    [InlineData(0, false)]
-    [InlineData(1, true)]
-    [InlineData(ConciergePersistenceOptions.MaxFlushBatchSize, true)]
-    [InlineData(ConciergePersistenceOptions.MaxFlushBatchSize + 1, false)]
-    public void FlushBatchSizeIsValidatedWithinBounds(int batchSize, bool valid)
-    {
-        var result = new Concierge.WorkflowServer.Setup.ConciergePersistenceOptionsValidator().Validate(
-            null, new ConciergePersistenceOptions { FlushIntervalSeconds = 30, FlushBatchSize = batchSize });
-
-        Assert.Equal(valid, result.Succeeded);
-        if (!valid)
-        {
-            Assert.Contains("FlushBatchSize must be between 1 and 100", result.FailureMessage);
-        }
-    }
-
     /// <summary>End waits for already-admitted turns, persists their replies, and remains safe to repeat.</summary>
     [Fact]
     public async Task EndWaitsForAdmittedTurnsBeforeFlushing()

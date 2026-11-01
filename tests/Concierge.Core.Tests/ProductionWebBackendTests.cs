@@ -9,10 +9,13 @@ using Concierge.Web.Services;
 using Concierge.WorkflowServer.Workflows;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Temporalio.Client;
+using Temporalio.Converters;
 using Temporalio.Exceptions;
 using Temporalio.Worker;
 using TemporalCommunity.Extensions.AI;
@@ -23,6 +26,80 @@ namespace Concierge.Core.Tests;
 public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
     : IClassFixture<PostgreSqlFixture>
 {
+    [Theory]
+    [InlineData(1, 1, true)]
+    [InlineData(600, 100, true)]
+    [InlineData(0, 5, false)]
+    [InlineData(601, 5, false)]
+    [InlineData(30, 0, false)]
+    [InlineData(30, 101, false)]
+    public void TranscriptPersistenceConfigurationIsValidatedAtWebStartup(
+        int flushIntervalSeconds,
+        int flushBatchSize,
+        bool valid)
+    {
+        using var factory = new WebApplicationFactory<ConciergeService>().WithWebHostBuilder(builder =>
+        {
+            builder.UseEnvironment("Development");
+            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["Concierge:Persistence:FlushIntervalSeconds"] = flushIntervalSeconds.ToString(),
+                    ["Concierge:Persistence:FlushBatchSize"] = flushBatchSize.ToString(),
+                }));
+        });
+
+        if (!valid)
+        {
+            var failure = Assert.Throws<OptionsValidationException>(() => factory.CreateClient());
+            Assert.Contains(
+                flushIntervalSeconds is < 1 or > 600
+                    ? "FlushIntervalSeconds must be between 1 and 600"
+                    : "FlushBatchSize must be between 1 and 100",
+                failure.Message);
+            return;
+        }
+
+        using var http = factory.CreateClient();
+        var options = factory.Services.GetRequiredService<IOptions<ConciergePersistenceOptions>>().Value;
+        Assert.Equal(flushIntervalSeconds, options.FlushIntervalSeconds);
+        Assert.Equal(flushBatchSize, options.FlushBatchSize);
+    }
+
+    [Fact]
+    public async Task WebPersistenceConfigurationIsPassedToNewStayWorkflow()
+    {
+        await using var worker = await ConciergeTestHost.StartAsync(postgreSql);
+        var today = ConciergeTestHost.HotelToday;
+        var stayId = await worker.SeedStayAsync("Rivera", "412", today, today.AddDays(1));
+        using var factory = CreateFactory(worker).WithWebHostBuilder(builder =>
+            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["Concierge:Persistence:FlushIntervalSeconds"] = "17",
+                    ["Concierge:Persistence:FlushBatchSize"] = "3",
+                })));
+        using var http = factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        using var verified = await http.PostAsJsonAsync(
+            "/api/concierge/sessions", new ConciergeVerificationRequest("Rivera", "412"));
+        Assert.Equal(HttpStatusCode.OK, verified.StatusCode);
+        var session = (await verified.Content.ReadFromJsonAsync<ConciergeSessionResponse>())!;
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", session.Credential);
+
+        using var response = await http.PostAsJsonAsync(
+            "/api/concierge/turns", new ConciergeTurnRequest("web-policy", "Breakfast?", "web"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var handle = worker.Environment.Client.GetWorkflowHandle($"concierge-stay-{stayId:N}");
+        var history = await handle.FetchHistoryAsync();
+        var input = await worker.Environment.Client.Options.DataConverter
+            .ToSingleValueAsync<ConciergeStayWorkflowInput>(
+                history.Events.First().WorkflowExecutionStartedEventAttributes.Input.Payloads_);
+
+        Assert.Equal(stayId, input.StayId);
+        Assert.Equal(17, input.TranscriptFlushIntervalSeconds);
+        Assert.Equal(3, input.TranscriptFlushBatchSize);
+    }
+
     /// <summary>Worker results retain their deadline and authorize subsequent Web turns.</summary>
     [Fact]
     public async Task ProductionRegistrationReadsWorkerSessionAndTurnResults()

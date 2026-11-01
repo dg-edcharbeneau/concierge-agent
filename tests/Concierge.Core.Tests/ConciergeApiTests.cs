@@ -245,7 +245,7 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
             new ConciergeVerificationRequest(lastName, roomNumber));
 
     [Fact]
-    public async Task VoiceTurnRetryAttachesToTheInFlightTemporalUpdate()
+    public async Task VoiceTurnRetryJoinsTheInFlightWorkflowAttemptAcrossReplicas()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
         var today = ConciergeTestHost.HotelToday;
@@ -259,7 +259,7 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
         var first = firstScope.ServiceProvider.GetRequiredService<IConciergeService>();
         var retry = retryScope.ServiceProvider.GetRequiredService<IConciergeService>();
         var stay = (await first.AuthorizeVoiceAsync(credential)).Session;
-        const string turnId = "v:0123456789abcdef0123456789abcdef:1:1";
+        var turnId = new VoiceUtterance(Guid.NewGuid(), 1, 1).TurnId("Is the pool open?");
 
         var admitted = first.SubmitVoiceTurnAsync(stay, turnId, "Is the pool open?");
         await host.ChatClient.WaitForCallAsync();
@@ -270,10 +270,13 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
         Assert.Equal(results[0], results[1]);
         Assert.Single(host.ChatClient.Requests);
         var workflow = host.Environment.Client.GetWorkflowHandle($"concierge-stay-{stayId:N}");
-        Assert.Equal(results[0], await workflow.GetUpdateHandle<ConciergeTurnResult>(turnId).GetResultAsync());
         var history = await workflow.FetchHistoryAsync();
-        Assert.Single(history.Events, historyEvent =>
-            historyEvent.WorkflowExecutionUpdateAcceptedEventAttributes?.AcceptedRequest.Meta.UpdateId == turnId);
+        var turnUpdates = history.Events
+            .Select(historyEvent => historyEvent.WorkflowExecutionUpdateAcceptedEventAttributes?.AcceptedRequest)
+            .Where(update => update?.Input.Name == ConciergeWorkflowNames.SubmitTurnUpdate)
+            .ToArray();
+        Assert.Equal(2, turnUpdates.Length);
+        Assert.Equal(2, turnUpdates.Select(update => update!.Meta.UpdateId).Distinct().Count());
     }
 
     [Fact]

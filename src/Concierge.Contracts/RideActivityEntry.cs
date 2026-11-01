@@ -17,7 +17,8 @@ public sealed record RideActivityEntry(
     DateTimeOffset PickupAtUtc,
     string? DriverName = null,
     string? Car = null,
-    string? Plate = null);
+    string? Plate = null,
+    DateTimeOffset? ArrivalAtUtc = null);
 
 /// <summary>Signal payload used to retain only the newest ride activity stream entries.</summary>
 public sealed record TruncateRideActivityStreamRequest(long BeforeOffset);

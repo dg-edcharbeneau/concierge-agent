@@ -15,6 +15,11 @@ internal static class ConciergeToolResultInterpreter
     private const int MaxCompactToolResultUtf8Bytes = 2_048;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    internal sealed record RideRenderingContext(
+        ConciergeRideProposal? Offer,
+        Guid? RideId,
+        IReadOnlyList<ConciergeCanonicalPlace> Places);
+
     internal sealed record InterpretedResult(
         string CompactModelContext,
         string GuestFacingText,
@@ -32,7 +37,8 @@ internal static class ConciergeToolResultInterpreter
         internal InterpretedResult Interpret(
             ConciergeTurnSubmission request,
             IDictionary<string, object?> arguments,
-            bool includeRideIdsForCancellation)
+            bool includeRideIdsForCancellation,
+            RideRenderingContext? rideContext = null)
         {
             if (JsonDecodeFailed)
             {
@@ -46,23 +52,29 @@ internal static class ConciergeToolResultInterpreter
                 ConciergeToolDefinitions.GetRoute =>
                     FormatRoute((ConciergeRouteToolResult?)Decoded, request, arguments),
                 ConciergeToolDefinitions.FindNearbyPlaces =>
-                    FormatNearbyPlaces((ConciergeNearbyPlacesToolResult?)Decoded, request),
+                    FormatNearbyPlaces((ConciergeNearbyPlacesToolResult?)Decoded, request, arguments),
                 ConciergeToolDefinitions.GetPlaceOpeningHours =>
                     FormatPlaceOpeningHours((ConciergePlaceOpeningHoursToolResult?)Decoded, request, arguments),
                 ConciergeToolDefinitions.ProposeRide =>
                     FormatRideProposal(
                         (ConciergeRideProposalToolResult?)Decoded,
+                        request.Channel,
                         arguments),
                 _ => FormatRideAction(
                     ToolName,
                     (ConciergeRideActionResult?)Decoded,
                     request,
                     arguments,
-                    includeRideIdsForCancellation),
+                    includeRideIdsForCancellation,
+                    rideContext),
             };
             context = LimitUtf8(context, MaxCompactToolResultUtf8Bytes);
+            var modelContext = ToolName == ConciergeToolDefinitions.FindNearbyPlaces
+                && Decoded is ConciergeNearbyPlacesToolResult nearby
+                ? CompactNearby(nearby)
+                : context;
             return new InterpretedResult(
-                context,
+                modelContext,
                 context,
                 ProposedRideProposal,
                 ProposedRideCancellationProposal);
@@ -190,6 +202,26 @@ internal static class ConciergeToolResultInterpreter
 
     internal static string Limit(string value, int maximumBytes) => LimitUtf8(value, maximumBytes);
 
+    private static string CompactNearby(ConciergeNearbyPlacesToolResult nearby)
+    {
+        // Bound the serialized projection, not just its strings: JSON escaping can expand them.
+        // Keep all three branches and valid JSON rather than cutting off the alternate's address.
+        for (var budget = 160; budget >= 10; budget /= 2)
+        {
+            var json = JsonSerializer.Serialize(nearby with
+            {
+                Places = nearby.Places.Take(3).Select(place => place with
+                {
+                    Name = LimitUtf8(place.Name, Math.Min(120, budget)),
+                    Address = place.Address is null ? null : LimitUtf8(place.Address, budget),
+                    ProviderId = place.ProviderId is null ? null : LimitUtf8(place.ProviderId, Math.Min(80, budget)),
+                }).ToArray(),
+            }, JsonOptions);
+            if (Encoding.UTF8.GetByteCount(json) <= MaxCompactToolResultUtf8Bytes) return json;
+        }
+        return """{"status":"Unavailable","places":[]}""";
+    }
+
     private static string FormatWeather(
         ConciergeWeatherToolResult? weather,
         ConciergeTurnSubmission request,
@@ -224,6 +256,11 @@ internal static class ConciergeToolResultInterpreter
 
         _ = ConciergeToolCallPolicy.TryOptionalString(arguments, "period", 16, out var period);
         period ??= "today";
+        if (period is "current" or "now" or "right now")
+        {
+            return FormatCurrentWeather(weather, request);
+        }
+
         if (ConciergeToolCallPolicy.TryParseWeatherDayOffset(period, out _)
             || ConciergeToolCallPolicy.TryParseWeatherWeekdayPeriod(period, out _, out _)
             || ConciergeToolCallPolicy.TryParseWeatherWeekendPeriod(period, out _))
@@ -271,6 +308,60 @@ internal static class ConciergeToolResultInterpreter
         if (additions.Count > 0)
         {
             sentence += " " + string.Join(", and ", additions) + ".";
+        }
+
+        return StringComparer.Ordinal.Equals(request.Channel, "web")
+            ? $"![{conditions}](/images/weather/{WeatherIconKey(conditions)}.svg)\n\n{sentence}"
+            : sentence;
+    }
+
+    private static string FormatCurrentWeather(
+        ConciergeWeatherToolResult weather,
+        ConciergeTurnSubmission request)
+    {
+        var conditions = string.IsNullOrWhiteSpace(weather.Conditions)
+            ? "conditions unavailable"
+            : weather.Conditions.Trim().TrimEnd('.');
+        var location = ShortPlaceName(weather.Location ?? "the area");
+        var sentence = conditions.Equals("clear sky", StringComparison.OrdinalIgnoreCase)
+            ? $"Currently clear at {location}"
+            : $"Currently {char.ToLowerInvariant(conditions[0])}{conditions[1..]} at {location}";
+        var details = new List<string>();
+        if (weather.CurrentTemperatureFahrenheit is { } temperatureF)
+        {
+            details.Add($"around {Math.Round(temperatureF, MidpointRounding.AwayFromZero):0}°F");
+        }
+
+        if (weather.ApparentTemperatureFahrenheit is { } apparentF)
+        {
+            details.Add($"feels like {Math.Round(apparentF, MidpointRounding.AwayFromZero):0}°F");
+        }
+
+        if (weather.RelativeHumidityPercent is { } humidity)
+        {
+            details.Add($"{humidity}% humidity");
+        }
+
+        if (weather.CurrentWindMph is { } windMph)
+        {
+            details.Add($"winds at {Math.Round(windMph, MidpointRounding.AwayFromZero):0} mph");
+        }
+
+        if (weather.CurrentPrecipitationInches is { } precipitationInches)
+        {
+            details.Add(
+                $"{Math.Round(precipitationInches, 2, MidpointRounding.AwayFromZero).ToString("0.##", CultureInfo.InvariantCulture)} inches of precipitation in the preceding hour");
+        }
+
+        if (details.Count > 0)
+        {
+            sentence += ", " + string.Join(", ", details);
+        }
+
+        sentence += ".";
+        if (weather.ObservedAt is { } observedAt)
+        {
+            sentence += $" Observed at {observedAt.ToString("h:mm tt", CultureInfo.InvariantCulture)} local time.";
         }
 
         return StringComparer.Ordinal.Equals(request.Channel, "web")
@@ -326,7 +417,8 @@ internal static class ConciergeToolResultInterpreter
 
     private static string FormatNearbyPlaces(
         ConciergeNearbyPlacesToolResult? result,
-        ConciergeTurnSubmission request)
+        ConciergeTurnSubmission request,
+        IDictionary<string, object?> arguments)
     {
         if (result is null
             || !NearbyPlaceCategories.TryGet(result.Category, out var category)
@@ -341,6 +433,11 @@ internal static class ConciergeToolResultInterpreter
             .OrderBy(place => place.DistanceMiles)
             .Take(GeoapifyNearbyPlacesService.MaxResults)
             .ToArray();
+        if (arguments.TryGetValue("presentation", out var presentation)
+            && StringComparer.Ordinal.Equals(presentation?.ToString(), "nearest"))
+        {
+            places = places.Take(1).ToArray();
+        }
         if (places.Length == 0)
         {
             return $"I couldn't find {IndefiniteArticle(category.Singular)} {category.Singular} within about five miles of Hotel ZGY. The front desk may be able to suggest one.";
@@ -362,7 +459,11 @@ internal static class ConciergeToolResultInterpreter
             + (closest.Address is null ? string.Empty : $" at {closest.Address}")
             + $", {FormatMiles(closest.DistanceMiles)} from Hotel ZGY.";
         var others = places.Skip(1)
-            .Select(place => $"{place.Name}, {FormatMiles(place.DistanceMiles)} away")
+            .Select(place => $"{place.Name}"
+                + (place.Address is not null && places.Count(other =>
+                    string.Equals(other.Name, place.Name, StringComparison.OrdinalIgnoreCase)) > 1
+                    ? $" at {place.Address}" : string.Empty)
+                + $", {FormatMiles(place.DistanceMiles)} away")
             .ToArray();
         return others.Length switch
         {
@@ -421,6 +522,7 @@ internal static class ConciergeToolResultInterpreter
 
     private static string FormatRideProposal(
         ConciergeRideProposalToolResult? result,
+        string channel,
         IDictionary<string, object?> arguments)
     {
         if (result is null)
@@ -433,37 +535,77 @@ internal static class ConciergeToolResultInterpreter
         {
             if (StringComparer.Ordinal.Equals(result.Status, "NeedsClarification"))
             {
+                var endpoint = result.ClarifyingPickup ? "pickup" : "destination";
                 return result.Candidates.Count == 0
-                    ? "I couldn't identify the destination. Please clarify it. No ride has been booked."
-                    : $"Which destination do you mean: {string.Join("; ", result.Candidates.Take(4))}? No ride has been booked.";
+                    ? $"I couldn't identify the {endpoint}. Please clarify it. No ride has been booked."
+                    : $"Which {endpoint} do you mean: {string.Join("; ", result.Candidates.Take(3).Select(ShortPlaceName))}? No ride has been booked.";
             }
 
             if (StringComparer.Ordinal.Equals(result.Status, "InvalidSchedule"))
             {
                 // Only the activity's structured policy value is rendered, never provider text
                 // or model arguments. Recording it in the result keeps workflow replay deterministic.
+                if (result.CheckoutCutoffDate is { } checkoutDate)
+                {
+                    var checkoutDay = checkoutDate.ToString("dddd, MMMM d", CultureInfo.InvariantCulture);
+                    return result.EarliestPickupAt is null
+                        ? $"Scheduled pickups must be before the end of your checkout day, {checkoutDay}, and there is no longer time to schedule one. No ride has been booked."
+                        : $"Scheduled pickups must be before the end of your checkout day, {checkoutDay}. Please choose an earlier time. No ride has been booked.";
+                }
+
+                if (result.EarliestPickupAt is { } earliest)
+                {
+                    return $"I can't schedule a pickup for that time. The earliest scheduled pickup is {HotelClockTime(earliest)}. No ride has been booked.";
+                }
+
+                // Results recorded before EarliestPickupAt existed keep their original reply.
                 return result.MinimumAdvanceNoticeMinutes is > 0
                     ? $"A scheduled pickup must be at least {result.MinimumAdvanceNoticeMinutes} minutes from now. Please choose a later time. No ride has been booked."
                     : "The scheduled pickup is too soon or has an invalid time. Please choose a later time. No ride has been booked.";
             }
 
+            if (StringComparer.Ordinal.Equals(result.Status, "ActiveRidesUnavailable"))
+            {
+                return "I couldn't check your existing rides, so I haven't offered a new one. Please try again shortly. No ride has been booked.";
+            }
+
             return ToolFailureReply(ConciergeToolDefinitions.ProposeRide);
         }
 
+        // An adjusted pickup is stated up front so the guest confirms the actual (later) time.
+        var adjusted = result.PickupAdjusted && !draft.Immediate && result.EarliestPickupAt is { } earliestLocal
+            ? earliestLocal
+            : (DateTimeOffset?)null;
         var when = draft.Immediate || draft.PickupAtUtc is not { } pickupAtUtc
             ? "now"
-            : $"on {FormatPickupTime(pickupAtUtc, arguments)}";
+            : adjusted is { } adjustedLocal
+                ? $"on {FormatRideTime(adjustedLocal)}"
+                : $"on {FormatPickupTime(pickupAtUtc, arguments)}";
         var minutes = Math.Max(1, (int)Math.Ceiling(draft.RouteDurationSeconds / 60));
         var article = minutes is 8 or 11 or 18 or (>= 80 and <= 89) ? "an" : "a";
-        return $"I can have a car pick you up at {ShortPlaceName(draft.Pickup.Name)} {when} and take you to {ShortPlaceName(draft.Dropoff.Name)}. It's about {article} {minutes}-minute ride and is complimentary for current hotel guests. No ride has been booked.";
+        var adjustment = adjusted is { } moved
+            ? $"The earliest available pickup is {HotelClockTime(moved)}. "
+            : string.Empty;
+        var warning = result.ExistingRides is { Count: > 0 } existing
+            ? $"{(existing.Count == 1 ? "You already have an active ride" : "You already have active rides")} to this destination: "
+                + string.Join("; ", existing.Take(3).Select(ride =>
+                    $"{OfferPlaceName(ride.Dropoff)}, pickup on {FormatRideTime(ride.PickupAt)} (status: {ride.Status})"))
+                + ". This offer is for an ADDITIONAL ride, not a change to any existing ride, and requires your explicit confirmation on a later turn. "
+            : string.Empty;
+        var fare = channel == "voice" ? "It's complimentary." : "It's complimentary for current hotel guests.";
+        return $"{warning}{adjustment}{OfferPlaceName(draft.Dropoff.Name)} is about {article} {minutes}-minute ride from {OfferPlaceName(draft.Pickup.Name)}. {fare} No ride has been booked. Shall I book it {when}?";
     }
+
+    // Reserve room for all three active-ride warnings and the final confirmation question.
+    private static string OfferPlaceName(string name) => LimitUtf8(RidePlaceName(name), 160);
 
     private static string FormatRideAction(
         string name,
         ConciergeRideActionResult? action,
         ConciergeTurnSubmission request,
         IDictionary<string, object?> arguments,
-        bool includeRideIdsForCancellation)
+        bool includeRideIdsForCancellation,
+        RideRenderingContext? rideContext)
     {
         if (action is null)
         {
@@ -472,9 +614,14 @@ internal static class ConciergeToolResultInterpreter
 
         if (StringComparer.Ordinal.Equals(name, ConciergeToolDefinitions.ConfirmRide))
         {
+            if (action.Message is not null) return action.Message;
             if (action.Ride is { } booked)
             {
-                return $"You're all set. A car will pick you up at {ShortPlaceName(booked.Pickup)} on {FormatRideTime(booked.PickupAt)} and take you to {ShortPlaceName(booked.Dropoff)}.";
+                if (booked.Status is not ("Booked" or "DriverAssigned"))
+                    return FormatRideStatus(booked, request.Channel, rideContext);
+                var when = IsImmediateVoiceRide(booked, request.Channel, rideContext)
+                    ? "now" : $"on {FormatRideTime(booked.PickupAt)}";
+                return $"You're all set. A car will pick you up at {RidePlaceName(booked.Pickup)} {when} and take you to {RideDestination(booked, request.Channel, rideContext)}.";
             }
 
             return action.Message
@@ -485,7 +632,7 @@ internal static class ConciergeToolResultInterpreter
         {
             if (action.Ride is { } status)
             {
-                return FormatRideStatus(status);
+                return FormatRideStatus(status, request.Channel, rideContext);
             }
 
             return action.Message ?? "Ride status is unavailable.";
@@ -511,7 +658,7 @@ internal static class ConciergeToolResultInterpreter
             }
 
             _ = ConciergeToolCallPolicy.TryOptionalString(arguments, "when", 16, out var when);
-            return FormatRideHistory(rides, when ?? "upcoming", request.Channel);
+            return FormatRideHistory(rides, when ?? "upcoming", request.Channel, rideContext);
         }
 
         if (StringComparer.Ordinal.Equals(name, ConciergeToolDefinitions.ProposeRideCancellation))
@@ -545,6 +692,31 @@ internal static class ConciergeToolResultInterpreter
         + (offer.Immediate || offer.PickupAtUtc is null
             ? " picking up now"
             : " at the scheduled pickup time stated in that offer");
+
+    internal static string DescribeConfirmedRideBooking(ConciergeRideConfirmationOutcome outcome)
+    {
+        if (!outcome.Confirmed
+            || outcome.RideId is not { } rideId
+            || rideId == Guid.Empty
+            || string.IsNullOrWhiteSpace(outcome.Status)
+            || string.IsNullOrWhiteSpace(outcome.Pickup)
+            || string.IsNullOrWhiteSpace(outcome.Dropoff)
+            || outcome.PickupAt is not { } pickupAt)
+        {
+            return "I couldn't verify whether the ride was booked. Please check ride status or history before trying again.";
+        }
+
+        var status = outcome.Status switch
+        {
+            "Booked" => "is booked",
+            "DriverAssigned" => "has a driver assigned",
+            "PickedUp" => "is in progress",
+            "Completed" => "is complete",
+            "Cancelled" => "was canceled",
+            _ => $"has the status {outcome.Status.ToLowerInvariant()}",
+        };
+        return $"Your ride from {ShortPlaceName(outcome.Pickup)} to {ShortPlaceName(outcome.Dropoff)} {status} for pickup on {FormatRideTime(pickupAt)} (status: {outcome.Status}).";
+    }
 
     /// <summary>Model-context description of a stored cancellation offer; contains no ids.</summary>
     internal static string DescribeRideCancellationOffer(ConciergeRideCancellationProposal offer) =>
@@ -596,24 +768,63 @@ internal static class ConciergeToolResultInterpreter
     private static string HotelClockTime(DateTimeOffset value) =>
         value.ToString("h:mm tt 'hotel time'", CultureInfo.InvariantCulture);
 
-    private static string FormatRideStatus(RideSummary ride)
+    // Ride labels are endpoint facts. Do not infer a venue name from comma-separated prose.
+    private static string RidePlaceName(string value)
     {
-        var places = $"from {ShortPlaceName(ride.Pickup)} to {ShortPlaceName(ride.Dropoff)}";
-        return ride.Status switch
+        if (value.Equals("Hotel ZGY", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("Hotel ZGY, ", StringComparison.OrdinalIgnoreCase)) return "Hotel ZGY";
+        const string country = ", United States of America";
+        return value.EndsWith(country, StringComparison.Ordinal) ? value[..^country.Length] : value;
+    }
+
+    private static bool MatchesRide(RideSummary ride, RideRenderingContext? context) =>
+        context is { Offer: { } offer, RideId: { } id }
+        && id == ride.Id
+        && StringComparer.Ordinal.Equals(offer.Pickup.Name, ride.Pickup)
+        && StringComparer.Ordinal.Equals(offer.Dropoff.Name, ride.Dropoff);
+
+    private static bool IsImmediateVoiceRide(RideSummary ride, string channel, RideRenderingContext? context) =>
+        channel == "voice" && MatchesRide(ride, context) && context!.Offer!.Immediate;
+
+    private static string RideDestination(RideSummary ride, string channel, RideRenderingContext? context)
+    {
+        if (channel == "voice" && MatchesRide(ride, context))
         {
-            "Booked" => $"Your ride {places} is booked for {FormatRideTime(ride.PickupAt)}.",
-            "DriverAssigned" => $"Your ride {places} has a driver assigned for pickup on {FormatRideTime(ride.PickupAt)}.",
-            "PickedUp" => $"Your ride {places} is in progress{ArrivalClause(ride, " and should arrive around ")}.",
-            "Completed" => $"Your ride {places} is complete{ArrivalClause(ride, "; it arrived around ")}.",
-            "Cancelled" => $"Your ride {places} was canceled.",
-            _ => $"Your ride {places} has the status {ride.Status.ToLowerInvariant()}.",
+            var endpoint = context!.Offer!.Dropoff;
+            var matches = context.Places.Where(place =>
+                place.Latitude == endpoint.Latitude && place.Longitude == endpoint.Longitude
+                && (StringComparer.Ordinal.Equals(endpoint.Name, place.Name)
+                    || place.Address is not null
+                        && StringComparer.Ordinal.Equals(endpoint.Name, $"{place.Name}, {place.Address}"))).ToArray();
+            if (matches.Length == 1) return matches[0].Name;
+        }
+        return RidePlaceName(ride.Dropoff);
+    }
+
+    private static string RideStatusClause(RideSummary ride, string channel, RideRenderingContext? context) =>
+        ride.Status switch
+        {
+            "Booked" => IsImmediateVoiceRide(ride, channel, context)
+                ? "is booked" : $"is booked for {FormatRideTime(ride.PickupAt)}",
+            "DriverAssigned" => IsImmediateVoiceRide(ride, channel, context)
+                ? "has a driver assigned" : $"has a driver assigned for pickup on {FormatRideTime(ride.PickupAt)}",
+            "PickedUp" => $"is in progress{ArrivalClause(ride, " and should arrive around ")}",
+            "Completed" => $"is complete{ArrivalClause(ride, "; it arrived around ")}",
+            "Cancelled" => "was canceled",
+            _ => $"has the status {ride.Status.ToLowerInvariant()}",
         };
+
+    private static string FormatRideStatus(RideSummary ride, string channel, RideRenderingContext? context)
+    {
+        var places = $"from {RidePlaceName(ride.Pickup)} to {RideDestination(ride, channel, context)}";
+        return $"Your ride {places} {RideStatusClause(ride, channel, context)}.";
     }
 
     private static string FormatRideHistory(
         IReadOnlyList<RideSummary> rides,
         string when,
-        string channel)
+        string channel,
+        RideRenderingContext? context)
     {
         var isPast = StringComparer.Ordinal.Equals(when, "past");
         var period = isPast ? "past" : "upcoming";
@@ -624,16 +835,8 @@ internal static class ConciergeToolResultInterpreter
 
         var descriptions = rides.Take(5).Select(ride =>
         {
-            var destination = ShortPlaceName(ride.Dropoff);
-            var status = ride.Status switch
-            {
-                "Booked" => $"is booked for {FormatRideTime(ride.PickupAt)}",
-                "DriverAssigned" => $"has a driver assigned for pickup on {FormatRideTime(ride.PickupAt)}",
-                "PickedUp" => $"is in progress{ArrivalClause(ride, " and should arrive around ")}",
-                "Completed" => $"is complete{ArrivalClause(ride, "; it arrived around ")}",
-                "Cancelled" => "was canceled",
-                _ => $"has the status {ride.Status.ToLowerInvariant()}",
-            };
+            var destination = RideDestination(ride, channel, context);
+            var status = RideStatusClause(ride, channel, context);
             // Past rides span days and their status text carries only a clock time.
             var day = isPast
                 ? " on " + ride.PickupAt.ToString("MMM dd", CultureInfo.InvariantCulture)

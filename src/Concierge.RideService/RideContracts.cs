@@ -90,7 +90,8 @@ public sealed record RideTransitionCommand(
 public sealed record RideCancellationResult(
     bool Applied,
     string CurrentStatus,
-    RideActivityEntry? Entry);
+    RideActivityEntry? Entry,
+    string? StayWorkflowId = null);
 
 public static class RideWorkflowNames
 {

@@ -20,7 +20,8 @@ public sealed class ConciergePromptBuilderTests
             recentTurns: []);
 
         Assert.Contains("Use tools for live information even without hotel evidence.", prompt.Messages[0].Text);
-        Assert.Contains("FindNearbyPlaces: nearest or nearby places outside the hotel, even if evidence or earlier turns lack them.", prompt.Messages[1].Text);
+        Assert.Contains("FindNearbyPlaces: new nearest/nearby search.", prompt.Messages[1].Text);
+        Assert.Contains("call ProposeRide directly, without searching again", prompt.Messages[1].Text);
         Assert.True(prompt.FitActionContext(includeEndChat: true));
     }
 
@@ -50,7 +51,7 @@ public sealed class ConciergePromptBuilderTests
 
         // Pin the instruction isolated by the live comparison; stronger wording misrouted other tools.
         Assert.Contains(
-            "- GetWeather: any weather question. Weather, route start, and ride pickup default to Hotel ZGY; never ask for them. Omit place unless the guest names one.",
+            "- GetWeather: any weather question; \"current\" is right now, not daily highs/lows. Weather, route start, and ride pickup default to Hotel ZGY; never ask for them. Omit place unless the guest names one.",
             actionInstructions,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -59,6 +60,38 @@ public sealed class ConciergePromptBuilderTests
             StringComparison.Ordinal);
         Assert.Contains(prompt.Messages, message => message.Text == "Saturday looks sunny.");
         Assert.True(prompt.FitActionContext(includeEndChat: true));
+    }
+
+    [Fact]
+    public void CurrentWeatherInstructionAndToolSchemaFitTheFixedAndActionBudgets()
+    {
+        var prompt = ConciergePromptBuilder.BuildMemoryTurn(
+            "What's the weather right now?",
+            new HotelRetrievalResult(HotelRetrievalPath.NoEvidence, []),
+            [],
+            new ConciergePromptBuilder.PromptBudget(
+                ConciergePromptBuilder.ActionWorkingContextBudgetTokens,
+                ConciergeToolDefinitions.EstimateToolDefinitionTokens(includeEndChat: true),
+                ActionTools: true),
+            guest: null,
+            recentTurns: []);
+        var weatherTool = ConciergeToolDefinitions.FindModelTool(
+            ConciergeToolDefinitions.GetWeather, includeEndChat: false);
+
+        Assert.Contains("\"current\" is right now, not daily highs/lows", prompt.Messages[1].Text, StringComparison.Ordinal);
+        Assert.Contains("current", weatherTool.JsonSchema.ToString(), StringComparison.Ordinal);
+        Assert.True(prompt.FitActionContext(includeEndChat: true));
+        Assert.Equal(
+            ConciergePromptBuilder.FixedPromptAllowanceTokens
+                + prompt.Messages.Sum(message =>
+                    System.Text.Encoding.UTF8.GetByteCount(message.Text ?? string.Empty) + 8),
+            ConciergePromptBuilder.EstimatePromptTokens(prompt.Messages));
+        Assert.True(
+            ConciergePromptBuilder.EstimatePromptTokens(prompt.Messages)
+                + ConciergeToolDefinitions.EstimateToolDefinitionTokens(includeEndChat: true)
+                + ConciergePromptBuilder.AnswerMaxOutputTokens
+                + ConciergePromptBuilder.ContextEstimationHeadroomTokens
+            <= ConciergePromptBuilder.ActionWorkingContextBudgetTokens);
     }
 
     [Fact]

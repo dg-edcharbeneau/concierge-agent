@@ -76,7 +76,7 @@ public sealed class ConciergeService(
     {
         ValidateTurn(request);
         var session = await AuthenticateAsync(bearerCredential, cancellationToken);
-        return await ExecuteTurnAsync(session, request, updateId: null, cancellationToken);
+        return await ExecuteTurnAsync(session, request, authenticatedVoice: false, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -113,9 +113,10 @@ public sealed class ConciergeService(
         ArgumentNullException.ThrowIfNull(session);
         var request = new ConciergeTurnRequest(turnId, userMessage, "voice");
         ValidateTurn(request);
-        // Deepgram retries reuse the payload, so the TurnId is also the Temporal update ID: a retry
-        // after a lost response attaches to the admitted update, even while it is still running.
-        return await ExecuteTurnAsync(session, request, updateId: turnId, cancellationToken, enableEndChatFunction);
+        // Every delivery reaches workflow revision authority. Reusing the RPC update ID would
+        // return Temporal's immutable cached reply even after this exact turn was superseded.
+        // The workflow joins by the full text-hashed TurnId, including across Web replicas.
+        return await ExecuteTurnAsync(session, request, authenticatedVoice: true, cancellationToken, enableEndChatFunction);
     }
 
     /// <inheritdoc/>
@@ -150,7 +151,7 @@ public sealed class ConciergeService(
     private async Task<ConciergeTurnResult> ExecuteTurnAsync(
         ConciergeSessionContext session,
         ConciergeTurnRequest request,
-        string? updateId,
+        bool authenticatedVoice,
         CancellationToken cancellationToken,
         bool enableEndChatFunction = false)
     {
@@ -160,13 +161,12 @@ public sealed class ConciergeService(
         {
             var workflow = await GetStayWorkflowAsync(session, cancellationToken);
             var options = UpdateOptions(cancellationToken);
-            options.Id = updateId;
-            // Text turns keep a generated update ID so a reused TurnId with different text still
-            // reaches the workflow's fingerprint check and is rejected as turn_conflict.
+            // Generated RPC IDs let both retries and revisions reach the workflow's TurnId fence.
             return await workflow.ExecuteUpdateAsync<ConciergeTurnResult>(
                 ConciergeWorkflowNames.SubmitTurnUpdate,
                 [new ConciergeTurnSubmission(
-                request.TurnId, request.UserMessage, request.Channel, session.VerifiedGuest, enableEndChatFunction)],
+                request.TurnId, request.UserMessage, request.Channel, session.VerifiedGuest, enableEndChatFunction,
+                authenticatedVoice ? VoiceUtterance.FromTurnId(request.TurnId, request.UserMessage) : null)],
                 options);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

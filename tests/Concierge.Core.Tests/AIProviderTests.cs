@@ -274,6 +274,8 @@ public sealed class AIProviderRegistrationTests
             {
                 MaxOutputTokens = ConciergeStayWorkflow.AnswerMaxOutputTokens,
                 Temperature = temperature,
+                AllowMultipleToolCalls = false,
+                Tools = ConciergeToolDefinitions.CreateModelTools(false).Cast<AITool>().ToList(),
             });
         using var request = JsonDocument.Parse(handler.RequestBody!);
 
@@ -293,6 +295,7 @@ public sealed class AIProviderRegistrationTests
             Assert.False(request.RootElement.TryGetProperty("temperature", out _));
         }
         Assert.False(request.RootElement.GetProperty("store").GetBoolean());
+        Assert.False(request.RootElement.GetProperty("parallel_tool_calls").GetBoolean());
         Assert.False(request.RootElement.TryGetProperty("num_ctx", out _));
         Assert.Equal(
             reasoningEffort,

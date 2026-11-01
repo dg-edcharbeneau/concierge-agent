@@ -123,6 +123,9 @@ CREATE INDEX IF NOT EXISTS ix_transcript_turns_stay_order
 ALTER TABLE transcript_turns
     ADD COLUMN IF NOT EXISTS interrupted boolean NOT NULL DEFAULT FALSE;
 
+ALTER TABLE transcript_turns
+    ADD COLUMN IF NOT EXISTS superseded boolean NOT NULL DEFAULT FALSE;
+
 CREATE TABLE IF NOT EXISTS knowledge_embedding_identity (
     identity_id smallint PRIMARY KEY DEFAULT 1 CHECK (identity_id = 1),
     provider text NOT NULL CHECK (length(trim(provider)) > 0),

@@ -9,6 +9,7 @@ public enum WeatherDay
     Today,
     Tonight,
     Tomorrow,
+    Current,
 }
 
 public enum WeatherResultStatus
@@ -66,15 +67,25 @@ public sealed record WeatherForecast(
     string TemperatureUnit,
     string WindSpeedUnit);
 
+public sealed record WeatherCurrentObservation(
+    DateTimeOffset ObservedAt,
+    double? TemperatureFahrenheit,
+    double? ApparentTemperatureFahrenheit,
+    int? RelativeHumidityPercent,
+    int? WeatherCode,
+    double? WindSpeedMph,
+    double? PrecipitationInches);
+
 public sealed record WeatherResult(
     WeatherResultStatus Status,
     string? ClarificationQuery,
     IReadOnlyList<ResolvedPlace> Candidates,
     WeatherLocation? Location,
     WeatherForecast? Forecast,
-    DateOnly? RequestedDate = null);
+    DateOnly? RequestedDate = null,
+    WeatherCurrentObservation? Current = null);
 
-/// <summary>Retrieves read-only forecasts from Open-Meteo at resolved or hotel coordinates.</summary>
+/// <summary>Retrieves read-only current conditions and forecasts from Open-Meteo.</summary>
 public sealed class OpenMeteoWeatherService(
     IHttpClientFactory httpClientFactory,
     GeoapifyPlaceResolver placeResolver,
@@ -88,6 +99,8 @@ public sealed class OpenMeteoWeatherService(
     private const string Endpoint = "https://api.open-meteo.com/v1/forecast";
     private const string DailyFields =
         "temperature_2m_max,temperature_2m_min,weather_code,wind_speed_10m_max,precipitation_probability_max";
+    private const string CurrentFields =
+        "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m";
 
     public async Task<WeatherResult> GetWeatherAsync(
         WeatherRequest request,
@@ -99,7 +112,7 @@ public sealed class OpenMeteoWeatherService(
             throw new ArgumentOutOfRangeException(
                 nameof(request),
                 request.Day,
-                "Weather day must be Today, Tonight or Tomorrow.");
+                "Weather period must be Current, Today, Tonight or Tomorrow.");
         }
 
         if (request.DaysAhead is < 0 or > MaxDaysAhead)
@@ -119,6 +132,11 @@ public sealed class OpenMeteoWeatherService(
         {
             throw new ArgumentOutOfRangeException(
                 nameof(request), request.WeekendDay, "Weather weekend day must be 0 (Saturday) or 1 (Sunday).");
+        }
+        if (request.Day == WeatherDay.Current
+            && (request.DaysAhead is not null || request.StartWeekday is not null || request.WeekendDay is not null))
+        {
+            throw new ArgumentException("Current weather cannot be combined with a forecast day.", nameof(request));
         }
 
         var hotel = hotelOptions.Value;
@@ -145,7 +163,7 @@ public sealed class OpenMeteoWeatherService(
             ? ((int)startWeekday - (int)hotelLocalDate.DayOfWeek + 7) % 7 + (request.DaysAhead ?? 0)
             : request.DaysAhead ?? (request.Day == WeatherDay.Tomorrow ? 1 : 0);
         var targetDate = hotelLocalDate.AddDays(daysAhead);
-        if (daysAhead > MaxDaysAhead)
+        if (request.Day != WeatherDay.Current && daysAhead > MaxDaysAhead)
         {
             return new(WeatherResultStatus.BeyondForecast, null, [], null, null, targetDate);
         }
@@ -179,11 +197,28 @@ public sealed class OpenMeteoWeatherService(
 
         var url = $"{Endpoint}?latitude={location.Latitude.ToString(CultureInfo.InvariantCulture)}"
             + $"&longitude={location.Longitude.ToString(CultureInfo.InvariantCulture)}"
-            + $"&daily={Uri.EscapeDataString(DailyFields)}"
+            + (request.Day == WeatherDay.Current
+                ? $"&current={Uri.EscapeDataString(CurrentFields)}"
+                : $"&daily={Uri.EscapeDataString(DailyFields)}")
             + "&temperature_unit=fahrenheit&wind_speed_unit=mph"
-            + $"&timezone={Uri.EscapeDataString(hotel.TimeZoneId)}&forecast_days=7&past_days=1";
+            + (request.Day == WeatherDay.Current
+                ? "&precipitation_unit=inch&timezone=auto"
+                : $"&timezone={Uri.EscapeDataString(hotel.TimeZoneId)}&forecast_days=7&past_days=1");
         using var document = await LocationProviderHttp.GetJsonAsync(
             httpClientFactory, url, "Open-Meteo", cancellationToken);
+
+        if (request.Day == WeatherDay.Current)
+        {
+            var current = ReadCurrentObservation(document.RootElement);
+            return new(
+                WeatherResultStatus.Available,
+                ClarificationQuery: null,
+                [],
+                location,
+                Forecast: null,
+                RequestedDate: DateOnly.FromDateTime(current.ObservedAt.DateTime),
+                Current: current);
+        }
 
         var forecast = ReadForecast(document.RootElement, targetDate, hotel.TimeZoneId);
         return new(
@@ -236,6 +271,52 @@ public sealed class OpenMeteoWeatherService(
             "mph");
     }
 
+    private static WeatherCurrentObservation ReadCurrentObservation(JsonElement root)
+    {
+        _ = ReadRequiredString(root, "timezone");
+        if (!root.TryGetProperty("utc_offset_seconds", out var offsetElement)
+            || offsetElement.ValueKind != JsonValueKind.Number
+            || !offsetElement.TryGetInt32(out var offsetSeconds)
+            || Math.Abs((long)offsetSeconds) > TimeSpan.FromHours(14).TotalSeconds)
+        {
+            throw new InvalidDataException("Open-Meteo returned an invalid current-observation time-zone offset.");
+        }
+
+        var units = root.GetProperty("current_units");
+        if (ReadRequiredString(units, "temperature_2m") != "°F"
+            || ReadRequiredString(units, "relative_humidity_2m") != "%"
+            || ReadRequiredString(units, "apparent_temperature") != "°F"
+            || ReadRequiredString(units, "precipitation") != "inch"
+            || ReadRequiredString(units, "wind_speed_10m") != "mp/h")
+        {
+            throw new InvalidDataException("Open-Meteo did not return the requested current weather units.");
+        }
+
+        var current = root.GetProperty("current");
+        var localTimeText = ReadRequiredString(current, "time");
+        if (!DateTime.TryParseExact(
+                localTimeText,
+                "yyyy-MM-dd'T'HH:mm",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var localTime))
+        {
+            throw new InvalidDataException("Open-Meteo returned an invalid current-observation local time.");
+        }
+
+        var observedAt = new DateTimeOffset(
+            DateTime.SpecifyKind(localTime, DateTimeKind.Unspecified),
+            TimeSpan.FromSeconds(offsetSeconds));
+        return new WeatherCurrentObservation(
+            observedAt,
+            ReadDouble(current, "temperature_2m"),
+            ReadDouble(current, "apparent_temperature"),
+            ReadInt(current, "relative_humidity_2m"),
+            ReadInt(current, "weather_code"),
+            ReadDouble(current, "wind_speed_10m"),
+            ReadDouble(current, "precipitation"));
+    }
+
     private static string ReadRequiredString(JsonElement element, string propertyName) =>
         element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()!
@@ -255,5 +336,17 @@ public sealed class OpenMeteoWeatherService(
         return index < array.GetArrayLength() && array[index].ValueKind == JsonValueKind.Number
             ? array[index].GetInt32()
             : null;
+    }
+
+    private static double? ReadDouble(JsonElement element, string propertyName)
+    {
+        var value = element.GetProperty(propertyName);
+        return value.ValueKind == JsonValueKind.Number ? value.GetDouble() : null;
+    }
+
+    private static int? ReadInt(JsonElement element, string propertyName)
+    {
+        var value = element.GetProperty(propertyName);
+        return value.ValueKind == JsonValueKind.Number ? value.GetInt32() : null;
     }
 }

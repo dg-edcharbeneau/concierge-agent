@@ -25,6 +25,7 @@ public interface IConciergeActionToolBackend
         string dropoff,
         bool immediate,
         string? pickupAt,
+        AIFunctionArguments arguments,
         CancellationToken cancellationToken);
     Task<string> ConfirmRideAsync(
         string proposalId,
@@ -112,23 +113,30 @@ public sealed class ConciergeActionToolService(
         if (!TryWeatherDay(period, out var day, out var daysAhead, out var startWeekday, out var weekendDay))
         {
             throw new ArgumentException(
-                "Weather period must be today, tonight, tomorrow, a weekday name, day+2 through day+6, {weekday}+0 through {weekday}+6, or weekend+0/weekend+1.");
+                "Weather period must be current, today, tonight, tomorrow, a weekday name, day+2 through day+6, {weekday}+0 through {weekday}+6, or weekend+0/weekend+1.");
         }
 
         var result = await weatherService.GetWeatherAsync(
             new WeatherRequest(NormalizePlace(place), day, daysAhead, startWeekday, weekendDay, asOfUtc),
             cancellationToken);
+        var weatherCode = result.Forecast?.WeatherCode ?? result.Current?.WeatherCode;
         var output = new ConciergeWeatherToolResult(
             result.Status.ToString(),
             result.ClarificationQuery,
             result.Candidates.Take(4).Select(candidate => Limit(candidate.Formatted, 160)).ToArray(),
             result.Location?.Name is { } location ? Limit(location, 160) : null,
             result.Forecast?.LocalDate ?? result.RequestedDate,
-            result.Forecast?.WeatherCode is { } code ? DescribeWeatherCode(code) : null,
+            weatherCode is { } code ? DescribeWeatherCode(code) : null,
             result.Forecast?.HighFahrenheit,
             result.Forecast?.LowFahrenheit,
             result.Forecast?.MaxWindMph,
-            result.Forecast?.PrecipitationProbability);
+            result.Forecast?.PrecipitationProbability,
+            result.Current?.TemperatureFahrenheit,
+            result.Current?.ApparentTemperatureFahrenheit,
+            result.Current?.RelativeHumidityPercent,
+            result.Current?.WindSpeedMph,
+            result.Current?.PrecipitationInches,
+            result.Current?.ObservedAt);
         return JsonSerializer.Serialize(output, JsonOptions);
     }
 
@@ -175,7 +183,10 @@ public sealed class ConciergeActionToolService(
             places.Select(place => new ConciergeNearbyPlace(
                     Limit(place.Name, 120),
                     place.Address is null ? null : Limit(place.Address, 160),
-                    Math.Round(place.DistanceMeters / MetersPerMile, 1, MidpointRounding.AwayFromZero)))
+                    Math.Round(place.DistanceMeters / MetersPerMile, 1, MidpointRounding.AwayFromZero),
+                    place.ProviderId is null ? null : Limit(place.ProviderId, 256),
+                    place.Latitude,
+                    place.Longitude))
                 .ToArray());
         return JsonSerializer.Serialize(output, JsonOptions);
     }
@@ -202,6 +213,7 @@ public sealed class ConciergeActionToolService(
         string dropoff,
         bool immediate,
         string? pickupAt,
+        AIFunctionArguments arguments,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(dropoff) || dropoff.Length > 200
@@ -212,34 +224,56 @@ public sealed class ConciergeActionToolService(
             throw new ArgumentException("Ride pickup, drop-off, and timing are invalid.");
         }
 
+        if (!TryGetTrustedIdentity(arguments, out var identity))
+        {
+            throw new ArgumentException("The verified ride scope is unavailable.");
+        }
+
         DateTimeOffset? pickupAtUtc = null;
+        DateTimeOffset? adjustedPickupLocal = null;
         if (!immediate)
         {
             var minimumNotice = schedulingOptions.Value.MinimumAdvanceNoticeMinutes;
+            var nowUtc = timeProvider.GetUtcNow().ToUniversalTime();
+            var earliestUtc = EarliestScheduledPickupUtc(nowUtc, minimumNotice);
+            var cutoffUtc = CheckoutCutoffUtc(identity.CheckoutDate);
             if (!TryParseExplicitOffset(pickupAt!, out var parsed)
-                || parsed < timeProvider.GetUtcNow().AddMinutes(minimumNotice))
+                || parsed < nowUtc - ScheduleClockTolerance)
             {
-                return JsonSerializer.Serialize(
-                    new ConciergeRideProposalToolResult(
-                        "InvalidSchedule",
-                        $"Scheduled pickups must be at least {minimumNotice} minutes from now. Ask for a later time.",
-                        [],
-                        null,
-                        null,
-                        null,
-                        null,
-                        minimumNotice),
-                    JsonOptions);
+                return InvalidSchedule(
+                    $"Scheduled pickups must be at least {minimumNotice} minutes from now. Ask for a later time.",
+                    minimumNotice,
+                    earliestUtc < cutoffUtc ? ToHotelTime(earliestUtc) : null,
+                    earliestUtc < cutoffUtc ? null : identity.CheckoutDate);
             }
 
-            pickupAtUtc = parsed.ToUniversalTime();
+            var requestedUtc = parsed.ToUniversalTime();
+            if (requestedUtc < earliestUtc)
+            {
+                // Near-term requests ("leave in five minutes") are moved, not refused: the guest
+                // hears and confirms the adjusted time before anything is booked.
+                requestedUtc = earliestUtc;
+                adjustedPickupLocal = ToHotelTime(earliestUtc);
+            }
+
+            // Mirrors RideService's checkout-day rule so a proposal is never shifted past it.
+            if (requestedUtc >= cutoffUtc)
+            {
+                return InvalidSchedule(
+                    $"Scheduled pickups must be before the end of checkout day {identity.CheckoutDate:yyyy-MM-dd}.",
+                    minimumNotice,
+                    earliestUtc < cutoffUtc ? ToHotelTime(earliestUtc) : null,
+                    identity.CheckoutDate);
+            }
+
+            pickupAtUtc = requestedUtc;
         }
 
         var routePlaces = string.IsNullOrWhiteSpace(pickup)
             ? new[] { dropoff.Trim() }
             : new[] { pickup.Trim(), dropoff.Trim() };
         var route = await routeService.GetRouteAsync(
-            new DrivingRouteRequest(routePlaces),
+            new DrivingRouteRequest(routePlaces, TrustedDestination(arguments)),
             cancellationToken);
         if (route.Status != DrivingRouteStatus.Available || route.Route is null
             || route.Origin is null || route.Destination is null)
@@ -248,11 +282,14 @@ public sealed class ConciergeActionToolService(
                 new ConciergeRideProposalToolResult(
                     "NeedsClarification",
                     $"No proposal was made. Could not find \"{Limit(route.ClarificationQuery ?? string.Empty, 120)}\"; ask the guest which place they mean.",
-                    route.Candidates.Take(4).Select(candidate => Limit(candidate.Formatted, 160)).ToArray(),
+                    route.Candidates.Take(3).Select(candidate => Limit(candidate.Formatted, 160)).ToArray(),
                     null,
                     null,
                     null,
-                    null),
+                    null,
+                    CanonicalCandidates: route.ClarifyingOrigin ? [] :
+                        route.Candidates.Take(3).Select(CanonicalCandidate).ToArray(),
+                    ClarifyingPickup: route.ClarifyingOrigin),
                 JsonOptions);
         }
 
@@ -262,9 +299,35 @@ public sealed class ConciergeActionToolService(
         var pickupPlace = new ConciergeRidePlace(
             Limit(pickupName, 200), route.Origin.Latitude, route.Origin.Longitude);
         var dropoffPlace = new ConciergeRidePlace(
-            Limit(PreferRequestedPlaceName(route.Destination.Name, routePlaces[^1]), 200),
+            Limit(TrustedDestination(arguments) is not null
+                ? route.Destination.Name
+                : PreferRequestedPlaceName(route.Destination.Name, routePlaces[^1]), 200),
             route.Destination.Latitude,
             route.Destination.Longitude);
+        // The ride service supplies warning context, not a destination-wide booking lock.
+        // Explicit new requests still get an offer, even when pickup times overlap.
+        var activeRides = await TryGetUpcomingRidesAsync(identity, cancellationToken);
+        if (activeRides is null)
+        {
+            return JsonSerializer.Serialize(
+                new ConciergeRideProposalToolResult(
+                    "ActiveRidesUnavailable",
+                    "No proposal was made because existing rides could not be checked.",
+                    [],
+                    null,
+                    null,
+                    null,
+                    null),
+                JsonOptions);
+        }
+
+        var existingRides = activeRides
+            .Where(ride => ride.Status is "Booked" or "DriverAssigned" or "PickedUp"
+                && IsSameDestination(ride, dropoffPlace))
+            .Take(3)
+            .Select(Summarize)
+            .ToArray();
+
         var proposal = new ConciergeRideProposalDraft(
             pickupPlace,
             dropoffPlace,
@@ -278,8 +341,100 @@ public sealed class ConciergeActionToolService(
             proposal,
             Limit(route.Route.VoiceSummary, 240),
             Limit(route.Route.WebSummary, 240),
-            route.Route.VoiceInstructions.Take(3).Select(instruction => Limit(instruction, 120)).ToArray());
+            route.Route.VoiceInstructions.Take(3).Select(instruction => Limit(instruction, 120)).ToArray(),
+            ExistingRides: existingRides,
+            EarliestPickupAt: adjustedPickupLocal,
+            PickupAdjusted: adjustedPickupLocal is not null);
         return JsonSerializer.Serialize(success, JsonOptions);
+    }
+
+    // The prompt clock is minute-truncated (HH:mm), so a model computing "now + N minutes" can
+    // land up to a minute behind the real clock; such requests are still meant for the near future.
+    internal static readonly TimeSpan ScheduleClockTolerance = TimeSpan.FromMinutes(1);
+
+    // RideService re-checks minimum notice when the guest confirms, so the proposal leaves room
+    // for the confirmation round trip (guest reply + model turn) instead of expiring en route.
+    internal static readonly TimeSpan ScheduleConfirmationGrace = TimeSpan.FromMinutes(2);
+
+    /// <summary>now + minimum notice + confirmation grace, rounded up to a whole minute.</summary>
+    internal static DateTimeOffset EarliestScheduledPickupUtc(DateTimeOffset nowUtc, int minimumNoticeMinutes)
+    {
+        var earliest = nowUtc.ToUniversalTime().AddMinutes(minimumNoticeMinutes) + ScheduleConfirmationGrace;
+        var remainder = earliest.Ticks % TimeSpan.TicksPerMinute;
+        return remainder == 0 ? earliest : earliest.AddTicks(TimeSpan.TicksPerMinute - remainder);
+    }
+
+    // Same rule as RideRepository.CheckoutCutoffUtc: pickups must precede hotel-local midnight
+    // that ends checkout day.
+    private DateTimeOffset CheckoutCutoffUtc(DateOnly checkoutDate)
+    {
+        var nextLocalMidnight = checkoutDate.AddDays(1)
+            .ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(nextLocalMidnight, hotelTimeZone));
+    }
+
+    private DateTimeOffset ToHotelTime(DateTimeOffset value) =>
+        TimeZoneInfo.ConvertTime(value, hotelTimeZone);
+
+    private static string InvalidSchedule(
+        string message,
+        int minimumNotice,
+        DateTimeOffset? earliestPickupLocal,
+        DateOnly? checkoutCutoffDate) =>
+        JsonSerializer.Serialize(
+            new ConciergeRideProposalToolResult(
+                "InvalidSchedule",
+                message,
+                [],
+                null,
+                null,
+                null,
+                null,
+                minimumNotice,
+                EarliestPickupAt: earliestPickupLocal,
+                CheckoutCutoffDate: checkoutCutoffDate),
+            JsonOptions);
+
+    // Geocoders can return slightly different points for one place. A shared leading label only
+    // counts nearby, so another branch of a chain across town does not trigger a warning.
+    private const double SameDestinationMeters = 150;
+    private const double SameLabelMeters = 1_000;
+
+    private static bool IsSameDestination(RideResponseDto ride, ConciergeRidePlace dropoff)
+    {
+        var distance = DistanceMeters(ride.DropoffLatitude, ride.DropoffLongitude, dropoff.Latitude, dropoff.Longitude);
+        return distance <= SameDestinationMeters
+            || (distance <= SameLabelMeters
+                && StringComparer.OrdinalIgnoreCase.Equals(LeadingLabel(ride.DropoffName), LeadingLabel(dropoff.Name)));
+    }
+
+    private static string LeadingLabel(string name) =>
+        name.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
+
+    private static double DistanceMeters(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double EarthRadiusMeters = 6_371_000;
+        var dLat = double.DegreesToRadians(lat2 - lat1);
+        var dLon = double.DegreesToRadians(lon2 - lon1);
+        var a = Math.Pow(Math.Sin(dLat / 2), 2)
+            + Math.Cos(double.DegreesToRadians(lat1)) * Math.Cos(double.DegreesToRadians(lat2))
+            * Math.Pow(Math.Sin(dLon / 2), 2);
+        return 2 * EarthRadiusMeters * Math.Asin(Math.Min(1, Math.Sqrt(a)));
+    }
+
+    private async Task<RideResponseDto[]?> TryGetUpcomingRidesAsync(
+        VerifiedRideIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        using var message = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"/guests/{identity.GuestId:D}/rides?when=upcoming");
+        AddVerifiedScope(message, identity);
+        // Transport failures fail the activity; the workflow then renders the curated failure reply.
+        using var response = await RideClient().SendAsync(message, cancellationToken);
+        return response.IsSuccessStatusCode
+            ? await response.Content.ReadFromJsonAsync<RideResponseDto[]>(JsonOptions, cancellationToken) ?? []
+            : null;
     }
 
     public async Task<string> ConfirmRideAsync(
@@ -487,19 +642,8 @@ public sealed class ConciergeActionToolService(
     // The simulator completes a ride one route duration after pickup, so the same estimate
     // answers "is my ride almost there?" without exposing driver details.
     private static DateTimeOffset? EstimateArrival(RideResponseDto response)
-    {
-        if (response.CompletedAtUtc is { } completed)
-        {
-            return completed;
-        }
-
-        if (!double.IsFinite(response.RouteDurationSeconds) || response.RouteDurationSeconds is <= 0 or > 86_400)
-        {
-            return null;
-        }
-
-        return (response.PickedUpAtUtc ?? response.PickupAt).AddSeconds(response.RouteDurationSeconds);
-    }
+        => RideArrivalEstimate.Calculate(
+            response.PickupAt, response.RouteDurationSeconds, response.PickedUpAtUtc, response.CompletedAtUtc);
 
     private static void AddVerifiedScope(HttpRequestMessage request, VerifiedRideIdentity identity)
     {
@@ -530,6 +674,29 @@ public sealed class ConciergeActionToolService(
 
         identity = new VerifiedRideIdentity(guestId, stayId, checkoutDate);
         return true;
+    }
+
+    private static DrivingRouteEndpoint? TrustedDestination(AIFunctionArguments arguments)
+    {
+        if (!TryGetTrustedValue(arguments, ConciergeToolDefinitions.TrustedDestinationKey, out var json))
+        {
+            return null;
+        }
+
+        var place = JsonSerializer.Deserialize<ConciergeCanonicalPlace>(json, JsonOptions)
+            ?? throw new ArgumentException("Verified destination is invalid.");
+        return new DrivingRouteEndpoint(
+            place.Address is null ? place.Name : $"{place.Name}, {place.Address}",
+            place.Latitude, place.Longitude);
+    }
+
+    private static ConciergeCanonicalPlace CanonicalCandidate(ResolvedPlace candidate)
+    {
+        var address = candidate.Formatted.StartsWith(candidate.Name + ", ", StringComparison.OrdinalIgnoreCase)
+            ? candidate.Formatted[(candidate.Name.Length + 2)..]
+            : candidate.Formatted;
+        return new(Limit(candidate.Name, 120), Limit(address, 160), Limit(candidate.PlaceId, 256),
+            candidate.Latitude, candidate.Longitude);
     }
 
     private static bool TryGetTrustedValue(
@@ -605,6 +772,7 @@ public sealed class ConciergeActionToolService(
 
         day = value switch
         {
+            "current" or "now" or "right now" => WeatherDay.Current,
             "today" => WeatherDay.Today,
             "tonight" => WeatherDay.Tonight,
             "tomorrow" => WeatherDay.Tomorrow,
@@ -716,7 +884,13 @@ public sealed record ConciergeWeatherToolResult(
     double? HighFahrenheit,
     double? LowFahrenheit,
     double? MaxWindMph,
-    int? PrecipitationProbability);
+    int? PrecipitationProbability,
+    double? CurrentTemperatureFahrenheit = null,
+    double? ApparentTemperatureFahrenheit = null,
+    int? RelativeHumidityPercent = null,
+    double? CurrentWindMph = null,
+    double? CurrentPrecipitationInches = null,
+    DateTimeOffset? ObservedAt = null);
 
 public sealed record ConciergeRouteToolResult(
     string Status,
@@ -737,7 +911,9 @@ public sealed record ConciergeNearbyPlacesToolResult(
     string Category,
     IReadOnlyList<ConciergeNearbyPlace> Places);
 
-public sealed record ConciergeNearbyPlace(string Name, string? Address, double DistanceMiles);
+public sealed record ConciergeNearbyPlace(
+    string Name, string? Address, double DistanceMiles,
+    string? ProviderId = null, double? Latitude = null, double? Longitude = null);
 
 /// <summary>
 /// One named place's opening hours; absent provider hours use NotListed rather than nearby results.
@@ -766,7 +942,17 @@ public sealed record ConciergeRideProposalToolResult(
     string? RouteSummary,
     string? WebSummary,
     IReadOnlyList<string>? Instructions,
-    int? MinimumAdvanceNoticeMinutes = null);
+    int? MinimumAdvanceNoticeMinutes = null,
+    IReadOnlyList<RideSummary>? ExistingRides = null,
+    // Hotel-local earliest bookable scheduled pickup, recorded so replies replay deterministically.
+    // Set on InvalidSchedule (when one exists before checkout cutoff) and on adjusted proposals.
+    DateTimeOffset? EarliestPickupAt = null,
+    // True when the requested pickup was too soon and the proposal carries EarliestPickupAt instead.
+    bool PickupAdjusted = false,
+    // Set when the schedule failed because pickups must precede the end of this checkout day.
+    DateOnly? CheckoutCutoffDate = null,
+    IReadOnlyList<ConciergeCanonicalPlace>? CanonicalCandidates = null,
+    bool ClarifyingPickup = false);
 
 public sealed record ConciergeRideActionResult(
     bool Simulated,

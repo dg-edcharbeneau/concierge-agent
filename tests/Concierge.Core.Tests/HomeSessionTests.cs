@@ -15,6 +15,170 @@ namespace Concierge.Core.Tests;
 
 public sealed class HomeSessionTests
 {
+    [Fact]
+    public async Task VoiceRequestAppearsBeforeAnswerAndCompletionRefreshesWithoutPlayback()
+    {
+        await using var harness = new Harness();
+        var connection = harness.StartListening();
+        await harness.VoiceSession(connection.Session.Id.ToString());
+        var reply = new TaskCompletionSource<ConciergeTurnResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var request = connection.Session.JoinOrStart("voice-pending", () => reply.Task, "Cancel my ride, please.");
+        await harness.WaitUntil(() => harness.RenderedContent().Text.Contains("Cancel my ride, please."));
+        Assert.False(request.IsCompleted);
+        Assert.Equal("listening", harness.Get<string>("voiceState"));
+        var duplicate = connection.Session.JoinOrStart("voice-pending",
+            () => throw new InvalidOperationException("A retry must join."), "Cancel my ride, please.");
+        Assert.Same(request, duplicate);
+        Assert.Single(harness.RenderedContent().Text, text => text == "Cancel my ride, please.");
+
+        harness.Service.History = _ => Task.FromResult(new ConciergeHistoryResult([
+            new ConciergeTranscriptTurn("voice-pending", 1, "voice", "Cancel my ride, please.",
+                "Your ride is cancelled.", DateTimeOffset.UtcNow)]));
+        reply.SetResult(new ConciergeTurnResult("voice-pending", "Your ride is cancelled.", 1));
+        await request;
+        await harness.WaitUntil(() => harness.Get<List<ConciergeTranscriptTurn>>("turns").Count == 1);
+        Assert.Single(harness.RenderedContent().Text, text => text == "Cancel my ride, please.");
+        var (text, markup) = harness.RenderedContent();
+        Assert.Contains("Your ride is cancelled.", string.Concat(text.Concat(markup)));
+        Assert.Equal("listening", harness.Get<string>("voiceState"));
+    }
+
+    [Fact]
+    public async Task FailedVoiceTurnClearsPendingTextWithoutInventingReply()
+    {
+        await using var harness = new Harness();
+        var connection = harness.StartListening();
+        await harness.VoiceSession(connection.Session.Id.ToString());
+        var reply = new TaskCompletionSource<ConciergeTurnResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var request = connection.Session.JoinOrStart("failed-voice", () => reply.Task, "Unanswered question");
+        await harness.WaitUntil(() => harness.RenderedContent().Text.Contains("Unanswered question"));
+        reply.SetException(new InvalidOperationException("Unavailable"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => request);
+        await harness.WaitUntil(() => !harness.RenderedContent().Text.Contains("Unanswered question"));
+        Assert.Empty(harness.Get<List<ConciergeTranscriptTurn>>("turns"));
+    }
+
+    [Fact]
+    public async Task ReconnectReplaysPendingVoiceRequestButOldSessionCannotLeakText()
+    {
+        await using var harness = new Harness();
+        var connection = harness.StartListening();
+        var reply = new TaskCompletionSource<ConciergeTurnResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource();
+        using var observer = harness.Voice.SubscribeTurns(connection.Session.Id, _ => started.TrySetResult());
+        var request = connection.Session.JoinOrStart("reconnect-pending", () => reply.Task, "My pending question");
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await harness.VoiceSession(connection.Session.Id.ToString());
+        await harness.WaitUntil(() => harness.RenderedContent().Text.Contains("My pending question"));
+        var other = harness.StartListening();
+        await harness.VoiceSession(other.Session.Id.ToString());
+        await harness.Call("StateHasChanged");
+        Assert.DoesNotContain("My pending question", harness.RenderedContent().Text);
+        reply.SetResult(new ConciergeTurnResult("reconnect-pending", "Old reply", 1));
+        await request;
+        await harness.Call("StateHasChanged");
+        Assert.DoesNotContain("My pending question", harness.RenderedContent().Text);
+        Assert.DoesNotContain("Old reply", harness.RenderedContent().Text);
+    }
+
+    [Fact]
+    public async Task IdleWarningIsVisibleAndAccessibleWithoutReplacingTheVoiceState()
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        await harness.VoiceIdleWarning(true);
+        var (text, markup) = harness.RenderedContent();
+        var content = string.Concat(text.Concat(markup));
+        Assert.Contains("Chat ending soon", content);
+        Assert.Contains("30 seconds", content);
+        Assert.Contains("Speak to continue.", content);
+        Assert.Equal("listening", harness.Get<string>("voiceState"));
+        Assert.Contains(harness.RenderedElements(), element =>
+            Equals(element.Attributes.GetValueOrDefault("role"), "status")
+            && Equals(element.Attributes.GetValueOrDefault("aria-atomic"), "true"));
+        await harness.VoiceIdleWarning(false);
+        (text, markup) = harness.RenderedContent();
+        Assert.DoesNotContain("Chat ending soon", string.Concat(text.Concat(markup)));
+    }
+
+    [Theory]
+    [InlineData("listening", true, "Unmute your microphone and speak to continue.")]
+    [InlineData("paused", false, "Resume voice and speak to continue.")]
+    public async Task IdleWarningExplainsHowToResumeSpeech(string state, bool muted, string guidance)
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        harness.Set("voiceState", state);
+        harness.Set("voiceMuted", muted);
+        await harness.VoiceIdleWarning(true);
+        var (text, markup) = harness.RenderedContent();
+        Assert.Contains(guidance, string.Concat(text.Concat(markup)));
+    }
+
+    [Theory]
+    [InlineData("ConnectVoiceAsync")]
+    [InlineData("EndVoiceAsync")]
+    public async Task ReconnectAndStopClearIdleWarning(string action)
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        await harness.VoiceIdleWarning(true);
+        await harness.Call(action);
+        await harness.Call("StateHasChanged");
+        var (text, markup) = harness.RenderedContent();
+        Assert.DoesNotContain("Chat ending soon", string.Concat(text.Concat(markup)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task IdleEndReasonIsVisibleAndDoesNotClaimSuccessWhenEndingFails(bool failure)
+    {
+        await using var harness = new Harness();
+        harness.StartListening();
+        await harness.VoiceIdleWarning(true);
+        if (failure)
+        {
+            harness.Service.End = _ => throw new ConciergeApiException("unavailable", "Try again.", 503);
+        }
+        await harness.VoiceEndRequested("idle_timeout");
+        var (text, markup) = harness.RenderedContent();
+        var content = string.Concat(text.Concat(markup));
+        Assert.DoesNotContain("Chat ending soon", content);
+        Assert.Equal(!failure, harness.Get<bool>("chatEnded"));
+        if (failure)
+        {
+            Assert.Contains("We couldn’t end the chat.", content);
+            Assert.DoesNotContain("Chat ended due to inactivity", content);
+        }
+        else
+        {
+            Assert.Contains("Chat ended due to inactivity", content);
+            Assert.Contains("Verify your stay again", content);
+            await harness.Call("VerifyStayAgain");
+            Assert.False(harness.Get<bool>("chatEndedForInactivity"));
+        }
+    }
+
+    [Fact]
+    public async Task DisconnectCannotOverwriteAnIdleEndInProgress()
+    {
+        await using var harness = new Harness();
+        var connection = harness.StartListening();
+        await harness.VoiceSession(connection.Session.Id.ToString());
+        var ended = new TaskCompletionSource();
+        harness.Service.End = _ => ended.Task;
+        var ending = harness.VoiceEndRequested("idle_timeout");
+        await harness.VoiceState("disconnected", "Voice disconnected.", 4000);
+        await harness.Call("ApplyVoiceRelayClosedAsync", connection.Session.Id.ToString(), 1);
+        await harness.VoiceIdleWarning(true);
+        Assert.Equal("Stopped (inactive)", harness.Get<string>("VoiceStateLabel"));
+        Assert.False(harness.Get<bool>("voiceIdleWarning"));
+        ended.SetResult();
+        await ending;
+        Assert.True(harness.Get<bool>("chatEndedForInactivity"));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -42,6 +206,9 @@ public sealed class HomeSessionTests
         Assert.Equal(failure ? System.Diagnostics.ActivityStatusCode.Error : System.Diagnostics.ActivityStatusCode.Unset,
             activity.Status);
         Assert.Equal(!failure, harness.Get<bool>("chatEnded"));
+        var rendered = harness.RenderedContent();
+        Assert.Contains(failure ? "We couldn’t end the chat." : "Chat ended",
+            string.Concat(rendered.Text.Concat(rendered.Markup)));
         Assert.Contains(logs.Entries, entry =>
             Equals(entry.Values.GetValueOrDefault("EndChatEvent"), "concierge.voice.end_chat." + eventName));
         Assert.DoesNotContain(logs.Entries, entry =>
@@ -104,6 +271,62 @@ public sealed class HomeSessionTests
 
         Assert.Equal("new-turn", Assert.Single(harness.Get<List<ConciergeTranscriptTurn>>("turns")).TurnId);
         Assert.False(harness.Get<bool>("hasExpired"));
+    }
+
+    [Fact]
+    public async Task RepeatedSpeakingNotificationsDoNotRefreshHistoryButDisconnectStillRecovers()
+    {
+        await using var harness = new Harness();
+        var connection = harness.StartListening();
+        await harness.VoiceSession(connection.Session.Id.ToString());
+        var historyReads = 0;
+        harness.Service.History = _ =>
+        {
+            Interlocked.Increment(ref historyReads);
+            return Task.FromResult(History("recovered"));
+        };
+
+        for (var index = 0; index < 12; index++)
+        {
+            await harness.VoiceState("speaking", "Speaking", 0);
+        }
+
+        Assert.Equal(0, Volatile.Read(ref historyReads));
+        await harness.VoiceState("disconnected", "Voice disconnected.", 1011);
+
+        Assert.Equal(1, Volatile.Read(ref historyReads));
+        Assert.Equal("recovered", Assert.Single(harness.Get<List<ConciergeTranscriptTurn>>("turns")).TurnId);
+    }
+
+    [Fact]
+    public async Task CompletionDuringHistoryReadQueuesAnotherReadInsteadOfLosingRefresh()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("credential", Guid.NewGuid());
+        var firstResponse = new TaskCompletionSource<ConciergeHistoryResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondResponse = new TaskCompletionSource<ConciergeHistoryResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var historyReads = 0;
+        harness.Service.History = _ => Interlocked.Increment(ref historyReads) switch
+        {
+            1 => firstResponse.Task,
+            2 => secondResponse.Task,
+            _ => throw new InvalidOperationException("Unexpected history read."),
+        };
+
+        var firstCompletion = harness.Call("LoadHistoryAndReconcileAsync", false);
+        await harness.WaitUntil(() => Volatile.Read(ref historyReads) == 1);
+        var secondCompletion = harness.Call("LoadHistoryAndReconcileAsync", false);
+        firstResponse.SetResult(History("older-snapshot"));
+        await harness.WaitUntil(() => Volatile.Read(ref historyReads) == 2);
+        secondResponse.SetResult(History("latest-snapshot"));
+        await Task.WhenAll(firstCompletion, secondCompletion);
+
+        Assert.Equal(2, Volatile.Read(ref historyReads));
+        Assert.Equal(
+            "latest-snapshot",
+            Assert.Single(harness.Get<List<ConciergeTranscriptTurn>>("turns")).TurnId);
     }
 
     /// <summary>Prevents a history response from repopulating an ended interaction.</summary>
@@ -715,6 +938,40 @@ public sealed class HomeSessionTests
         Assert.Contains("Ride updates will appear here when you book a ride with the concierge.", renderedText);
     }
 
+    [Theory]
+    [InlineData("Booked", true, "2026-10-24T17:20:00Z", "Oct 24, 1:20 PM")]
+    [InlineData("Booked", true, "2026-01-24T17:20:00Z", "Jan 24, 12:20 PM")]
+    [InlineData("Booked", false, "2026-10-24T17:20:00Z", null)]
+    [InlineData("DriverAssigned", true, "2026-10-24T17:20:00Z", null)]
+    public async Task BookedActivityShowsOnlyRealDestinationArrivalInMiamiTime(
+        string status, bool hasArrival, string arrival, string? expected)
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        var changedAt = DateTimeOffset.Parse("2026-10-24T16:00:00Z");
+        harness.Get<List<RideActivityEntry>>("rideActivityEntries").Add(new RideActivityEntry(
+            Guid.NewGuid(), 1, status, changedAt, "Hotel ZGY", "Museum", changedAt.AddHours(1),
+            ArrivalAtUtc: hasArrival ? DateTimeOffset.Parse(arrival) : null));
+
+        await harness.Call("StateHasChanged");
+
+        var (text, markup) = harness.RenderedContent();
+        var rendered = string.Concat(text.Concat(markup));
+        if (expected is null)
+        {
+            Assert.DoesNotContain("Estimated destination arrival", rendered);
+            Assert.DoesNotContain("1:00 PM", rendered); // Never substitute the pickup time.
+        }
+        else
+        {
+            Assert.Contains("Estimated destination arrival", rendered);
+            Assert.Contains(expected, rendered);
+            Assert.Contains(harness.RenderedElements(), element => element.Tag == "time"
+                && Equals(element.Attributes.GetValueOrDefault("datetime"),
+                    DateTimeOffset.Parse(arrival).ToString("O", System.Globalization.CultureInfo.InvariantCulture)));
+        }
+    }
+
     [Fact]
     public async Task ActivityButtonIsFirstAndCapsItsUnreadBadge()
     {
@@ -1132,7 +1389,11 @@ public sealed class HomeSessionTests
                 if (result is Task task) await task;
             }).WaitAsync(TimeSpan.FromSeconds(10));
 
-        public Task VoiceEndRequested() => renderer.Dispatcher.InvokeAsync(home.OnVoiceEndRequested);
+        public Task VoiceEndRequested(string? reason = null) =>
+            renderer.Dispatcher.InvokeAsync(() => home.OnVoiceEndRequested(reason));
+
+        public Task VoiceIdleWarning(bool active) =>
+            renderer.Dispatcher.InvokeAsync(() => home.OnVoiceIdleWarning(active));
 
         public Task DispatchKeyDown(Func<KeyboardEventArgs, Task> callback, KeyboardEventArgs args) =>
             renderer.Dispatcher.InvokeAsync(() => callback(args));

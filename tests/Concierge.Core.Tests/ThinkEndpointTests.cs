@@ -235,7 +235,7 @@ public sealed class ThinkEndpointTests : IDisposable
     public async Task EndChatToolResultMustMatchConfirmedCall()
     {
         var connection = registry.Open(Stay, null);
-        Assert.True(connection.RegisterEndChatCall("expected"));
+        Assert.True(connection.RegisterEndChatCall("expected", VoiceEndChatTests.AdmitTurn(connection)));
         Assert.True(connection.ConfirmEndChatCall("expected"));
 
         using var response = await PostAsync(Json(
@@ -262,6 +262,10 @@ public sealed class ThinkEndpointTests : IDisposable
         Assert.True(function.GetProperty("defer_until_eot").GetBoolean());
         Assert.False(function.TryGetProperty("endpoint", out _));
         Assert.Equal(JsonValueKind.Object, function.GetProperty("parameters").GetProperty("properties").ValueKind);
+
+        var speak = settings.RootElement
+            .GetProperty("agent").GetProperty("speak").GetProperty("provider");
+        Assert.Equal(1.0, speak.GetProperty("speed").GetDouble());
     }
 
     [Fact]

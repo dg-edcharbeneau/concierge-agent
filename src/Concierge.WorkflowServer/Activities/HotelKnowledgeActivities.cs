@@ -20,7 +20,7 @@ public sealed class HotelKnowledgeActivities(
     private const int ReciprocalRankConstant = 60;
 
     /// <summary>
-    /// Finds hotel evidence for a guest question. Exact fact matches win; otherwise lexical and vector
+    /// Finds hotel evidence for a guest question. An unambiguous exact fact match wins; otherwise lexical and vector
     /// results are fused. Returns <see cref="HotelRetrievalPath.NoEvidence"/> when nothing is indexed or
     /// matched, and throws if the configured embedding model differs from the indexed one.
     /// </summary>
@@ -91,28 +91,48 @@ public sealed class HotelKnowledgeActivities(
         await using var command = dataSource.CreateCommand(
             """
             WITH query_terms AS (
-                SELECT websearch_to_tsquery('english', $1) AS tsquery
+                SELECT
+                    websearch_to_tsquery('english', $1) AS tsquery,
+                    tsvector_to_array(to_tsvector('english', $1)) AS lexemes
+            ),
+            current_facts AS (
+                SELECT
+                    f.fact_key,
+                    f.source_id,
+                    to_tsvector('english', f.fact_key || ' ' || f.fact_value) AS fact_vector,
+                    tsvector_to_array(to_tsvector(
+                        'english',
+                        replace(split_part(f.fact_key, '#', 2), '-', ' '))) AS topic_lexemes
+                FROM hotel_facts f
+                JOIN ingestion_versions v
+                  ON v.source_id = f.source_id
+                 AND v.version_key = split_part(f.fact_key, '#', 2)
+                 AND v.status = 'completed'
+                WHERE NOT (split_part(f.fact_key, '#', 2) = 'late-checkout' AND $3 = 'checkout')
+                  AND NOT (split_part(f.fact_key, '#', 2) = 'checkout' AND $3 = 'late-checkout')
+                  AND (f.effective_from_utc IS NULL OR f.effective_from_utc <= CURRENT_TIMESTAMP)
+                  AND (f.effective_to_utc IS NULL OR f.effective_to_utc > CURRENT_TIMESTAMP)
             ),
             matching_facts AS (
                 SELECT
                     f.fact_key,
                     f.source_id,
                     count(*) OVER () AS fact_match_count,
-                    ts_rank_cd(
-                        to_tsvector('english', f.fact_key || ' ' || f.fact_value),
-                        q.tsquery) AS fact_rank
-                FROM hotel_facts f
-                JOIN knowledge_sources s ON s.source_id = f.source_id
-                JOIN ingestion_versions v
-                  ON v.source_id = f.source_id
-                 AND v.version_key = split_part(f.fact_key, '#', 2)
-                 AND v.status = 'completed'
+                    ts_rank_cd(f.fact_vector, q.tsquery) AS fact_rank,
+                    -- Full-text AND semantics can drop a sibling fact on the same authored
+                    -- topic (for example, "gym" location vs. "gym" hours) when the question
+                    -- also names a facet only one of them states. Such a match is not exact.
+                    (SELECT count(*)
+                     FROM current_facts g
+                     WHERE g.fact_key <> f.fact_key
+                       AND EXISTS (
+                           SELECT 1
+                           FROM unnest(f.topic_lexemes) AS topic(lexeme)
+                           WHERE topic.lexeme = ANY(q.lexemes)
+                             AND topic.lexeme = ANY(g.topic_lexemes))) AS topic_sibling_count
+                FROM current_facts f
                 CROSS JOIN query_terms q
-                WHERE to_tsvector('english', f.fact_key || ' ' || f.fact_value) @@ q.tsquery
-                  AND NOT (split_part(f.fact_key, '#', 2) = 'late-checkout' AND $3 = 'checkout')
-                  AND NOT (split_part(f.fact_key, '#', 2) = 'checkout' AND $3 = 'late-checkout')
-                  AND (f.effective_from_utc IS NULL OR f.effective_from_utc <= CURRENT_TIMESTAMP)
-                  AND (f.effective_to_utc IS NULL OR f.effective_to_utc > CURRENT_TIMESTAMP)
+                WHERE f.fact_vector @@ q.tsquery
             ),
             selected_chunks AS (
                 SELECT
@@ -120,6 +140,7 @@ public sealed class HotelKnowledgeActivities(
                     f.source_id,
                     f.fact_match_count,
                     f.fact_rank,
+                    f.topic_sibling_count,
                     s.source_key,
                     s.title AS source_title,
                     s.metadata::text AS source_metadata_json,
@@ -160,7 +181,8 @@ public sealed class HotelKnowledgeActivities(
                 ingestion_status,
                 source_metadata_json,
                 version_metadata_json,
-                fact_match_count
+                fact_match_count,
+                topic_sibling_count
             FROM selected_chunks
             WHERE chunk_rank = 1
             ORDER BY fact_rank DESC, fact_key
@@ -175,9 +197,10 @@ public sealed class HotelKnowledgeActivities(
         while (await reader.ReadAsync(cancellationToken))
         {
             // A single section-keyed record is a deterministic lookup. A broad query
-            // matching multiple records belongs in hybrid retrieval, where both arms
-            // can rank the candidate passages instead of treating every match as exact.
-            if (reader.GetInt64(12) != 1)
+            // matching multiple records, or one that shares its topic with another
+            // current record, belongs in hybrid retrieval, where both arms can rank
+            // the candidate passages instead of treating one match as exact.
+            if (reader.GetInt64(12) != 1 || reader.GetInt64(13) != 0)
             {
                 return [];
             }

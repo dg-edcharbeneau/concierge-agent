@@ -300,6 +300,10 @@ internal sealed class ScriptedChatClient : IChatClient
     /// <summary>Overrides the deterministic answer text for isolation tests.</summary>
     public Func<IReadOnlyList<ChatMessage>, string>? AnswerFactory { get; set; }
 
+    public Func<IReadOnlyList<ChatMessage>, ChatResponse>? ResponseFactory { get; set; }
+
+    public Func<IReadOnlyList<ChatMessage>, Task>? BeforeResponse { get; set; }
+
     /// <summary>When set, answers report this finish reason (for example, Length).</summary>
     public ChatFinishReason? AnswerFinishReason { get; set; }
 
@@ -316,8 +320,13 @@ internal sealed class ScriptedChatClient : IChatClient
             options?.MaxOutputTokens,
             options?.Tools?.OfType<AIFunction>().Select(tool => tool.Name).ToArray() ?? [],
             options?.AdditionalProperties?.ContainsKey(ConciergeEndChat.ModelOptionKey) == true,
-            options?.AdditionalProperties?.ContainsKey(ConciergeToolDefinitions.ModelOptionKey) == true));
+            options?.AdditionalProperties?.ContainsKey(ConciergeToolDefinitions.ModelOptionKey) == true,
+            options?.AllowMultipleToolCalls));
         firstCall.TrySetResult();
+        if (BeforeResponse is { } beforeResponse)
+        {
+            await beforeResponse(snapshot);
+        }
         if (Gate is { } gate)
         {
             await gate.Task.WaitAsync(cancellationToken);
@@ -330,6 +339,10 @@ internal sealed class ScriptedChatClient : IChatClient
 
         var text = AnswerFactory?.Invoke(snapshot)
             ?? $"Answer: {snapshot.Last(message => message.Role == ChatRole.User).Text}";
+        if (ResponseFactory is { } responseFactory)
+        {
+            return responseFactory(snapshot);
+        }
         if (ReturnEndChatFunctionCall)
         {
             return new ChatResponse(
@@ -386,7 +399,8 @@ internal sealed record RecordedChatRequest(
     int? MaxOutputTokens,
     IReadOnlyList<string> Tools,
     bool HasEndChatMarker,
-    bool HasActionToolsMarker)
+    bool HasActionToolsMarker,
+    bool? AllowMultipleToolCalls)
 {
     public string LastUserText => Messages.Last(message => message.Role == ChatRole.User).Text;
 
@@ -409,6 +423,8 @@ internal sealed class ScriptedActionToolBackend : IConciergeActionToolBackend
 
     public IReadOnlyList<ScriptedActionToolCall> Calls => [.. calls];
 
+    public Func<string, Task>? BeforeResult { get; set; }
+
     public void QueueResult(string name, string result) =>
         responses.GetOrAdd(name, _ => new ConcurrentQueue<string>()).Enqueue(result);
 
@@ -416,6 +432,7 @@ internal sealed class ScriptedActionToolBackend : IConciergeActionToolBackend
     {
         Record(ConciergeToolDefinitions.GetWeather, new Dictionary<string, object?> { ["place"] = place, ["period"] = period });
         WeatherAnchors.Enqueue(asOfUtc);
+        if (BeforeResult is { } beforeResult) await beforeResult(ConciergeToolDefinitions.GetWeather);
         if (FailWeather)
         {
             throw new InvalidOperationException("secret-internal-detail: provider host 10.0.0.7");
@@ -458,7 +475,8 @@ internal sealed class ScriptedActionToolBackend : IConciergeActionToolBackend
     {
         Record(ConciergeToolDefinitions.FindNearbyPlaces, new Dictionary<string, object?> { ["category"] = category });
         return Task.FromResult(Dequeue(ConciergeToolDefinitions.FindNearbyPlaces, new ConciergeNearbyPlacesToolResult(
-            "Available", category, [new ConciergeNearbyPlace("Scripted Pharmacy", "100 Main Street", 0.4)])));
+            "Available", category,
+            [new ConciergeNearbyPlace("Scripted Pharmacy", "100 Main Street", 0.4, "scripted-pharmacy", 25.799, -80.198)])));
     }
 
     public Task<string> GetPlaceOpeningHoursAsync(string placeName, CancellationToken cancellationToken)
@@ -469,21 +487,23 @@ internal sealed class ScriptedActionToolBackend : IConciergeActionToolBackend
                 "Available", placeName, "17:30-21:30; Th 17:30-22:00; Fr,Sa 17:30-22:30", [], "Eastern Time")));
     }
 
-    public Task<string> ProposeRideAsync(
+    public async Task<string> ProposeRideAsync(
         string? pickup,
         string dropoff,
         bool immediate,
         string? pickupAt,
+        AIFunctionArguments arguments,
         CancellationToken cancellationToken)
     {
-        Record(ConciergeToolDefinitions.ProposeRide, new Dictionary<string, object?>
+        Record(ConciergeToolDefinitions.ProposeRide, new Dictionary<string, object?>(arguments)
         {
             ["pickup"] = pickup,
             ["dropoff"] = dropoff,
             ["immediate"] = immediate,
             ["pickupAt"] = pickupAt,
         });
-        return Task.FromResult(Dequeue(ConciergeToolDefinitions.ProposeRide, new ConciergeRideProposalToolResult(
+        if (BeforeResult is { } beforeResult) await beforeResult(ConciergeToolDefinitions.ProposeRide);
+        return Dequeue(ConciergeToolDefinitions.ProposeRide, new ConciergeRideProposalToolResult(
             "Available", null, [],
             new ConciergeRideProposalDraft(
                 new ConciergeRidePlace(pickup ?? "Hotel ZGY", 25.7984634, -80.1956016),
@@ -494,21 +514,22 @@ internal sealed class ScriptedActionToolBackend : IConciergeActionToolBackend
                 immediate,
                 immediate ? null : DateTimeOffset.Parse(pickupAt!),
                 720),
-            "About 3.1 mi; around 12 minutes by car.", null, ["Head north."])));
+            "About 3.1 mi; around 12 minutes by car.", null, ["Head north."]));
     }
 
-    public Task<string> ConfirmRideAsync(
+    public async Task<string> ConfirmRideAsync(
         string proposalId,
         AIFunctionArguments arguments,
         CancellationToken cancellationToken)
     {
         Record(ConciergeToolDefinitions.ConfirmRide, arguments);
-        return Task.FromResult(Dequeue(ConciergeToolDefinitions.ConfirmRide, new ConciergeRideActionResult(
+        if (BeforeResult is { } beforeResult) await beforeResult(ConciergeToolDefinitions.ConfirmRide);
+        return Dequeue(ConciergeToolDefinitions.ConfirmRide, new ConciergeRideActionResult(
             true,
             null,
             new RideSummary(Guid.Parse(proposalId), "Booked", "Hotel ZGY", "South Beach, Miami Beach, Florida, United States of America",
                 DateTimeOffset.Parse("2026-10-20T12:00:00-04:00"), null, null, null),
-            [])));
+            []));
     }
 
     public Task<string> GetRideStatusAsync(
@@ -534,15 +555,16 @@ internal sealed class ScriptedActionToolBackend : IConciergeActionToolBackend
             true, null, null, [])));
     }
 
-    public Task<string> CancelRideAsync(
+    public async Task<string> CancelRideAsync(
         string rideId,
         AIFunctionArguments arguments,
         CancellationToken cancellationToken)
     {
         // ConfirmRideCancellation is the only workflow tool that reaches the backend cancel call.
         Record(ConciergeToolDefinitions.ConfirmRideCancellation, arguments);
-        return Task.FromResult(Dequeue(ConciergeToolDefinitions.ConfirmRideCancellation, new ConciergeRideActionResult(
-            true, "Your ride is canceled.", null, [], Guid.Parse(rideId))));
+        if (BeforeResult is { } beforeResult) await beforeResult(ConciergeToolDefinitions.ConfirmRideCancellation);
+        return Dequeue(ConciergeToolDefinitions.ConfirmRideCancellation, new ConciergeRideActionResult(
+            true, "Your ride is canceled.", null, [], Guid.Parse(rideId)));
     }
 
     private string Dequeue<T>(string name, T fallback) =>

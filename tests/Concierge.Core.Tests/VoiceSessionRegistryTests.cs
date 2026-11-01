@@ -14,6 +14,19 @@ public sealed class VoiceSessionRegistryTests
     public VoiceSessionRegistryTests() => registry = new VoiceSessionRegistry(time);
 
     [Fact]
+    public async Task TranscriptSubscriberFailureDoesNotFailTurnOrOtherSubscribers()
+    {
+        var connection = registry.Open(Stay(), null);
+        var notices = new System.Collections.Concurrent.ConcurrentQueue<VoiceTurnProgress>();
+        using var broken = registry.SubscribeTurns(connection.Session.Id, _ => throw new InvalidOperationException());
+        using var working = registry.SubscribeTurns(connection.Session.Id, notices.Enqueue);
+        var reply = new ConciergeTurnResult("turn", "Reply", 1);
+        Assert.Equal(reply, await connection.Session.JoinOrStart("turn", () => Task.FromResult(reply), "Guest"));
+        Assert.Equal([false, true], notices.Select(notice => notice.Finished));
+        Assert.All(notices, notice => Assert.Equal("turn", notice.TurnId));
+    }
+
+    [Fact]
     public void BearerExpiresAfterTheConnectionLifetime()
     {
         var connection = registry.Open(Stay(), null);
@@ -168,14 +181,14 @@ public sealed class VoiceSessionRegistryTests
     public void DeferredEndChatCancellationCannotBeConfirmedOrReturnedAsAResult()
     {
         var connection = registry.Open(Stay(), null);
-        Assert.True(connection.RegisterEndChatCall("call-cancelled"));
+        Assert.True(connection.RegisterEndChatCall("call-cancelled", VoiceEndChatTests.AdmitTurn(connection)));
         Assert.True(connection.CancelEndChatCall("call-cancelled"));
 
         Assert.False(connection.ConfirmEndChatCall("call-cancelled"));
         Assert.False(connection.AcceptEndChatToolResult("call-cancelled"));
         Assert.Null(connection.EndChatResultReceivedAtUtc);
-        Assert.False(connection.RegisterEndChatCall("call-cancelled"));
-        Assert.True(connection.RegisterEndChatCall("call-next"));
+        Assert.False(connection.RegisterEndChatCall("call-cancelled", VoiceEndChatTests.AdmitTurn(connection)));
+        Assert.True(connection.RegisterEndChatCall("call-next", VoiceEndChatTests.AdmitTurn(connection)));
         Assert.True(connection.TryClaimEndChatFlow());
     }
 

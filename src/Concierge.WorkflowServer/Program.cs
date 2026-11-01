@@ -57,11 +57,6 @@ builder.Services.AddSingleton<DatabaseMigrator>();
 builder.Services.AddSingleton<EmbeddingModelIdentityStore>();
 builder.Services.AddOptions<SetupOptions>()
     .Bind(builder.Configuration.GetSection(SetupOptions.SectionName));
-builder.Services.AddSingleton<IValidateOptions<ConciergePersistenceOptions>,
-    ConciergePersistenceOptionsValidator>();
-builder.Services.AddOptions<ConciergePersistenceOptions>()
-    .Bind(builder.Configuration.GetSection(ConciergePersistenceOptions.SectionName))
-    .ValidateOnStart();
 builder.Services.AddSingleton<ConciergeSessionService>();
 // Malformed request bodies return a bare 400, never the developer exception page.
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);

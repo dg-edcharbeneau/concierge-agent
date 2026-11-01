@@ -22,6 +22,27 @@ public sealed class ActionContextBudgetBoundaryTests(ITestOutputHelper output)
     private const int MaxValidatedArgumentBytes = 2_000;
     private const int MaxCompactResultBytes = 2_048;
 
+    [Fact]
+    public async Task CanonicalContinuityCountsAgainstTheSameBudgetWithoutBeingDiscarded()
+    {
+        var serialized = await NearbyPlacesTests.ProductionCafeResultAsync();
+        var nearby = System.Text.Json.JsonSerializer.Deserialize<ConciergeNearbyPlacesToolResult>(
+            serialized, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+        var state = ConciergePlaceContinuity.Nearby(nearby, DateTimeOffset.UnixEpoch, 0, 3)!;
+        var continuity = new ChatMessage(ChatRole.System, ConciergePlaceContinuity.Context(state, null));
+        var prompt = BuildWorstCasePrompt();
+        prompt.Messages.Insert(prompt.Messages.FindLastIndex(message => message.Role == ChatRole.User), continuity);
+        Assert.True(prompt.FitActionContext(includeEndChat: true));
+        AddToolRound(prompt.Messages, "continuity-1", ConciergeToolDefinitions.ProposeRide);
+        Assert.True(prompt.FitActionContext(includeEndChat: true));
+        AddToolRound(prompt.Messages, "continuity-2", ConciergeToolDefinitions.ProposeRide);
+
+        Assert.False(prompt.FitActionContext(includeEndChat: true));
+        Assert.Contains(continuity, prompt.Messages);
+        AssertMandatoryContextRetained(prompt.Messages);
+        AssertStayFactsReplaceTheProfile(prompt.Messages);
+    }
+
     [Theory]
     [InlineData("cancellation")]
     [InlineData("closed")]

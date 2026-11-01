@@ -335,12 +335,16 @@ public sealed class RideBookingWorkflow
             ride.PickupAt.ToUniversalTime(),
             targetStatus == "DriverAssigned" ? AssignedDriver.Name : null,
             targetStatus == "DriverAssigned" ? AssignedDriver.Car : null,
-            targetStatus == "DriverAssigned" ? AssignedDriver.Plate : null);
+            targetStatus == "DriverAssigned" ? AssignedDriver.Plate : null,
+            RideArrivalEstimate.Calculate(
+                ride.PickupAt, ride.RouteDurationSeconds, ride.PickedUpAtUtc, ride.CompletedAtUtc)?.ToUniversalTime());
 
     private sealed record FakeDriver(string Name, string Car, string Plate);
 }
 
-public sealed class RideBookingActivities(RideRepository repository)
+public sealed class RideBookingActivities(
+    RideRepository repository,
+    RideStreamPublishingActivities publisher)
 {
     [Activity(RideWorkflowNames.StoreBookingActivity)]
     public async Task<RideResponse> StoreBookingAsync(RideBookingCommand booking)
@@ -404,11 +408,26 @@ public sealed class RideBookingActivities(RideRepository repository)
             ActivityExecutionContext.Current.CancellationToken);
 
     [Activity(RideWorkflowNames.CancelRideActivity)]
-    public Task<RideCancellationResult> CancelAsync(Guid rideId, DateTimeOffset cancelledAtUtc) =>
-        repository.CancelAsync(
+    public async Task<RideCancellationResult> CancelAsync(Guid rideId, DateTimeOffset cancelledAtUtc)
+    {
+        var result = await repository.CancelAsync(
             rideId,
             cancelledAtUtc,
             ActivityExecutionContext.Current.CancellationToken);
+        if (result.Applied && result.Entry is { } entry)
+        {
+            // Returning terminal status wakes RunAsync, which can close before the update's
+            // publication starts. Publish the committed event before that wake-up, without
+            // changing workflow command order. Activity retries recover the same stored event;
+            // consumers deduplicate this and the update's publication by ride/sequence.
+            await publisher.PublishRideEntryAsync(new RideActivityPublication(
+                result.StayWorkflowId
+                    ?? throw new InvalidOperationException("Cancelled ride has no owning stay workflow."),
+                entry));
+        }
+
+        return result;
+    }
 }
 
 public sealed record RideActivityPublication(string StayWorkflowId, RideActivityEntry Entry);

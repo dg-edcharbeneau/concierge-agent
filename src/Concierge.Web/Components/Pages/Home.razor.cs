@@ -81,11 +81,25 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private bool disposed;
     private bool voiceMode;
     private bool voiceMuted;
+    private bool voiceIdleWarning;
+    private string? voiceEndReason;
+    private bool chatEndedForInactivity;
     private string voiceState = "disconnected";
     private string? voiceMessage;
     private string? voiceSessionId;
     private DotNetObjectReference<Home>? voiceReference;
     private IDisposable? voiceClosedSubscription;
+    private IDisposable? voiceTurnSubscription;
+    private readonly Dictionary<string, VoiceTurnProgress> voicePendingTranscripts = new(StringComparer.Ordinal);
+    private HistoryRefreshBatch? historyRefreshBatch;
+
+    private sealed class HistoryRefreshBatch(int sessionVersion, bool replayPending)
+    {
+        public int SessionVersion { get; } = sessionVersion;
+        public bool Requested { get; set; } = true;
+        public bool ReplayPending { get; set; } = replayPending;
+        public Task? RefreshTask { get; set; }
+    }
 
     private bool IsCurrentSession(int version) => !disposed && model.IsCurrent(version);
     private int UnreadRideActivityCount =>
@@ -104,7 +118,13 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private bool TranscriptVisible =>
         ready && session?.Credential is not null && !showEndConfirmation && !chatEnded;
 
-    private bool HasConversation => turns.Count > 0 || pending is not null;
+    /// <summary>Keeps the header control group identical outside the voice chat, including the end-of-chat views.</summary>
+    private string HeaderControlsClass =>
+        voiceMode && !showEndConfirmation && !chatEnded
+            ? "voice-header-controls has-voice-mode"
+            : "voice-header-controls";
+
+    private bool HasConversation => turns.Count > 0 || pending is not null || voicePendingTranscripts.Count > 0;
 
     private IEnumerable<ChatMessage> Messages
     {
@@ -130,6 +150,15 @@ public partial class Home : ComponentBase, IAsyncDisposable
                     true,
                     timestamp,
                     DateOnly.FromDateTime(timestamp.DateTime)));
+            }
+
+            foreach (var progress in voicePendingTranscripts.Values
+                .Where(progress => turns.All(turn => turn.TurnId != progress.TurnId))
+                .OrderBy(progress => progress.SubmittedAtUtc))
+            {
+                var timestamp = TimeZoneInfo.ConvertTime(progress.SubmittedAtUtc, HotelTimeZone);
+                messages.Add(new ChatMessage(progress.TurnId, progress.UserMessage, true,
+                    timestamp, DateOnly.FromDateTime(timestamp.DateTime)));
             }
 
             return messages;
@@ -268,13 +297,67 @@ public partial class Home : ComponentBase, IAsyncDisposable
         }
     }
 
-    private async Task LoadHistoryAndReconcileAsync(bool replayPending)
+    private Task LoadHistoryAndReconcileAsync(bool replayPending)
     {
+        if (session?.Credential is null)
+        {
+            return Task.CompletedTask;
+        }
+
         var currentVersion = sessionVersion;
-        var credential = session?.Credential;
+        if (historyRefreshBatch is { } currentBatch
+            && currentBatch.SessionVersion == currentVersion)
+        {
+            currentBatch.Requested = true;
+            currentBatch.ReplayPending |= replayPending;
+            return currentBatch.RefreshTask!;
+        }
+
+        var batch = new HistoryRefreshBatch(currentVersion, replayPending);
+        historyRefreshBatch = batch;
+        batch.RefreshTask = DrainHistoryRefreshesAsync(batch);
+        return batch.RefreshTask;
+    }
+
+    private async Task DrainHistoryRefreshesAsync(HistoryRefreshBatch batch)
+    {
+        // Keep task assignment visible before a synchronously-completing fake/API read can finish.
+        await Task.Yield();
+        var replayRequested = false;
+        var latestReadSucceeded = false;
+        try
+        {
+            while (batch.Requested)
+            {
+                batch.Requested = false;
+                replayRequested |= batch.ReplayPending;
+                batch.ReplayPending = false;
+                latestReadSucceeded = await RefreshHistoryAndReconcileOnceAsync(batch.SessionVersion);
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(historyRefreshBatch, batch))
+            {
+                historyRefreshBatch = null;
+            }
+        }
+
+        if (batch.SessionVersion == sessionVersion
+            && replayRequested
+            && latestReadSucceeded
+            && pending is not null)
+        {
+            await SubmitPendingAsync();
+        }
+    }
+
+    private async Task<bool> RefreshHistoryAndReconcileOnceAsync(int currentVersion)
+    {
+        var credential = IsCurrentSession(currentVersion) ? session?.Credential : null;
         if (credential is null)
         {
-            return;
+            return false;
         }
 
         isWorking = pending is not null;
@@ -282,43 +365,41 @@ public partial class Home : ComponentBase, IAsyncDisposable
         try
         {
             var history = await Concierge.ReadHistoryAsync(credential);
-            if (!IsCurrentSession(currentVersion)) return;
+            if (!IsCurrentSession(currentVersion)) return false;
             var pendingBeforeReconciliation = pending;
             model = model.ReconcileHistory(history.Turns);
+            foreach (var turn in history.Turns) voicePendingTranscripts.Remove(turn.TurnId);
             if (pendingBeforeReconciliation is not null && pending is null)
             {
                 await PersistSessionAsync();
-                if (!IsCurrentSession(currentVersion)) return;
+                if (!IsCurrentSession(currentVersion)) return false;
                 model = model.SetTurnError(null);
             }
 
             await StartRideActivityFeedAsync(currentVersion, credential);
-            if (pending is not null && replayPending)
-            {
-                await SubmitPendingAsync();
-                return;
-            }
-
             suggestionsExpanded = turns.Count == 0 && pending is null;
             await FinishTranscriptChangeAsync();
+            return true;
         }
         catch (ConciergeApiException exception)
         {
-            if (!IsCurrentSession(currentVersion)) return;
+            if (!IsCurrentSession(currentVersion)) return false;
             if (IsUnauthorized(exception))
             {
                 await MarkExpiredAsync();
-                return;
+                return false;
             }
 
             model = model.SetTurnError(ApiMessage(
                 exception,
                 "We couldn’t load your conversation. Please try again."));
+            return false;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            if (!IsCurrentSession(currentVersion)) return;
+            if (!IsCurrentSession(currentVersion)) return false;
             model = model.SetTurnError("We couldn’t load your conversation. Check your connection and try again.");
+            return false;
         }
         finally
         {
@@ -505,6 +586,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private async Task VerifyStayAgain()
     {
+        chatEndedForInactivity = false;
+        voiceEndReason = null;
         await ResetRideActivityAsync();
         model = model.BeginStayVerification();
         lastName = string.Empty;
@@ -657,6 +740,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private async Task CompleteEndAsync()
     {
         await ResetRideActivityAsync();
+        chatEndedForInactivity = voiceEndReason == "idle_timeout";
+        voiceIdleWarning = false;
         voiceMode = false;
         voiceMuted = false;
         voiceSessionId = null;
@@ -681,6 +766,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
         "thinking" => "Thinking…",
         "speaking" => "Speaking",
         "paused" => "Paused",
+        _ when voiceEndReason == "idle_timeout" => "Stopped (inactive)",
         _ => "Disconnected",
     };
 
@@ -706,6 +792,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
         }
 
         voiceMuted = false;
+        voiceIdleWarning = false;
+        voiceEndReason = null;
         voiceReference ??= DotNetObjectReference.Create(this);
         // The previous connection's closure is no longer news; OnVoiceSession watches the new one.
         StopWatchingVoiceRelay();
@@ -723,6 +811,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private async Task StopVoiceAsync(string? message)
     {
+        voiceIdleWarning = false;
         if (!voiceMode)
         {
             return;
@@ -769,17 +858,40 @@ public partial class Home : ComponentBase, IAsyncDisposable
                     CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted,
                     TaskScheduler.Default));
+        var version = sessionVersion;
+        voiceTurnSubscription = VoiceSessions.SubscribeTurns(voiceSession,
+            progress => _ = InvokeAsync(async () =>
+            {
+                if (!IsCurrentSession(version) || voiceSessionId != id || !voiceMode || chatEnded || isEnding) return;
+                if (progress.Finished)
+                {
+                    voicePendingTranscripts.Remove(progress.TurnId);
+                    await LoadHistoryAndReconcileAsync(replayPending: false);
+                }
+                else if (turns.All(turn => turn.TurnId != progress.TurnId))
+                {
+                    voicePendingTranscripts[progress.TurnId] = progress;
+                    await FinishTranscriptChangeAsync();
+                }
+                StateHasChanged();
+            }).ContinueWith(
+                task => Logger.LogWarning(task.Exception,
+                    "Applying voice transcript progress failed for session {VoiceSessionId}.", id),
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default));
     }
 
     private void StopWatchingVoiceRelay()
     {
         voiceClosedSubscription?.Dispose();
         voiceClosedSubscription = null;
+        voiceTurnSubscription?.Dispose();
+        voiceTurnSubscription = null;
+        voicePendingTranscripts.Clear();
     }
 
     private async Task ApplyVoiceRelayClosedAsync(string id, int connectionNumber)
     {
-        if (disposed || !voiceMode || !StringComparer.Ordinal.Equals(voiceSessionId, id))
+        if (disposed || !voiceMode || voiceEndReason is not null || !StringComparer.Ordinal.Equals(voiceSessionId, id))
         {
             return;
         }
@@ -795,6 +907,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             id, connectionNumber, voiceState);
         voiceState = "disconnected";
         voiceMuted = false;
+        voiceIdleWarning = false;
         voiceMessage = "Voice disconnected.";
         // No JS here: the circuit may be down. Reconnect's conciergeVoice.start ends any stale browser voice.
         await LoadHistoryAndReconcileAsync(replayPending: false);
@@ -803,13 +916,16 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     /// <summary>Runs the existing End Chat flow after a confirmed spoken or idle voice ending.</summary>
     [JSInvokable]
-    public Task OnVoiceEndRequested() =>
+    public Task OnVoiceEndRequested(string? reason = null) =>
         InvokeAsync(async () =>
         {
             VoiceTelemetry.RecordEndChat(Logger, "browser_callback_received", voiceSessionId, "browser_end_requested");
-            if (voiceMode && session?.Credential is not null && !isEnding)
+            if (!disposed && voiceMode && session?.Credential is not null && !isEnding)
             {
+                voiceEndReason = reason == "idle_timeout" ? reason : "farewell";
+                voiceIdleWarning = false;
                 await EndInteractionAsync();
+                StateHasChanged();
             }
             else
             {
@@ -817,12 +933,26 @@ public partial class Home : ComponentBase, IAsyncDisposable
             }
         });
 
+    /// <summary>The relay, not a browser timer, decides whether the chat is nearly idle.</summary>
+    [JSInvokable]
+    public Task OnVoiceIdleWarning(bool active) =>
+        InvokeAsync(() =>
+        {
+            if (disposed || !voiceMode || voiceEndReason is not null)
+            {
+                return;
+            }
+
+            voiceIdleWarning = active;
+            StateHasChanged();
+        });
+
     /// <summary>Called from <c>voice.js</c> when the relay changes state or closes.</summary>
     [JSInvokable]
     public Task OnVoiceState(string state, string? message, int closeCode) =>
         InvokeAsync(async () =>
         {
-            if (!voiceMode)
+            if (disposed || !voiceMode || voiceEndReason is not null)
             {
                 return;
             }
@@ -832,6 +962,11 @@ public partial class Home : ComponentBase, IAsyncDisposable
             if (state == "disconnected")
             {
                 voiceMuted = false;
+                voiceIdleWarning = false;
+            }
+            else if (state is "thinking" or "speaking")
+            {
+                voiceIdleWarning = false;
             }
             if (state == "disconnected" && closeCode == (int)Voice.VoiceCloseCodes.Unauthorized)
             {
@@ -839,8 +974,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
                 return;
             }
 
-            // Voice turns are ordinary stay turns; show them as they complete.
-            if (state is "speaking" or "disconnected")
+            // The relay's Finished callback is authoritative. Keep disconnect recovery for cases
+            // where the circuit misses that callback.
+            if (state == "disconnected")
             {
                 await LoadHistoryAndReconcileAsync(replayPending: false);
             }
@@ -1184,6 +1320,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         disposed = true;
+        voiceIdleWarning = false;
         StopWatchingVoiceRelay();
         await ResetRideActivityAsync();
         model = model.InvalidateOutstandingWork();

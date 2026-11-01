@@ -92,6 +92,14 @@
                                     }
                                 </p>
                             }
+                            @if (StringComparer.Ordinal.Equals(entry.Status, "Booked")
+                                && entry.ArrivalAtUtc is { } arrivalAt)
+                            {
+                                <p class="ride-activity-arrival">
+                                    Estimated destination arrival:
+                                    <time datetime="@arrivalAt.ToString("O", CultureInfo.InvariantCulture)">@FormatTimestamp(ToMiamiTime(arrivalAt))</time>
+                                </p>
+                            }
                             @if (StringComparer.Ordinal.Equals(entry.Status, "DriverAssigned"))
                             {
                                 <dl class="ride-activity-driver">

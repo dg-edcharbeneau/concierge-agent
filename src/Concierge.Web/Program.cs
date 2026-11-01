@@ -59,6 +59,9 @@ builder.Services.AddOptions<DeepgramVoiceOptions>()
     .Validate(
         options => options.IdleTimeoutMinutes is >= 1 and <= 60,
         $"{DeepgramVoiceOptions.SectionName}:IdleTimeoutMinutes must be between 1 and 60.")
+    .Validate(
+        options => options.Speed is >= 0.5 and <= 1.5,
+        $"{DeepgramVoiceOptions.SectionName}:Speed must be between 0.5 and 1.5.")
     .ValidateOnStart();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<VoiceSessionRegistry>();

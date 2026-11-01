@@ -20,6 +20,7 @@ internal static class ConciergeToolDefinitions
     public const string TrustedCheckoutDateKey = "__concierge_verified_checkout_date";
     public const string TrustedProposalKey = "__concierge_pending_ride_proposal";
     public const string TrustedTurnStartedUtcKey = "__concierge_turn_started_utc";
+    public const string TrustedDestinationKey = "__concierge_verified_destination";
 
     public const string GetWeather = "GetWeather";
     public const string GetRoute = "GetRoute";
@@ -38,19 +39,19 @@ internal static class ConciergeToolDefinitions
         {
             AIFunctionFactory.Create(
                 (Func<string?, string, string>)WeatherStub,
-                Options(GetWeather, "Forecast conditions, high/low F, wind, and rain chance.")),
+                Options(GetWeather, "Current or forecast weather.")),
             AIFunctionFactory.Create(
                 (Func<string[], string>)RouteStub,
                 Options(GetRoute, "Driving distance, travel time, and directions. No live traffic.")),
             AIFunctionFactory.Create(
-                (Func<string, string>)NearbyPlacesStub,
+                (Func<string, bool, string, string>)NearbyPlacesStub,
                 Options(FindNearbyPlaces, "Nearest places of one type to Hotel ZGY.")),
             AIFunctionFactory.Create(
                 (Func<string, string>)PlaceOpeningHoursStub,
                 Options(GetPlaceOpeningHours, "Opening hours for one named place near Hotel ZGY.")),
             AIFunctionFactory.Create(
                 (Func<string, bool, string?, string?, string>)ProposeRideStub,
-                Options(ProposeRide, "Prepares a ride proposal for the guest to confirm; does not book.")),
+                Options(ProposeRide, "Prepares an additional ride offer for later confirmation; warns about matching active rides, never changes an existing booking.")),
             AIFunctionFactory.Create(
                 (Func<string>)ConfirmRideStub,
                 Options(ConfirmRide, "Books the pending ride offer the guest accepted.")),
@@ -92,12 +93,12 @@ internal static class ConciergeToolDefinitions
     [
         AIFunctionFactory.Create(
             (Func<string?, string, AIFunctionArguments, IServiceProvider, CancellationToken, Task<string>>)WeatherActivity,
-            Options(GetWeather, "Gets forecast data.")),
+        Options(GetWeather, "Gets current observations or forecast data.")),
         AIFunctionFactory.Create(
             (Func<string[], AIFunctionArguments, IServiceProvider, CancellationToken, Task<string>>)RouteActivity,
             Options(GetRoute, "Gets route data.")),
         AIFunctionFactory.Create(
-            (Func<string, AIFunctionArguments, IServiceProvider, CancellationToken, Task<string>>)NearbyPlacesActivity,
+            (Func<string, bool, string, AIFunctionArguments, IServiceProvider, CancellationToken, Task<string>>)NearbyPlacesActivity,
             Options(FindNearbyPlaces, "Gets nearby place data.")),
         AIFunctionFactory.Create(
             (Func<string, AIFunctionArguments, IServiceProvider, CancellationToken, Task<string>>)PlaceOpeningHoursActivity,
@@ -172,7 +173,7 @@ internal static class ConciergeToolDefinitions
 
     private static string WeatherStub(
         [Description("Place name; omit for Hotel ZGY.")] string? place = null,
-        [Description("today, tonight, tomorrow, or a weekday name (its next occurrence, today included)")]
+        [Description("current (now); today, tonight, tomorrow, or weekday")]
         string period = "today") => string.Empty;
     private static string RouteStub(
         [Description("[destination] from Hotel ZGY, or [origin, destination].")] string[] places) => string.Empty;
@@ -181,7 +182,10 @@ internal static class ConciergeToolDefinitions
             "pharmacy", "grocery", "convenience", "restaurant", "cafe", "bar", "fast_food", "atm", "bank",
             "hospital", "clinic", "gas_station", "mall", "museum", "cinema", "park", "beach", "attraction",
             "post_office")]
-        string category) => string.Empty;
+        string category,
+        [Description("Guest-requested nearest-place ride only.")]
+        bool forRideProposal = false,
+        [AllowedValues("nearest", "alternatives")] string presentation = "alternatives") => string.Empty;
     private static string PlaceOpeningHoursStub(
         [Description("The specific place name, such as Wayan Miami.")] string placeName) => string.Empty;
     private static string ProposeRideStub(
@@ -233,6 +237,8 @@ internal static class ConciergeToolDefinitions
 
     private static Task<string> NearbyPlacesActivity(
         string category,
+        bool forRideProposal,
+        string presentation,
         AIFunctionArguments arguments,
         IServiceProvider services,
         CancellationToken cancellationToken) =>
@@ -265,7 +271,7 @@ internal static class ConciergeToolDefinitions
             ProposeRide,
             services,
             cancellationToken,
-            (backend, token) => backend.ProposeRideAsync(pickup, dropoff, immediate, pickupAt, token));
+            (backend, token) => backend.ProposeRideAsync(pickup, dropoff, immediate, pickupAt, arguments, token));
 
     private static Task<string> ConfirmRideActivity(
         string proposalId,

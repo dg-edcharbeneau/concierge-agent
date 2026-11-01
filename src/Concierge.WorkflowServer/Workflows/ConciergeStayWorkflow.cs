@@ -96,6 +96,14 @@ public sealed class ConciergeStayWorkflow
     };
 
     private readonly Dictionary<string, AcceptedTurn> acceptedTurns = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TurnAttempt> admittedTurns = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ConciergeVoiceRevision> voiceRevisions = new(StringComparer.Ordinal);
+    // Fail closed rather than evict retry/supersession authority during a stay.
+    internal const int MaxVoiceRevisionFamilies = 512;
+    internal const int MaxRevisionsPerUtterance = 32;
+    internal const int MaxVoiceRevisionStateUtf8Bytes = 512_000;
+    private TurnAttempt? activeAttempt;
+    private ConciergeVoiceRevisionCheckpoint? voiceRevisionCheckpoint;
     private readonly List<ConciergeTranscriptTurn> runTurns = [];
     private readonly List<ConciergeTranscriptTurn> recentTurns = [];
     private readonly List<ConciergeTranscriptTurn> pendingPersistence = [];
@@ -108,12 +116,16 @@ public sealed class ConciergeStayWorkflow
     private bool hasEarlierRuns;
     private ConciergeVerifiedGuest? verifiedGuest;
     private ConciergeRideProposal? pendingRideProposal;
+    private ConciergePlacePresentation? nearbyPlaces;
+    private ConciergePlacePresentation? placeClarification;
     private DateTime actionTurnStartedUtc;
     private ConciergeRideCancellationProposal? pendingRideCancellationProposal;
     private ConciergeRideCancellationOutcome? lastConfirmedCancellation;
     // The offer a ConfirmRide attempt consumed on that turn; tells the next turn it is closed.
     private ConciergeRideProposal? consumedRideOffer;
     private long consumedRideOfferSequence = -1;
+    private string? consumedRideOfferSpokenRequestKey;
+    private ConciergeRideConfirmationOutcome? consumedRideConfirmationOutcome;
     private long nextSequence;
     private long nextArrival;
     private long nextToProcess;
@@ -142,10 +154,19 @@ public sealed class ConciergeStayWorkflow
 
         verifiedGuest = input.VerifiedGuest;
         pendingRideProposal = input.PendingRideProposal;
+        nearbyPlaces = RestorePlaces(input.NearbyPlaces);
+        placeClarification = RestorePlaces(input.PlaceClarification);
         pendingRideCancellationProposal = input.PendingRideCancellationProposal;
         lastConfirmedCancellation = input.LastConfirmedCancellation;
         consumedRideOffer = input.ConsumedRideOffer;
         consumedRideOfferSequence = input.ConsumedRideOfferSequence;
+        consumedRideOfferSpokenRequestKey = input.ConsumedRideOfferSpokenRequestKey;
+        consumedRideConfirmationOutcome = input.ConsumedRideConfirmationOutcome;
+        voiceRevisionCheckpoint = input.VoiceRevisionCheckpoint;
+        foreach (var revision in input.VoiceRevisions ?? [])
+        {
+            voiceRevisions.Add(revision.Family, revision);
+        }
         if (input.StayMemory is not null)
         {
             stayMemory.AddRange(input.StayMemory);
@@ -156,6 +177,10 @@ public sealed class ConciergeStayWorkflow
             recentTurns.AddRange(input.RecentTurns);
         }
     }
+
+    private static ConciergePlacePresentation? RestorePlaces(ConciergePlacePresentation? state) =>
+        state is null ? null : ConciergePlaceContinuity.Create(
+            state.Places, state.ExpiresAtUtc, state.Sequence, state.PresentedCount, state.Category, state.FocusIndex);
 
     /// <summary>
     /// Keeps the stay's conversation alive until its eligibility deadline, flushing transcript batches and
@@ -226,7 +251,13 @@ public sealed class ConciergeStayWorkflow
                         pendingRideCancellationProposal,
                         lastConfirmedCancellation,
                         consumedRideOffer,
-                        consumedRideOfferSequence);
+                        consumedRideOfferSequence,
+                        consumedRideOfferSpokenRequestKey,
+                        consumedRideConfirmationOutcome,
+                        nearbyPlaces,
+                        placeClarification,
+                        voiceRevisions.Values.ToArray(),
+                        voiceRevisionCheckpoint);
                     throw Workflow.CreateContinueAsNewException(
                         (ConciergeStayWorkflow workflow) => workflow.RunAsync(
                             continueInput));
@@ -325,6 +356,14 @@ public sealed class ConciergeStayWorkflow
             throw new ArgumentOutOfRangeException(nameof(request), "Invalid turn.");
         }
 
+        if (request.VoiceUtterance is { } utterance
+            && (request.Channel != "voice"
+                || utterance.Connection <= 0 || utterance.Ordinal <= 0
+                || !StringComparer.Ordinal.Equals(utterance.TurnId(request.UserMessage), request.TurnId)))
+        {
+            throw new ArgumentException("Voice provenance must match the exact-text turn identifier.", nameof(request));
+        }
+
         if (Workflow.UtcNow >= eligibilityDeadlineUtc)
         {
             throw new ApplicationFailureException(
@@ -380,41 +419,77 @@ public sealed class ConciergeStayWorkflow
     public async Task<ConciergeTurnResult> SubmitTurnAsync(ConciergeTurnSubmission request)
     {
         var fingerprint = Fingerprint(request.Channel, request.UserMessage, request.EnableEndChatFunction);
+        RejectSupersededRetry(request);
         if (acceptedTurns.TryGetValue(request.TurnId, out var accepted))
         {
             return MatchOrReject(accepted, fingerprint);
         }
 
+        if (admittedTurns.TryGetValue(request.TurnId, out var joined))
+        {
+            if (joined.Fingerprint != fingerprint)
+            {
+                throw new ApplicationFailureException("The turn identifier conflicts with an earlier request.",
+                    errorType: TurnConflictErrorType, nonRetryable: true);
+            }
+            await Workflow.WaitConditionAsync(() => joined.Finished);
+            if (joined.Failure is { } failure) throw failure;
+            return joined.Result!;
+        }
+
+        // Revision authority changes before queue waiting. Caller disconnects never enter here.
+        var supersedes = AdmitVoiceRevision(request);
+        var attempt = new TurnAttempt(fingerprint, Workflow.UtcNow + ActionTurnDeadline);
+        admittedTurns.Add(request.TurnId, attempt);
         // Handlers start in update-delivery order; each waits for its arrival slot.
         var arrival = nextArrival++;
         await Workflow.WaitConditionAsync(() => arrival == nextToProcess);
+        ConciergeVoiceRevisionCheckpoint? checkpoint = null;
         try
         {
-            if (acceptedTurns.TryGetValue(request.TurnId, out accepted))
-            {
-                return MatchOrReject(accepted, fingerprint);
-            }
-
+            activeAttempt = attempt;
+            ThrowIfSuperseded(attempt);
             if (hasEarlierRuns)
             {
                 // Earlier runs flushed every turn before Continue-As-New.
-                var persisted = await Workflow.ExecuteActivityAsync(
+                var persisted = await AwaitReplaceableAsync(Workflow.ExecuteActivityAsync(
                     (ConciergeTranscriptActivities activities) =>
                         activities.FindAsync(new FindTranscriptTurnRequest(stayId, request.TurnId)),
-                    TranscriptActivityOptions);
+                    TranscriptActivityOptions), attempt);
                 if (persisted is not null)
                 {
+                    if (persisted.Superseded) throw SupersededFailure();
                     accepted = new AcceptedTurn(
-                        Fingerprint(persisted.Channel, persisted.GuestMessage),
+                        request.VoiceUtterance is { } retryUtterance
+                            ? voiceRevisions[retryUtterance.Family].Fingerprint
+                            : Fingerprint(persisted.Channel, persisted.GuestMessage),
                         new ConciergeTurnResult(
                             persisted.TurnId,
                             persisted.AssistantMessage,
-                            persisted.Sequence));
+                            persisted.Sequence,
+                            request.VoiceUtterance is { } endChatUtterance
+                                ? voiceRevisions[endChatUtterance.Family].EndChatFunctionCall : null));
                     acceptedTurns.Add(request.TurnId, accepted);
-                    return MatchOrReject(accepted, fingerprint);
+                    attempt.Result = MatchOrReject(accepted, fingerprint);
+                    return attempt.Result;
                 }
             }
 
+            ThrowIfSuperseded(attempt);
+            if (supersedes is not null)
+            {
+                // Only the most recent reversible commit can be withdrawn. A late revision
+                // must not roll shared memory/proposals back over a later, unrelated turn.
+                if (voiceRevisionCheckpoint is { } previous
+                    && previous.TurnId == supersedes && previous.Sequence + 1 == nextSequence)
+                {
+                    RestoreReversibleState(previous);
+                }
+                recentTurns.RemoveAll(turn => turn.TurnId == supersedes);
+                await MarkSupersededAsync(supersedes);
+                ThrowIfSuperseded(attempt);
+            }
+            checkpoint = CaptureReversibleState(request.TurnId);
             var chatClient = new ChatClientBuilder(new WorkflowOnlyChatClient())
                 .UseDurableExecution(options => options.TaskQueue = Workflow.Info.TaskQueue)
                 .Build();
@@ -422,56 +497,71 @@ public sealed class ConciergeStayWorkflow
             // turn, inside its arrival slot so overlapping turns cannot exchange profiles.
             verifiedGuest = request.VerifiedGuest;
 
-            var actionDeadline = Workflow.UtcNow + ActionTurnDeadline;
+            var actionDeadline = attempt.Deadline;
             ActiveActionDeadline = actionDeadline;
 
-            HotelRetrievalResult retrieval;
-            var retrievalFailed = false;
+            var receipt = request.VoiceUtterance is { } provenance
+                ? voiceRevisions[provenance.Family].ActionReceipt : null;
+            HotelRetrievalResult retrieval = new(HotelRetrievalPath.NoEvidence, []);
             try
             {
-                retrieval = await Workflow.ExecuteActivityAsync(
-                    (HotelKnowledgeActivities activities) =>
-                        activities.RetrieveAsync(new HotelRetrievalRequest(request.UserMessage)),
-                    ActivityOptionsWithDeadline(RetrievalActivityOptions, actionDeadline));
+                if (receipt is null && TryGetRemainingActionTime(actionDeadline, out _))
+                {
+                    retrieval = await AwaitReplaceableAsync(Workflow.ExecuteActivityAsync(
+                        (HotelKnowledgeActivities activities) =>
+                            activities.RetrieveAsync(new HotelRetrievalRequest(request.UserMessage)),
+                        ActivityOptionsWithDeadline(RetrievalActivityOptions, actionDeadline)), attempt);
+                }
             }
             catch (ActivityFailureException)
             {
                 // A retrieval failure must not fail the admitted guest update. Continue without
                 // hotel evidence only if time remains for the bounded action path.
                 retrieval = new HotelRetrievalResult(HotelRetrievalPath.NoEvidence, []);
-                retrievalFailed = true;
             }
 
             var nextStayMemory = StayContinuityMemory.ApplyGuestMessage(
                 stayMemory, request.UserMessage, nextSequence).ToArray();
             if (!CanFitStayMemory(nextStayMemory))
             {
-                throw new ApplicationFailureException(
-                    "The stay's guest-reported continuity has reached its safe storage limit.",
-                    errorType: UnavailableErrorType,
-                    nonRetryable: true);
+                if (receipt is null)
+                {
+                    throw new ApplicationFailureException(
+                        "The stay's guest-reported continuity has reached its safe storage limit.",
+                        errorType: UnavailableErrorType,
+                        nonRetryable: true);
+                }
+                // A context limit cannot hide the result of an already-dispatched action.
+                nextStayMemory = stayMemory.ToArray();
             }
 
-            // A reply cut off at the cap (FinishReason.Length) is kept as returned.
-            var answerPrompt = ConciergePromptBuilder.BuildMemoryTurn(
-                request.UserMessage,
-                retrieval,
-                nextStayMemory,
-                new ConciergePromptBuilder.PromptBudget(
-                    ActionWorkingContextBudgetTokens,
-                    ConciergeToolDefinitions.EstimateToolDefinitionTokens(request.EnableEndChatFunction),
-                    ActionTools: true),
-                verifiedGuest,
-                recentTurns);
-            var includedRecentTurns = answerPrompt.RetainedTurns;
-            var actionResult = retrievalFailed
-                && !TryGetRemainingActionTime(actionDeadline, out _)
-                    ? new ActionToolLoopResult(ActionDeadlineReply("answer"), null)
-                    : await RunActionToolLoopAsync(
-                        chatClient,
-                        answerPrompt,
-                        request,
-                        actionDeadline);
+            IReadOnlyList<ConciergeTranscriptTurn> includedRecentTurns = recentTurns.Where(IsEffectiveTurn).ToArray();
+            ActionToolLoopResult actionResult;
+            if (receipt is not null)
+            {
+                actionResult = new(receipt, null);
+            }
+            else if (!TryGetRemainingActionTime(actionDeadline, out _))
+            {
+                actionResult = new(ActionDeadlineReply("answer"), null);
+            }
+            else
+            {
+                // A reply cut off at the cap (FinishReason.Length) is kept as returned.
+                var answerPrompt = ConciergePromptBuilder.BuildMemoryTurn(
+                    request.UserMessage,
+                    retrieval,
+                    nextStayMemory,
+                    new ConciergePromptBuilder.PromptBudget(
+                        ActionWorkingContextBudgetTokens,
+                        ConciergeToolDefinitions.EstimateToolDefinitionTokens(request.EnableEndChatFunction),
+                        ActionTools: true),
+                    verifiedGuest,
+                    includedRecentTurns);
+                includedRecentTurns = answerPrompt.RetainedTurns;
+                actionResult = await RunActionToolLoopAsync(chatClient, answerPrompt, request, actionDeadline);
+            }
+            if (!attempt.SideEffectDispatched) ThrowIfSuperseded(attempt);
             var answer = actionResult.Answer;
             var endChatCall = actionResult.EndChatFunctionCall;
 
@@ -486,7 +576,7 @@ public sealed class ConciergeStayWorkflow
             if (actionResult.ConfirmedRequestSequence is { } confirmedRequestSequence)
             {
                 nextStayMemory = StayContinuityMemory.RecordActionConfirmation(
-                    nextStayMemory, confirmedRequestSequence).ToArray();
+                    attempt.Superseded ? stayMemory : nextStayMemory, confirmedRequestSequence).ToArray();
             }
 
             var turn = new ConciergeTranscriptTurn(
@@ -495,17 +585,40 @@ public sealed class ConciergeStayWorkflow
                 request.Channel,
                 request.UserMessage,
                 answer,
-                Workflow.UtcNow);
-            stayMemory.Clear();
-            stayMemory.AddRange(nextStayMemory);
-            recentTurns.Clear();
-            recentTurns.AddRange(includedRecentTurns);
-            recentTurns.Add(turn);
+                Workflow.UtcNow,
+                Superseded: attempt.Superseded);
+            if (!attempt.Superseded || actionResult.ConfirmedRequestSequence is not null)
+            {
+                stayMemory.Clear();
+                stayMemory.AddRange(nextStayMemory);
+            }
+            if (!attempt.Superseded)
+            {
+                recentTurns.Clear();
+                recentTurns.AddRange(includedRecentTurns.Where(IsEffectiveTurn));
+                recentTurns.Add(turn);
+            }
             TrimRecentTurnsToStorageBudget();
 
             var result = new ConciergeTurnResult(turn.TurnId, answer, turn.Sequence, endChatCall);
             acceptedTurns.Add(turn.TurnId, new AcceptedTurn(fingerprint, result));
             runTurns.Add(turn);
+            if (attempt.SideEffectDispatched && request.VoiceUtterance is { } actionUtterance)
+            {
+                voiceRevisions[actionUtterance.Family] =
+                    voiceRevisions[actionUtterance.Family] with
+                    {
+                        ActionReceipt = ConciergeToolResultInterpreter.Limit(answer, 2_048),
+                    };
+            }
+            if (!attempt.Superseded && request.VoiceUtterance is { } completedUtterance)
+            {
+                voiceRevisions[completedUtterance.Family] =
+                    voiceRevisions[completedUtterance.Family] with { EndChatFunctionCall = endChatCall };
+            }
+            voiceRevisionCheckpoint = !attempt.SideEffectDispatched && !attempt.Superseded
+                && request.VoiceUtterance is not null
+                    ? checkpoint with { Sequence = turn.Sequence } : null;
 
             // An offer survives one intervening turn and lapses after the second.
             if (pendingRideProposal is { } existingProposal
@@ -520,10 +633,28 @@ public sealed class ConciergeStayWorkflow
             }
 
             pendingPersistence.Add(turn);
+            if (attempt.Superseded) throw SupersededFailure();
+            attempt.Result = result;
             return result;
+        }
+        catch (TurnSupersededException)
+        {
+            if (!attempt.SideEffectDispatched && checkpoint is not null)
+            {
+                RestoreReversibleState(checkpoint);
+            }
+            attempt.Failure = SupersededFailure();
+            throw attempt.Failure;
+        }
+        catch (Exception exception)
+        {
+            attempt.Failure = exception;
+            throw;
         }
         finally
         {
+            attempt.Finished = true;
+            activeAttempt = null;
             ActiveActionDeadline = null;
             nextToProcess++;
         }
@@ -540,6 +671,8 @@ public sealed class ConciergeStayWorkflow
         actionTurnStartedUtc = Workflow.UtcNow;
         var modelCalls = 0;
         var toolRounds = 0;
+        nearbyPlaces = ConciergePlaceContinuity.Current(nearbyPlaces, Workflow.UtcNow, nextSequence, 6);
+        placeClarification = ConciergePlaceContinuity.Current(placeClarification, Workflow.UtcNow, nextSequence, 2);
 
         if (!prompt.FitActionContext(request.EnableEndChatFunction))
         {
@@ -561,12 +694,20 @@ public sealed class ConciergeStayWorkflow
                     rideOfferOpen ? pendingRideProposal : null,
                     cancellationOfferOpen ? pendingRideCancellationProposal : null,
                     consumedRideOfferSequence + 1 == nextSequence ? consumedRideOffer : null,
-                    nextSequence)));
+                    nextSequence,
+                    consumedRideOfferSequence + 1 == nextSequence
+                        ? consumedRideConfirmationOutcome
+                        : null)));
         if (lastConfirmedCancellation is { } cancellationOutcome)
         {
             messages.Insert(
                 messages.FindLastIndex(message => message.Role == ChatRole.User),
                 new ChatMessage(ChatRole.System, CancellationOutcomeContextNote(cancellationOutcome)));
+        }
+        if (nearbyPlaces is not null || placeClarification is not null)
+        {
+            messages.Insert(messages.FindLastIndex(message => message.Role == ChatRole.User),
+                new ChatMessage(ChatRole.System, ConciergePlaceContinuity.Context(nearbyPlaces, placeClarification)));
         }
         if (!prompt.FitActionContext(request.EnableEndChatFunction))
         {
@@ -592,6 +733,7 @@ public sealed class ConciergeStayWorkflow
 
         while (true)
         {
+            ThrowIfSuperseded(activeAttempt!);
             var calls = response.Messages
                 .SelectMany(message => message.Contents)
                 .OfType<FunctionCallContent>()
@@ -622,7 +764,8 @@ public sealed class ConciergeStayWorkflow
                     return new(ActionDeadlineReply(ConciergeToolDefinitions.GetWeather), null);
                 }
 
-                var pair = await RunWeatherPairAsync(calls, request, weatherTime, callIds);
+                var pair = await AwaitReplaceableAsync(
+                    RunWeatherPairAsync(calls, request, weatherTime, callIds), activeAttempt!);
                 if (pair is null)
                 {
                     return new(UnsafeActionReply, null);
@@ -714,6 +857,14 @@ public sealed class ConciergeStayWorkflow
                 return new("I can't access ride actions because the verified stay details are unavailable. Please sign in again.", null);
             }
 
+            if (call.Name is ConciergeToolDefinitions.ProposeRide or ConciergeToolDefinitions.ConfirmRide
+                && IsRevisionOfConsumedBooking(request))
+            {
+                // Deepgram can extend a confirmation after its earlier callback committed. Its new
+                // text still needs its own answer, but must not reopen the already-consumed booking.
+                return new(ConsumedBookingRevisionReply(), null);
+            }
+
             if (StringComparer.Ordinal.Equals(call.Name, ConciergeToolDefinitions.ConfirmRide)
                 && !rideOfferOpen)
             {
@@ -742,6 +893,7 @@ public sealed class ConciergeStayWorkflow
             }
 
             var activityArguments = new Dictionary<string, object?>(callArguments, StringComparer.Ordinal);
+            ConciergeCanonicalPlace? selectedDestination = null;
             if (StringComparer.Ordinal.Equals(call.Name, ConciergeToolDefinitions.GetWeather))
             {
                 activityArguments.TryAdd("place", null);
@@ -751,6 +903,24 @@ public sealed class ConciergeStayWorkflow
             {
                 activityArguments.TryAdd("pickup", null);
                 activityArguments.TryAdd("pickupAt", null);
+                nearbyPlaces = ConciergePlaceContinuity.Current(nearbyPlaces, Workflow.UtcNow, nextSequence, 6);
+                placeClarification = ConciergePlaceContinuity.Current(placeClarification, Workflow.UtcNow, nextSequence, 2);
+                var destination = callArguments["dropoff"]!.ToString()!;
+                if (!ConciergePlaceContinuity.TrySelect(destination,
+                        nearbyPlaces, placeClarification, out selectedDestination))
+                {
+                    return new(ConciergePlaceContinuity.Clarify, null);
+                }
+                if (selectedDestination is not null)
+                {
+                    activityArguments[ConciergeToolDefinitions.TrustedDestinationKey] =
+                        JsonSerializer.Serialize(selectedDestination, ActionJsonOptions);
+                }
+            }
+            else if (StringComparer.Ordinal.Equals(call.Name, ConciergeToolDefinitions.FindNearbyPlaces))
+            {
+                activityArguments.TryAdd("forRideProposal", false);
+                activityArguments.TryAdd("presentation", "alternatives");
             }
             AddTrustedRideContext(call.Name, activityArguments);
             AddTrustedWeatherContext(call.Name, activityArguments);
@@ -767,6 +937,7 @@ public sealed class ConciergeStayWorkflow
 
             string compactResult;
             long? confirmedRequestSequence = null;
+            ConciergeRideConfirmationOutcome? confirmedRideOutcome = null;
             var returnedAnswer = false;
             var guestFacingAnswer = string.Empty;
             try
@@ -774,7 +945,16 @@ public sealed class ConciergeStayWorkflow
                 var durableTool = ConciergeToolDefinitions.CreateDurableInvoker(
                     call.Name,
                     Min(ToolActivityTimeout(call.Name), remaining));
-                var result = await durableTool.InvokeAsync(new AIFunctionArguments(activityArguments));
+                ThrowIfSuperseded(activeAttempt!);
+                var sideEffect = call.Name is ConciergeToolDefinitions.ConfirmRide
+                    or ConciergeToolDefinitions.ConfirmRideCancellation;
+                // This boundary precedes activity scheduling, not its HTTP acknowledgement.
+                // Once crossed, neither revisions nor caller aborts may abandon the outcome.
+                if (sideEffect) activeAttempt!.SideEffectDispatched = true;
+                var invocation = durableTool.InvokeAsync(new AIFunctionArguments(activityArguments)).AsTask();
+                var result = sideEffect
+                    ? await invocation
+                    : await AwaitReplaceableAsync(invocation, activeAttempt!);
                 if (!TryReadSerializedToolResult(result, out var serialized)
                     || Encoding.UTF8.GetByteCount(serialized) > MaxActivityToolResultUtf8Bytes)
                 {
@@ -791,11 +971,50 @@ public sealed class ConciergeStayWorkflow
                         StringComparer.Ordinal.Equals(call.Name, ConciergeToolDefinitions.GetRideHistory)
                         && ConciergeToolCallPolicy.TryOptionalString(callArguments, "purpose", 16, out var historyPurpose)
                         && StringComparer.Ordinal.Equals(historyPurpose, "select");
-                    returnedAnswer = interpretation.ShouldReturnRenderedToolAnswer && !selectRideFromHistory;
+                    var findNearbyForRideProposal =
+                        StringComparer.Ordinal.Equals(call.Name, ConciergeToolDefinitions.FindNearbyPlaces)
+                        && ConciergeToolCallPolicy.TryBoolean(callArguments, "forRideProposal", out var forRideProposal)
+                        && forRideProposal
+                        && interpretation.Decoded is ConciergeNearbyPlacesToolResult
+                        {
+                            Status: "Available",
+                            Places.Count: > 0,
+                        };
+                    returnedAnswer = interpretation.ShouldReturnRenderedToolAnswer
+                        && !selectRideFromHistory
+                        && !findNearbyForRideProposal;
                     var interpretedResult = interpretation.Interpret(
                         request,
                         callArguments,
-                        includeRideIdsForCancellation: selectRideFromHistory);
+                        includeRideIdsForCancellation: selectRideFromHistory,
+                        rideContext: new(
+                            call.Name == ConciergeToolDefinitions.ConfirmRide ? pendingRideProposal : consumedRideOffer,
+                            call.Name == ConciergeToolDefinitions.ConfirmRide
+                                ? (interpretation.Decoded as ConciergeRideActionResult)?.Ride?.Id
+                                : consumedRideConfirmationOutcome is { Confirmed: true } outcome ? outcome.RideId : null,
+                            (nearbyPlaces?.Places ?? []).Concat(placeClarification?.Places ?? []).Distinct().ToArray()));
+                    if (interpretation.Decoded is ConciergeNearbyPlacesToolResult { Status: "Available" } nearby)
+                    {
+                        var singular = callArguments.TryGetValue("presentation", out var presentation)
+                            && presentation?.ToString() == "nearest";
+                        nearbyPlaces = ConciergePlaceContinuity.Nearby(
+                            nearby, Workflow.UtcNow, nextSequence, findNearbyForRideProposal ? 0 : singular ? 1 : 3);
+                        placeClarification = null;
+                    }
+                    else if (interpretation.Decoded is ConciergeNearbyPlacesToolResult)
+                    {
+                        nearbyPlaces = null;
+                        placeClarification = null;
+                    }
+                    if (interpretation.Decoded is ConciergeRideProposalToolResult { Status: "NeedsClarification" } ambiguous)
+                    {
+                        placeClarification = ConciergePlaceContinuity.Create(
+                            ambiguous.CanonicalCandidates ?? [], Workflow.UtcNow.AddMinutes(5), nextSequence, 3);
+                        if (ambiguous.ClarifyingPickup && nearbyPlaces is not null)
+                        {
+                            nearbyPlaces = nearbyPlaces with { PresentedCount = 0, FocusIndex = null };
+                        }
+                    }
                     compactResult = interpretedResult.CompactModelContext;
                     guestFacingAnswer = interpretedResult.GuestFacingText;
                     if (call.Name == ConciergeToolDefinitions.GetRideHistory
@@ -823,15 +1042,44 @@ public sealed class ConciergeStayWorkflow
                     }
                     if (call.Name == ConciergeToolDefinitions.ConfirmRide
                         && pendingRideProposal is { } booked
-                        && interpretation.Decoded is ConciergeRideActionResult { Message: null, Ride: { Id: var bookedRideId } }
+                        && interpretation.Decoded is ConciergeRideActionResult
+                        {
+                            Message: null,
+                            Ride: { Id: var bookedRideId } bookedRide,
+                        }
                         && bookedRideId != Guid.Empty)
                     {
                         confirmedRequestSequence = booked.ProposedSequence;
+                        confirmedRideOutcome = new(
+                            true,
+                            bookedRideId,
+                            bookedRide.Status,
+                            bookedRide.Pickup,
+                            bookedRide.Dropoff,
+                            bookedRide.PickupAt,
+                            null,
+                            request.TurnId,
+                            nextSequence);
+                    }
+                    // A failed active-ride check must not leave an older offer confirmable.
+                    if (call.Name == ConciergeToolDefinitions.ProposeRide
+                        && interpretation.Decoded is ConciergeRideProposalToolResult { Status: "ActiveRidesUnavailable" })
+                    {
+                        pendingRideProposal = null;
                     }
                     // A new offer replaces any other open offer.
                     if (interpretedResult.ProposedStateChange is { } proposal)
                     {
                         pendingRideProposal = proposal;
+                        var clarificationFocus = selectedDestination is null
+                            ? -1 : placeClarification?.Places.ToList().IndexOf(selectedDestination) ?? -1;
+                        placeClarification = clarificationFocus >= 0
+                            ? placeClarification! with { FocusIndex = clarificationFocus } : null;
+                        if (selectedDestination is not null && nearbyPlaces is { } knownPlaces)
+                        {
+                            var focus = knownPlaces.Places.ToList().IndexOf(selectedDestination);
+                            if (focus >= 0) nearbyPlaces = knownPlaces with { FocusIndex = focus };
+                        }
                         pendingRideCancellationProposal = null;
                         if (lastConfirmedCancellation is { } previousCancellation
                             && proposal.PickupAtUtc == previousCancellation.PickupAt.ToUniversalTime()
@@ -841,7 +1089,10 @@ public sealed class ConciergeStayWorkflow
                             // A model may interpret "don't cancel" as wanting a replacement. Never
                             // present that offer as restoration. A shared spoken label is a reminder
                             // to mention the earlier outcome, never proof of identity or authority.
-                            compactResult = $"Your earlier booking for {ConciergeToolResultInterpreter.DescribeCancelledRide(previousCancellation)} is already cancelled. Would you like a new booking for {ConciergeToolResultInterpreter.DescribeRideOffer(proposal)}? No new ride has been booked.";
+                            var newOffer = interpretation.Decoded is ConciergeRideProposalToolResult { ExistingRides.Count: > 0 }
+                                ? compactResult
+                                : $"Would you like a new booking for {ConciergeToolResultInterpreter.DescribeRideOffer(proposal)}? No new ride has been booked.";
+                            compactResult = $"Your earlier booking for {ConciergeToolResultInterpreter.DescribeCancelledRide(previousCancellation)} is already cancelled. {newOffer}";
                             guestFacingAnswer = compactResult;
                         }
                     }
@@ -886,6 +1137,19 @@ public sealed class ConciergeStayWorkflow
             {
                 consumedRideOffer = pendingRideProposal;
                 consumedRideOfferSequence = nextSequence;
+                consumedRideOfferSpokenRequestKey = request.Channel == "voice"
+                    ? SpokenRequestKey(request.TurnId) : null;
+                consumedRideConfirmationOutcome = confirmedRideOutcome
+                    ?? new(
+                        false,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        ConciergeToolResultInterpreter.Limit(compactResult, 1_000),
+                        request.TurnId,
+                        nextSequence);
                 pendingRideProposal = null;
                 pendingRideCancellationProposal = null;
             }
@@ -961,7 +1225,10 @@ public sealed class ConciergeStayWorkflow
             return null;
         }
 
-        var modelCall = chatClient.GetResponseAsync(messages, CreateActionModelOptions(enableEndChat, remaining));
+        ThrowIfSuperseded(activeAttempt!);
+        var modelCall = AwaitReplaceableAsync(
+            chatClient.GetResponseAsync(messages, CreateActionModelOptions(enableEndChat, remaining)),
+            activeAttempt!);
         using var timerCancellation = CancellationTokenSource.CreateLinkedTokenSource(Workflow.CancellationToken);
         var deadlineTimer = Workflow.DelayAsync(remaining, timerCancellation.Token);
         if (await Workflow.WhenAnyAsync(modelCall, deadlineTimer) != modelCall)
@@ -975,7 +1242,11 @@ public sealed class ConciergeStayWorkflow
 
     private ChatOptions CreateActionModelOptions(bool enableEndChat, TimeSpan remaining)
     {
-        var options = new ChatOptions { MaxOutputTokens = AnswerMaxOutputTokens };
+        var options = new ChatOptions
+        {
+            MaxOutputTokens = AnswerMaxOutputTokens,
+            AllowMultipleToolCalls = false,
+        };
         options.AdditionalProperties ??= [];
         options.AdditionalProperties[ConciergeToolDefinitions.ModelOptionKey] = "true";
         if (enableEndChat)
@@ -1026,6 +1297,54 @@ public sealed class ConciergeStayWorkflow
                 DateTimeStyles.None,
                 out var requestedPickupAt)
             && requestedPickupAt == consumedPickupAt;
+    }
+
+    private bool IsRevisionOfConsumedBooking(ConciergeTurnSubmission request)
+    {
+        // Side-effect provenance must survive prompt/history trimming and Continue-As-New.
+        return consumedRideOffer is not null
+            && request.Channel == "voice"
+            && SpokenRequestKey(request.TurnId) is { } key
+            && StringComparer.Ordinal.Equals(key, consumedRideOfferSpokenRequestKey);
+    }
+
+    private string ConsumedBookingRevisionReply()
+    {
+        if (consumedRideConfirmationOutcome is { Confirmed: true } confirmed)
+        {
+            return ConciergeToolResultInterpreter.DescribeConfirmedRideBooking(confirmed);
+        }
+
+        if (consumedRideConfirmationOutcome is { Confirmed: false, Message: { Length: > 0 } uncertain })
+        {
+            return uncertain;
+        }
+
+        // Continue-As-New input from before outcome retention can still carry the authoritative
+        // transcript reply for this exact consumed sequence. If it was pruned, report uncertainty.
+        var transcript = runTurns.Concat(recentTurns)
+            .LastOrDefault(turn => turn.Sequence == consumedRideOfferSequence);
+        return !string.IsNullOrWhiteSpace(transcript?.AssistantMessage)
+            ? transcript.AssistantMessage
+            : "I couldn't verify whether the ride was booked. Please check ride status or history before trying again.";
+    }
+
+    private static string? SpokenRequestKey(string turnId)
+    {
+        // Match the server-generated voice session/connection/ordinal, not the text hash. Keep
+        // full turn IDs for answer deduplication so revised questions still receive new answers.
+        var parts = turnId.Split(':');
+        return parts.Length == 5
+            && parts[0] == "v"
+            && Guid.TryParseExact(parts[1], "N", out _)
+            && int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var connection)
+            && connection > 0
+            && int.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var ordinal)
+            && ordinal > 0
+            && parts[4].Length == 64
+            && parts[4].All(Uri.IsHexDigit)
+                ? string.Join(':', parts.Take(4))
+                : null;
     }
 
     private static bool IsBareRideAcknowledgement(string message)
@@ -1102,7 +1421,8 @@ public sealed class ConciergeStayWorkflow
         ConciergeRideProposal? rideOffer,
         ConciergeRideCancellationProposal? cancellationOffer,
         ConciergeRideProposal? justConsumedRideOffer,
-        long nextSequence)
+        long nextSequence,
+        ConciergeRideConfirmationOutcome? justConsumedRideOutcome = null)
     {
         static string Age(long proposedSequence, long next) =>
             next - proposedSequence == 1 ? "in your previous reply" : "two replies ago";
@@ -1119,7 +1439,15 @@ public sealed class ConciergeStayWorkflow
 
         if (justConsumedRideOffer is { } consumed)
         {
-            return $"Ride offer state: booked {ConciergeToolResultInterpreter.DescribeRideOffer(consumed)}; closed. Don't repeat. New explicit ride (same route too): ProposeRide. No offer: no ConfirmRide/ConfirmRideCancellation.";
+            var outcome = justConsumedRideOutcome switch
+            {
+                { Confirmed: true } confirmed =>
+                    $"Confirmed ({confirmed.Status}); receipt is in the prior answer.",
+                { Confirmed: false } =>
+                    "Outcome uncertain; don't claim success; advise checking ride status.",
+                _ => "Outcome unavailable; don't claim success; check ride status.",
+            };
+            return $"Ride offer state: {ConciergeToolResultInterpreter.DescribeRideOffer(consumed)}; closed. {outcome} Don't repeat. New ride: ProposeRide; no open offer: no confirmation.";
         }
 
         return "Ride offer state: no ride or cancellation offer awaits confirmation. Do not call ConfirmRide or ConfirmRideCancellation.";
@@ -1249,9 +1577,10 @@ public sealed class ConciergeStayWorkflow
         ConciergeToolDefinitions.FindNearbyPlaces => TimeSpan.FromSeconds(8),
         // One named-place Geoapify Places request (5 s, single attempt).
         ConciergeToolDefinitions.GetPlaceOpeningHours => TimeSpan.FromSeconds(8),
-        // Up to two place lookups plus one routing request (15 s), single attempt. ProposeRide only
-        // computes the route; it does not call the ride service.
-        ConciergeToolDefinitions.GetRoute or ConciergeToolDefinitions.ProposeRide => TimeSpan.FromSeconds(18),
+        // Up to two place lookups plus one routing request (15 s), single attempt.
+        ConciergeToolDefinitions.GetRoute => TimeSpan.FromSeconds(18),
+        // GetRoute's budget plus one active-ride read (11 s) for additional-booking warnings.
+        ConciergeToolDefinitions.ProposeRide => TimeSpan.FromSeconds(30),
         // One ride-service call: GETs retry inside the HTTP budget, DELETE is sent once (11 s).
         ConciergeToolDefinitions.GetRideStatus
             or ConciergeToolDefinitions.GetRideHistory
@@ -1392,7 +1721,7 @@ public sealed class ConciergeStayWorkflow
         public string Answer => AssistantMessage;
     }
 
-    /// <summary>Complete stay transcript: persisted turns merged with pending turns by turn ID.</summary>
+    /// <summary>Effective stay history. Superseded text remains immutable in the persisted audit.</summary>
     [WorkflowUpdate(ConciergeWorkflowNames.HistoryUpdate)]
     public async Task<ConciergeHistoryResult> GetHistoryAsync()
     {
@@ -1407,7 +1736,162 @@ public sealed class ConciergeStayWorkflow
         }
 
         return new ConciergeHistoryResult(
-            turnsById.Values.OrderBy(turn => turn.Sequence).ToArray());
+            turnsById.Values.Where(IsEffectiveTurn).OrderBy(turn => turn.Sequence).ToArray());
+    }
+
+    private bool IsEffectiveTurn(ConciergeTranscriptTurn turn) =>
+        !turn.Superseded
+        && !voiceRevisions.Values.Any(revision => revision.SupersededTurnIds.Contains(turn.TurnId));
+
+    private void RejectSupersededRetry(ConciergeTurnSubmission request)
+    {
+        if (request.VoiceUtterance is { } utterance
+            && voiceRevisions.TryGetValue(utterance.Family, out var revision))
+        {
+            if (revision.SupersededTurnIds.Contains(request.TurnId)) throw SupersededFailure();
+            if (revision.LatestTurnId == request.TurnId
+                && revision.Fingerprint != Fingerprint(request.Channel, request.UserMessage, request.EnableEndChatFunction))
+            {
+                throw new ApplicationFailureException("The turn identifier conflicts with an earlier request.",
+                    errorType: TurnConflictErrorType, nonRetryable: true);
+            }
+        }
+    }
+
+    private string? AdmitVoiceRevision(ConciergeTurnSubmission request)
+    {
+        if (request.VoiceUtterance is not { } utterance) return null;
+        if (!voiceRevisions.TryGetValue(utterance.Family, out var revision))
+        {
+            if (voiceRevisions.Count >= MaxVoiceRevisionFamilies)
+            {
+                throw new ApplicationFailureException(
+                    "This stay has reached its safe voice revision capacity. Please use web chat or contact the front desk.",
+                    errorType: UnavailableErrorType, nonRetryable: true);
+            }
+            var initial = new ConciergeVoiceRevision(utterance.Family, request.TurnId, [],
+                Fingerprint(request.Channel, request.UserMessage, request.EnableEndChatFunction));
+            RequireRevisionCapacity(initial);
+            voiceRevisions.Add(utterance.Family, initial);
+            return null;
+        }
+        if (revision.LatestTurnId == request.TurnId) return null;
+        if (revision.SupersededTurnIds.Count >= MaxRevisionsPerUtterance - 1)
+        {
+            throw new ApplicationFailureException(
+                "This utterance has too many revisions. Please start a new question.",
+                errorType: UnavailableErrorType, nonRetryable: true);
+        }
+
+        var replacement = revision with
+        {
+            LatestTurnId = request.TurnId,
+            SupersededTurnIds = [.. revision.SupersededTurnIds, revision.LatestTurnId],
+            Fingerprint = Fingerprint(request.Channel, request.UserMessage, request.EnableEndChatFunction),
+            EndChatFunctionCall = null,
+        };
+        RequireRevisionCapacity(replacement);
+        voiceRevisions[utterance.Family] = replacement;
+        if (admittedTurns.TryGetValue(revision.LatestTurnId, out var obsolete))
+        {
+            obsolete.Superseded = true;
+        }
+        return revision.LatestTurnId;
+    }
+
+    private void RequireRevisionCapacity(ConciergeVoiceRevision candidate)
+    {
+        // Bound the CAN payload as well as record counts. Never evict a tombstone or receipt
+        // to make room: doing so could reactivate an old hash or repeat an uncertain action.
+        var state = voiceRevisions.Values.Where(revision => revision.Family != candidate.Family)
+            .Append(candidate).ToArray();
+        if (JsonSerializer.SerializeToUtf8Bytes(state).Length > MaxVoiceRevisionStateUtf8Bytes)
+        {
+            throw new ApplicationFailureException(
+                "This stay has reached its safe voice revision capacity. Please use web chat or contact the front desk.",
+                errorType: UnavailableErrorType, nonRetryable: true);
+        }
+    }
+
+    private ConciergeVoiceRevisionCheckpoint CaptureReversibleState(string turnId) =>
+        new(turnId, nextSequence, stayMemory.ToArray(), recentTurns.ToArray(),
+            pendingRideProposal, pendingRideCancellationProposal, nearbyPlaces, placeClarification);
+
+    private void RestoreReversibleState(ConciergeVoiceRevisionCheckpoint checkpoint)
+    {
+        stayMemory.Clear();
+        stayMemory.AddRange(checkpoint.StayMemory);
+        recentTurns.Clear();
+        recentTurns.AddRange(checkpoint.RecentTurns.Where(IsEffectiveTurn));
+        pendingRideProposal = checkpoint.RideProposal;
+        pendingRideCancellationProposal = checkpoint.CancellationProposal;
+        nearbyPlaces = checkpoint.NearbyPlaces;
+        placeClarification = checkpoint.PlaceClarification;
+    }
+
+    private async Task MarkSupersededAsync(string turnId)
+    {
+        // Use the interruption marker's insert/update serialization: a flush cannot insert an
+        // unmarked snapshot after the monotonic database update.
+        await Workflow.WaitConditionAsync(() => !flushInProgress);
+        flushInProgress = true;
+        try
+        {
+            Mark(runTurns);
+            Mark(pendingPersistence);
+            await Workflow.ExecuteActivityAsync(
+                (ConciergeTranscriptActivities activities) => activities.MarkSupersededAsync(
+                    new MarkTranscriptTurnSupersededRequest(stayId, turnId)),
+                TranscriptActivityOptions);
+        }
+        finally
+        {
+            flushInProgress = false;
+        }
+        void Mark(List<ConciergeTranscriptTurn> turns)
+        {
+            var index = turns.FindIndex(turn => turn.TurnId == turnId);
+            if (index >= 0) turns[index] = turns[index] with { Superseded = true };
+        }
+    }
+
+    private static ApplicationFailureException SupersededFailure() =>
+        new("This voice request was replaced by revised speech. No replacement reply is available for this request.",
+            errorType: UnavailableErrorType, nonRetryable: true);
+
+    private static void ThrowIfSuperseded(TurnAttempt attempt)
+    {
+        if (attempt.Superseded) throw new TurnSupersededException();
+    }
+
+    private static async Task<T> AwaitReplaceableAsync<T>(Task<T> work, TurnAttempt attempt)
+    {
+        ThrowIfSuperseded(attempt);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(Workflow.CancellationToken);
+        var superseded = Workflow.WaitConditionAsync(() => attempt.Superseded, cancellation.Token);
+        try
+        {
+            await Workflow.WhenAnyAsync(work, superseded);
+            ThrowIfSuperseded(attempt);
+            return await work;
+        }
+        finally
+        {
+            cancellation.Cancel();
+        }
+    }
+
+    private sealed class TurnSupersededException : Exception;
+
+    private sealed class TurnAttempt(string fingerprint, DateTimeOffset deadline)
+    {
+        public string Fingerprint { get; } = fingerprint;
+        public DateTimeOffset Deadline { get; } = deadline;
+        public bool Superseded { get; set; }
+        public bool SideEffectDispatched { get; set; }
+        public bool Finished { get; set; }
+        public ConciergeTurnResult? Result { get; set; }
+        public Exception? Failure { get; set; }
     }
 
     /// <summary>Waits for already-admitted turns and flushes their replies; stay memory remains.</summary>

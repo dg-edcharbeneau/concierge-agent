@@ -9,6 +9,151 @@ public sealed class ConciergeToolResultInterpreterTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    [Theory]
+    [InlineData("voice", true, "Healthi Rx Pharmacy")]
+    [InlineData("web", true, "Healthi Rx Pharmacy, 2318 Northeast 2nd Avenue")]
+    [InlineData("voice", false, "Healthi Rx Pharmacy, 2318 Northeast 2nd Avenue")]
+    public void RideReceiptUsesTrustedNameAndImmediateTimingOnlyForTheMatchingOffer(
+        string channel, bool matching, string destination)
+    {
+        var place = new ConciergeCanonicalPlace(
+            "Healthi Rx Pharmacy", "2318 Northeast 2nd Avenue", "healthi", 25.799, -80.191);
+        var offer = new ConciergeRideProposal(Guid.NewGuid(), 1,
+            new("Hotel ZGY", 25.8, -80.2),
+            new($"{place.Name}, {place.Address}", place.Latitude, place.Longitude), true, null, 180);
+        var ride = new RideSummary(Guid.NewGuid(), "Booked", "Hotel ZGY",
+            offer.Dropoff.Name, new(2026, 10, 30, 19, 57, 0, TimeSpan.FromHours(-4)), null, null, null);
+        var context = new ConciergeToolResultInterpreter.RideRenderingContext(
+            offer, matching ? ride.Id : Guid.NewGuid(), [place]);
+        var text = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.ConfirmRide,
+                JsonSerializer.Serialize(new ConciergeRideActionResult(true, null, ride, []), JsonOptions))
+            .Interpret(new("receipt", "Yes, book it.", channel), new Dictionary<string, object?>(), false, context)
+            .GuestFacingText;
+
+        Assert.Contains($"take you to {destination}.", text);
+        if (channel == "voice" && matching)
+        {
+            Assert.Contains("at Hotel ZGY now", text);
+            Assert.DoesNotContain("October", text);
+            Assert.DoesNotContain("7:57 PM", text);
+        }
+        else
+            Assert.Contains("Friday, October 30 at 7:57 PM hotel time", text);
+    }
+
+    [Theory]
+    [InlineData("Booked", "is booked.")]
+    [InlineData("DriverAssigned", "has a driver assigned.")]
+    [InlineData("PickedUp", "is in progress; pickup was at 7:57 PM hotel time.")]
+    [InlineData("Completed", "is complete; pickup was at 7:57 PM hotel time.")]
+    [InlineData("Cancelled", "was canceled.")]
+    public void MatchingImmediateRideStatusUsesShortNameWithoutInventingAnEta(string status, string clause)
+    {
+        // A comma is part of this venue's actual name, not a delimiter to strip.
+        var place = new ConciergeCanonicalPlace("Coffee, Books & More", "12 Main Street", "coffee", 25.799, -80.191);
+        var offer = new ConciergeRideProposal(Guid.NewGuid(), 1, new("Hotel ZGY", 25.8, -80.2),
+            new($"{place.Name}, {place.Address}", place.Latitude, place.Longitude), true, null, 180);
+        var ride = new RideSummary(Guid.NewGuid(), status, "Hotel ZGY", offer.Dropoff.Name,
+            new(2026, 10, 30, 19, 57, 0, TimeSpan.FromHours(-4)), null, null, null);
+        var context = new ConciergeToolResultInterpreter.RideRenderingContext(offer, ride.Id, [place]);
+        foreach (var tool in new[] { ConciergeToolDefinitions.GetRideStatus, ConciergeToolDefinitions.GetRideHistory })
+        {
+            var action = tool == ConciergeToolDefinitions.GetRideStatus
+                ? new ConciergeRideActionResult(true, null, ride, [])
+                : new ConciergeRideActionResult(true, null, null, [ride]);
+            var text = ConciergeToolResultInterpreter.Decode(tool, JsonSerializer.Serialize(action, JsonOptions))
+                .Interpret(new("status", "Where is my ride?", "voice"),
+                    new Dictionary<string, object?>(), false, context).GuestFacingText;
+            Assert.Contains($"to Coffee, Books & More {clause}", text);
+            Assert.DoesNotContain("12 Main Street", text);
+            Assert.DoesNotContain("arrive", text);
+            Assert.DoesNotContain("October", text);
+        }
+    }
+
+    [Fact]
+    public void ScheduledVoiceReceiptKeepsFullDateAndTimeAndUnknownLabelsAreNotSplit()
+    {
+        var at = new DateTimeOffset(2026, 10, 31, 10, 15, 0, TimeSpan.FromHours(-4));
+        var offer = new ConciergeRideProposal(Guid.NewGuid(), 1, new("Hotel ZGY", 25.8, -80.2),
+            new("Coffee, Books & More, 12 Main Street", 25.799, -80.191), false, at.ToUniversalTime(), 180);
+        var ride = new RideSummary(Guid.NewGuid(), "Booked", "Hotel ZGY", offer.Dropoff.Name, at, null, null, null);
+        var text = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.ConfirmRide,
+                JsonSerializer.Serialize(new ConciergeRideActionResult(true, null, ride, []), JsonOptions))
+            .Interpret(new("scheduled", "Yes.", "voice"), new Dictionary<string, object?>(), false,
+                new(offer, ride.Id, [])).GuestFacingText;
+        Assert.Contains("Saturday, October 31 at 10:15 AM hotel time", text);
+        Assert.Contains("Coffee, Books & More, 12 Main Street", text);
+        Assert.DoesNotContain(" now", text);
+    }
+
+    [Theory]
+    [InlineData("voice")]
+    [InlineData("web")]
+    public void RideOfferEstablishesTheBranchWithoutSplittingAVenueName(string channel)
+    {
+        var draft = new ConciergeRideProposalDraft(new("Hotel ZGY", 25.8, -80.2),
+            new("Coffee, Books & More, 12 Main Street", 25.799, -80.191), true, null, 180);
+        var text = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.ProposeRide,
+                JsonSerializer.Serialize(new ConciergeRideProposalToolResult(
+                    "Available", null, [], draft, null, null, []), JsonOptions))
+            .Interpret(new("offer", "Take me there.", channel), new Dictionary<string, object?>(), false).GuestFacingText;
+        Assert.StartsWith("Coffee, Books & More, 12 Main Street is about a 3-minute ride from Hotel ZGY.", text);
+        Assert.Contains(channel == "voice" ? "It's complimentary." : "It's complimentary for current hotel guests.", text);
+        Assert.EndsWith("No ride has been booked. Shall I book it now?", text);
+    }
+
+    [Fact]
+    public void RideContextCannotShortenADifferentEndpointEvenWhenTheIdMatches()
+    {
+        var place = new ConciergeCanonicalPlace("Branch", "12 Main Street", "branch", 25.799, -80.191);
+        var offer = new ConciergeRideProposal(Guid.NewGuid(), 1, new("Hotel ZGY", 25.8, -80.2),
+            new($"{place.Name}, {place.Address}", place.Latitude, place.Longitude), true, null, 180);
+        var ride = new RideSummary(Guid.NewGuid(), "Booked", "Hotel ZGY", "Branch, 99 Other Street",
+            new(2026, 10, 31, 10, 15, 0, TimeSpan.FromHours(-4)), null, null, null);
+        var text = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.GetRideStatus,
+                JsonSerializer.Serialize(new ConciergeRideActionResult(true, null, ride, []), JsonOptions))
+            .Interpret(new("different", "Status?", "voice"), new Dictionary<string, object?>(), false,
+                new(offer, ride.Id, [place])).GuestFacingText;
+        Assert.Contains("Branch, 99 Other Street", text);
+        Assert.Contains("Saturday, October 31 at 10:15 AM hotel time", text);
+    }
+
+    [Theory]
+    [InlineData("Cancelled", null, "was canceled.")]
+    [InlineData("Booked", "The booking outcome is unknown.", "The booking outcome is unknown.")]
+    public void ConfirmationDoesNotTurnCancelledOrUncertainOutcomesIntoSuccess(
+        string status, string? message, string expected)
+    {
+        var ride = new RideSummary(Guid.NewGuid(), status, "Hotel ZGY", "Pharmacy, 12 Main Street",
+            new(2026, 10, 30, 19, 57, 0, TimeSpan.FromHours(-4)), null, null, null);
+        var text = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.ConfirmRide,
+                JsonSerializer.Serialize(new ConciergeRideActionResult(true, message, ride, []), JsonOptions))
+            .Interpret(new("outcome", "Confirm.", "voice"), new Dictionary<string, object?>(), false).GuestFacingText;
+        Assert.Contains(expected, text);
+        Assert.DoesNotContain("You're all set", text);
+    }
+
+    [Fact]
+    public void MaximumActiveRideWarningsStillEndInAnExplicitConfirmationQuestion()
+    {
+        var pickupAt = new DateTimeOffset(2026, 10, 30, 18, 30, 0, TimeSpan.Zero);
+        var label = new string('界', 200);
+        var proposal = new ConciergeRideProposalToolResult("Available", null, [],
+            new(new(label, 25.8, -80.2), new(label, 25.81, -80.21), true, null, 60),
+            null, null, null, ExistingRides: Enumerable.Range(0, 3).Select(index =>
+                new RideSummary(Guid.NewGuid(), "DriverAssigned", label, label,
+                    pickupAt.AddMinutes(index), null, null, null)).ToArray());
+        var result = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.ProposeRide,
+                JsonSerializer.Serialize(proposal, JsonOptions))
+            .Interpret(new("long-warning", "Another ride, please.", "voice"), new Dictionary<string, object?>(), false);
+        Assert.EndsWith("Shall I book it now?", result.GuestFacingText);
+        Assert.Contains("ADDITIONAL ride, not a change", result.GuestFacingText);
+        Assert.Contains("confirmation on a later turn", result.GuestFacingText);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(result.GuestFacingText, "status: DriverAssigned").Count);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(result.GuestFacingText) <= 2_048);
+    }
+
     [Fact]
     public void WeatherInterpretationCreatesTheSameModelAndGuestText()
     {
@@ -74,6 +219,40 @@ public sealed class ConciergeToolResultInterpreterTests
     }
 
     [Fact]
+    public void CurrentWeatherRendersObservationFieldsWithoutForecastHighOrLow()
+    {
+        var observedAt = new DateTimeOffset(2026, 10, 21, 14, 15, 0, TimeSpan.FromHours(-4));
+        var serialized = JsonSerializer.Serialize(
+            new ConciergeWeatherToolResult(
+                "Available", null, [], "Hotel ZGY, Miami", null,
+                "partly cloudy", null, null, null, null,
+                CurrentTemperatureFahrenheit: 86,
+                ApparentTemperatureFahrenheit: 91,
+                RelativeHumidityPercent: 68,
+                CurrentWindMph: 9,
+                CurrentPrecipitationInches: 0.03,
+                ObservedAt: observedAt),
+            JsonOptions);
+        var request = new ConciergeTurnSubmission("current-weather", "What's the weather right now?", "voice");
+        var arguments = new Dictionary<string, object?> { ["period"] = "current" };
+
+        var result = ConciergeToolResultInterpreter.Decode(
+            ConciergeToolDefinitions.GetWeather, serialized);
+
+        Assert.True(result.ShouldReturnRenderedToolAnswer);
+        var text = result.Interpret(request, arguments, includeRideIdsForCancellation: false).GuestFacingText;
+        Assert.Contains("Currently partly cloudy at Hotel ZGY", text, StringComparison.Ordinal);
+        Assert.Contains("86°F", text, StringComparison.Ordinal);
+        Assert.Contains("feels like 91°F", text, StringComparison.Ordinal);
+        Assert.Contains("68% humidity", text, StringComparison.Ordinal);
+        Assert.Contains("winds at 9 mph", text, StringComparison.Ordinal);
+        Assert.Contains("0.03 inches of precipitation", text, StringComparison.Ordinal);
+        Assert.Contains("2:15 PM local time", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("high around", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("low near", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RouteInterpretationKeepsWebStepNumberingAndTruncationContent()
     {
         var route = new ConciergeRouteToolResult(
@@ -123,7 +302,7 @@ public sealed class ConciergeToolResultInterpreterTests
         Assert.Equal(7, interpreted.ProposedRideProposal!.ProposedSequence);
         Assert.Equal(draft.Pickup, interpreted.ProposedRideProposal.Pickup);
         Assert.Equal(
-            "I can have a car pick you up at Hotel ZGY now and take you to South Beach, Miami Beach. It's about a 12-minute ride and is complimentary for current hotel guests. No ride has been booked.",
+            "South Beach, Miami Beach, Florida is about a 12-minute ride from Hotel ZGY. It's complimentary for current hotel guests. No ride has been booked. Shall I book it now?",
             interpreted.Interpret(request, new Dictionary<string, object?>(), false).GuestFacingText);
     }
 
@@ -183,15 +362,15 @@ public sealed class ConciergeToolResultInterpreterTests
 
     [Theory]
     [InlineData("DriverAssigned", "2026-10-21T21:45:00-04:00",
-        "Your ride from Hotel ZGY to South Beach, Miami Beach has a driver assigned for pickup on Wednesday, October 21 at 9:35 PM hotel time.")]
+        "Your ride from Hotel ZGY to South Beach, Miami Beach, Florida has a driver assigned for pickup on Wednesday, October 21 at 9:35 PM hotel time.")]
     [InlineData("PickedUp", "2026-10-21T21:36:00-04:00",
-        "Your ride from Hotel ZGY to South Beach, Miami Beach is in progress and should arrive around 9:36 PM hotel time.")]
+        "Your ride from Hotel ZGY to South Beach, Miami Beach, Florida is in progress and should arrive around 9:36 PM hotel time.")]
     [InlineData("Completed", "2026-10-21T21:36:00-04:00",
-        "Your ride from Hotel ZGY to South Beach, Miami Beach is complete; it arrived around 9:36 PM hotel time.")]
+        "Your ride from Hotel ZGY to South Beach, Miami Beach, Florida is complete; it arrived around 9:36 PM hotel time.")]
     [InlineData("PickedUp", null,
-        "Your ride from Hotel ZGY to South Beach, Miami Beach is in progress; pickup was at 9:35 PM hotel time.")]
+        "Your ride from Hotel ZGY to South Beach, Miami Beach, Florida is in progress; pickup was at 9:35 PM hotel time.")]
     [InlineData("Completed", null,
-        "Your ride from Hotel ZGY to South Beach, Miami Beach is complete; pickup was at 9:35 PM hotel time.")]
+        "Your ride from Hotel ZGY to South Beach, Miami Beach, Florida is complete; pickup was at 9:35 PM hotel time.")]
     public void RideStatusReportsPickupOrArrivalTimeWithoutDriverDetails(
         string status, string? arrivalAt, string expected)
     {
@@ -220,11 +399,11 @@ public sealed class ConciergeToolResultInterpreterTests
 
     [Theory]
     [InlineData("past", "Here are your past rides:\n\n"
-        + "1. Your ride on Oct 22 to 50 NW 24th Street, Miami is complete; it arrived around 7:45 AM hotel time.\n"
-        + "2. Your ride on Oct 05 to Silverspot Cinema, 300 Southeast 3rd Street is complete; it arrived around 11:34 PM hotel time.")]
+        + "1. Your ride on Oct 22 to 50 NW 24th Street, Miami, FL 33127 is complete; it arrived around 7:45 AM hotel time.\n"
+        + "2. Your ride on Oct 05 to Silverspot Cinema, 300 Southeast 3rd Street, Miami, FL is complete; it arrived around 11:34 PM hotel time.")]
     [InlineData("upcoming", "Here are your upcoming rides:\n\n"
-        + "1. Your ride to 50 NW 24th Street, Miami is complete; it arrived around 7:45 AM hotel time.\n"
-        + "2. Your ride to Silverspot Cinema, 300 Southeast 3rd Street is complete; it arrived around 11:34 PM hotel time.")]
+        + "1. Your ride to 50 NW 24th Street, Miami, FL 33127 is complete; it arrived around 7:45 AM hotel time.\n"
+        + "2. Your ride to Silverspot Cinema, 300 Southeast 3rd Street, Miami, FL is complete; it arrived around 11:34 PM hotel time.")]
     public void PastRideHistoryAddsShortDateOnlyForPastRides(string when, string expected)
     {
         RideSummary Completed(string dropoff, string pickupAt, string arrivalAt) => new(
@@ -300,7 +479,8 @@ public sealed class ConciergeToolResultInterpreterTests
         var text = ConciergeToolResultInterpreter.Decode(ConciergeToolDefinitions.ProposeRide, serialized)
             .Interpret(request, new Dictionary<string, object?>(), false).GuestFacingText;
 
-        Assert.Contains($"It's about {expected} ride", text, StringComparison.Ordinal);
+        Assert.Contains($"is about {expected} ride", text, StringComparison.Ordinal);
+        Assert.EndsWith("Shall I book it now?", text, StringComparison.Ordinal);
     }
 
     [Theory]

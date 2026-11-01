@@ -4,7 +4,8 @@ using Microsoft.Extensions.Options;
 
 namespace Concierge.WorkflowServer.Location;
 
-public sealed record DrivingRouteRequest(IReadOnlyList<string> Places);
+public sealed record DrivingRouteRequest(
+    IReadOnlyList<string> Places, DrivingRouteEndpoint? VerifiedDestination = null);
 
 public enum DrivingRouteStatus
 {
@@ -26,7 +27,8 @@ public sealed record DrivingRouteResult(
     IReadOnlyList<ResolvedPlace> Candidates,
     DrivingRoute? Route,
     DrivingRouteEndpoint? Origin = null,
-    DrivingRouteEndpoint? Destination = null);
+    DrivingRouteEndpoint? Destination = null,
+    bool ClarifyingOrigin = false);
 
 public sealed record DrivingRouteEndpoint(string Name, double Latitude, double Longitude);
 
@@ -66,8 +68,20 @@ public sealed class GeoapifyDrivingRouteService(
         var coordinates = hotelLocation.Coordinates;
         var hotelEndpoint = new DrivingRouteEndpoint(hotel.Label, coordinates.Latitude, coordinates.Longitude);
         var endpoints = new List<DrivingRouteEndpoint>(request.Places.Count);
-        foreach (var query in request.Places)
+        for (var index = 0; index < request.Places.Count; index++)
         {
+            var query = request.Places[index];
+            if (index == request.Places.Count - 1 && request.VerifiedDestination is { } verified)
+            {
+                if (string.IsNullOrWhiteSpace(verified.Name)
+                    || !double.IsFinite(verified.Latitude) || verified.Latitude is < -90 or > 90
+                    || !double.IsFinite(verified.Longitude) || verified.Longitude is < -180 or > 180)
+                {
+                    throw new ArgumentException("Verified destination has invalid coordinates.", nameof(request));
+                }
+                endpoints.Add(verified);
+                continue;
+            }
             if (HotelLocationOptions.IsHotelReference(query))
             {
                 endpoints.Add(hotelEndpoint);
@@ -81,7 +95,8 @@ public sealed class GeoapifyDrivingRouteService(
                     DrivingRouteStatus.NeedsClarification,
                     resolution.Query,
                     resolution.Candidates,
-                    Route: null);
+                    Route: null,
+                    ClarifyingOrigin: request.Places.Count == 2 && index == 0);
             }
 
             endpoints.Add(ToEndpoint(resolution.Place!));

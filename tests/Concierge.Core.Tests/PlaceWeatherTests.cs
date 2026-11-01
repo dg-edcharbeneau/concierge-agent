@@ -1,6 +1,8 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Concierge.Contracts;
+using Concierge.WorkflowServer.AI;
 using Concierge.WorkflowServer.Location;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -410,6 +412,80 @@ public sealed class PlaceWeatherTests
         Assert.Equal(0, openMeteoCalls);
     }
 
+    [Fact]
+    public async Task CurrentWeatherReturnsObservationInsteadOfDailyForecastAndUsesPlaceLocalTime()
+    {
+        using var http = CreateClient(request => CurrentWeatherResponse());
+        var service = CreateWeatherService(
+            http,
+            new FakeTimeProvider(new DateTimeOffset(2026, 10, 19, 16, 0, 0, TimeSpan.Zero)));
+
+        var result = await service.GetWeatherAsync(new WeatherRequest(Day: WeatherDay.Current));
+
+        Assert.Equal(WeatherResultStatus.Available, result.Status);
+        Assert.Null(result.Forecast);
+        Assert.NotNull(result.Current);
+        Assert.Equal(new DateTimeOffset(2026, 10, 19, 12, 34, 0, TimeSpan.FromHours(-4)), result.Current.ObservedAt);
+        Assert.Equal(86.4, result.Current.TemperatureFahrenheit);
+        Assert.Equal(91.2, result.Current.ApparentTemperatureFahrenheit);
+        Assert.Equal(68, result.Current.RelativeHumidityPercent);
+        Assert.Equal(2, result.Current.WeatherCode);
+        Assert.Equal(9.1, result.Current.WindSpeedMph);
+        Assert.Equal(0.03, result.Current.PrecipitationInches);
+        Assert.Contains("current=temperature_2m", http.LastRequestUri!.Query, StringComparison.Ordinal);
+        Assert.Contains("precipitation_unit=inch", http.LastRequestUri.Query, StringComparison.Ordinal);
+        Assert.Contains("timezone=auto", http.LastRequestUri.Query, StringComparison.Ordinal);
+        Assert.DoesNotContain("daily=", http.LastRequestUri.Query, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CurrentWeatherActionIncludesObservedConditions()
+    {
+        using var http = CreateClient(_ => CurrentWeatherResponse());
+        var timeProvider = new FakeTimeProvider(
+            new DateTimeOffset(2026, 10, 19, 16, 0, 0, TimeSpan.Zero));
+        var hotelLocation = CreateHotelLocation();
+        var placeResolver = CreateResolver(http);
+        var weather = new OpenMeteoWeatherService(
+            new FixedHttpClientFactory(http),
+            placeResolver,
+            Options.Create(Hotel),
+            hotelLocation,
+            timeProvider);
+        var actions = new ConciergeActionToolService(
+            weather,
+            null!,
+            null!,
+            null!,
+            new FixedHttpClientFactory(http),
+            timeProvider,
+            Options.Create(Hotel),
+            Options.Create(new RideSchedulingOptions()));
+
+        var result = JsonSerializer.Deserialize<ConciergeWeatherToolResult>(
+            await actions.GetWeatherAsync(null, "current", null, CancellationToken.None),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(result);
+        Assert.Equal("partly cloudy", result.Conditions);
+        Assert.Equal(86.4, result.CurrentTemperatureFahrenheit);
+    }
+
+    [Fact]
+    public async Task CurrentWeatherProviderFailureIsSafeToRetry()
+    {
+        using var http = CreateClient(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        var service = CreateWeatherService(
+            http,
+            new FakeTimeProvider(new DateTimeOffset(2026, 10, 19, 16, 0, 0, TimeSpan.Zero)));
+
+        var failure = await Assert.ThrowsAsync<HttpRequestException>(
+            () => service.GetWeatherAsync(new WeatherRequest(Day: WeatherDay.Current)));
+
+        Assert.Contains("503", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(Geoapify.ApiKey, failure.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("Key West")]
     [InlineData("Key West, FL")]
@@ -796,6 +872,33 @@ public sealed class PlaceWeatherTests
                 weather_code = dates.Select(_ => (int?)2).ToArray(),
                 wind_speed_10m_max = dates.Select(_ => (double?)11).ToArray(),
                 precipitation_probability_max = dates.Select(_ => (int?)20).ToArray(),
+            },
+        });
+
+    private static HttpResponseMessage CurrentWeatherResponse() =>
+        JsonResponse(new
+        {
+            timezone = "America/New_York",
+            utc_offset_seconds = -14_400,
+            current_units = new
+            {
+                time = "iso8601",
+                temperature_2m = "°F",
+                relative_humidity_2m = "%",
+                apparent_temperature = "°F",
+                precipitation = "inch",
+                weather_code = "wmo code",
+                wind_speed_10m = "mp/h",
+            },
+            current = new
+            {
+                time = "2026-10-19T12:34",
+                temperature_2m = 86.4,
+                relative_humidity_2m = 68,
+                apparent_temperature = 91.2,
+                precipitation = 0.03,
+                weather_code = 2,
+                wind_speed_10m = 9.1,
             },
         });
 
