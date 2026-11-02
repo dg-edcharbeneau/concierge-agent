@@ -65,7 +65,12 @@ public sealed class HomeSessionTests
         var connection = harness.StartListening();
         var reply = new TaskCompletionSource<ConciergeTurnResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var started = new TaskCompletionSource();
-        using var observer = harness.Voice.SubscribeTurns(connection.Session.Id, _ => started.TrySetResult());
+        Assert.True(harness.Voice.TrySubscribeTurns(
+            connection.Session.Stay.SessionId,
+            connection.Session.Id,
+            _ => started.TrySetResult(),
+            out var observer));
+        using var observerSubscription = observer;
         var request = connection.Session.JoinOrStart("reconnect-pending", () => reply.Task, "My pending question");
         await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await harness.VoiceSession(connection.Session.Id.ToString());
@@ -1189,7 +1194,7 @@ public sealed class HomeSessionTests
         await using var harness = new Harness();
         var stale = harness.StartListening();
         await harness.VoiceSession(stale.Session.Id.ToString());
-        var current = harness.Voice.Open(new ConciergeSessionContext(Guid.NewGuid(), Guid.NewGuid(), DateTimeOffset.UtcNow.AddDays(1)), null);
+        var current = harness.Voice.Open(stale.Session.Stay, null);
         await harness.VoiceSession(current.Session.Id.ToString());
 
         harness.Voice.Close(stale);
@@ -1197,6 +1202,36 @@ public sealed class HomeSessionTests
 
         Assert.Equal("listening", harness.Get<string>("voiceState"));
         Assert.Null(harness.Get<string?>("voiceMessage"));
+    }
+
+    [Fact]
+    public async Task ForeignVoiceSessionIsRejectedWithoutSubscribingOrDeliveringTurns()
+    {
+        using var logs = new CapturedLogs();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddProvider(logs));
+        await using var harness = new Harness();
+        harness.Set("Logger", loggerFactory.CreateLogger<Home>());
+        var ownConnection = harness.StartListening();
+        var foreignConnection = harness.Voice.Open(
+            new ConciergeSessionContext(Guid.NewGuid(), Guid.NewGuid(), DateTimeOffset.UtcNow.AddDays(1)),
+            null);
+
+        await harness.VoiceSession(foreignConnection.Session.Id.ToString());
+        harness.Voice.Close(foreignConnection);
+        await foreignConnection.Session.JoinOrStart(
+            "foreign-turn", () => Task.FromResult(new ConciergeTurnResult("foreign-turn", "Foreign reply", 1)),
+            "Foreign guest text");
+
+        Assert.Null(harness.Get<string?>("voiceSessionId"));
+        Assert.Equal("disconnected", harness.Get<string>("voiceState"));
+        Assert.Contains(logs.Entries, entry =>
+            entry.Message.StartsWith("Rejected voice-session subscription", StringComparison.Ordinal)
+            && entry.Message.Contains("not owned by active chat session", StringComparison.Ordinal)
+            && entry.Values.ContainsKey("VoiceSessionId")
+            && Equals(entry.Values.GetValueOrDefault("ChatSessionId"), ownConnection.Session.Stay.SessionId));
+        var content = harness.RenderedContent().Text;
+        Assert.DoesNotContain("Foreign guest text", content);
+        Assert.DoesNotContain("Foreign reply", content);
     }
 
     /// <summary>Keeps the browser's more specific disconnect message.</summary>
@@ -1216,7 +1251,7 @@ public sealed class HomeSessionTests
     }
 
     private static ConciergeSessionResponse SessionResponse(string credential, Guid stay)
-        => new(credential, DateTimeOffset.UtcNow.AddHours(1), stay);
+        => new(credential, DateTimeOffset.UtcNow.AddHours(1), stay, Guid.NewGuid());
 
     private static ConciergeHistoryResult History(string id) =>
         new([new ConciergeTranscriptTurn(id, 1, "web", "Guest", "Reply", DateTimeOffset.UtcNow)]);
@@ -1328,9 +1363,15 @@ public sealed class HomeSessionTests
         }
 
         /// <summary>Seeds a verified session for the test.</summary>
-        public void SetSession(string credential, Guid stay)
+        public void SetSession(string credential, Guid stay, Guid sessionId = default)
         {
-            var session = new ChatSessionState { Credential = credential, StayId = stay, ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1) };
+            var session = new ChatSessionState
+            {
+                Credential = credential,
+                StayId = stay,
+                SessionId = sessionId,
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            };
             Set("session", session);
         }
 
@@ -1401,10 +1442,12 @@ public sealed class HomeSessionTests
         /// <summary>Seeds a verified chat in voice mode with an open relay connection.</summary>
         public VoiceConnection StartListening()
         {
-            SetSession("credential", Guid.NewGuid());
+            var chatSessionId = Guid.NewGuid();
+            var stayId = Guid.NewGuid();
+            SetSession("credential", stayId, chatSessionId);
             Set("voiceMode", true);
             Set("voiceState", "listening");
-            return Voice.Open(new ConciergeSessionContext(Guid.NewGuid(), Guid.NewGuid(), DateTimeOffset.UtcNow.AddDays(1)), null);
+            return Voice.Open(new ConciergeSessionContext(chatSessionId, stayId, DateTimeOffset.UtcNow.AddDays(1)), null);
         }
 
         public Task VoiceState(string state, string? message, int closeCode) =>

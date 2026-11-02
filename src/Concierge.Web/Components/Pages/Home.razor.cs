@@ -829,8 +829,24 @@ public partial class Home : ComponentBase, IAsyncDisposable
     public Task OnVoiceSession(string id) =>
         InvokeAsync(() =>
         {
-            voiceSessionId = voiceMode ? id : null;
-            WatchVoiceRelay(voiceSessionId);
+            if (!voiceMode)
+            {
+                voiceSessionId = null;
+                StopWatchingVoiceRelay();
+                return;
+            }
+
+            voiceSessionId = id;
+            if (WatchVoiceRelay(id))
+            {
+                voiceMessage = null;
+                return;
+            }
+
+            voiceSessionId = null;
+            voiceState = "disconnected";
+            voiceMessage = "Voice could not attach to this chat. Verify the stay and reconnect.";
+            StateHasChanged();
         });
 
     /// <summary>
@@ -839,15 +855,27 @@ public partial class Home : ComponentBase, IAsyncDisposable
     /// disconnected when the voice socket drops; the relay runs in this process, so the server
     /// pushes the closure itself.
     /// </summary>
-    private void WatchVoiceRelay(string? id)
+    private bool WatchVoiceRelay(string? id)
     {
         StopWatchingVoiceRelay();
         if (disposed || id is null || !Guid.TryParse(id, out var voiceSession))
         {
-            return;
+            Logger.LogWarning(
+                "Rejected voice-session subscription for malformed voice session ID {VoiceSessionId}.",
+                id);
+            return false;
         }
 
-        voiceClosedSubscription = VoiceSessions.SubscribeConnectionClosed(
+        if (session?.SessionId is not { } chatSessionId || chatSessionId == Guid.Empty)
+        {
+            Logger.LogWarning(
+                "Rejected voice-session subscription for {VoiceSessionId}: the active chat has no verified session identity; verify the stay before reconnecting.",
+                id);
+            return false;
+        }
+
+        if (!VoiceSessions.TrySubscribeConnectionClosed(
+            chatSessionId,
             voiceSession,
             // Runs on the relay's thread; queue onto the circuit without blocking it.
             connectionNumber => _ = InvokeAsync(() => ApplyVoiceRelayClosedAsync(id, connectionNumber))
@@ -857,9 +885,17 @@ public partial class Home : ComponentBase, IAsyncDisposable
                         id, connectionNumber),
                     CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted,
-                    TaskScheduler.Default));
+                    TaskScheduler.Default),
+            out var closedSubscription))
+        {
+            Logger.LogWarning(
+                "Rejected voice-session subscription for {VoiceSessionId}: it is not owned by active chat session {ChatSessionId}.",
+                id, chatSessionId);
+            return false;
+        }
+
         var version = sessionVersion;
-        voiceTurnSubscription = VoiceSessions.SubscribeTurns(voiceSession,
+        if (!VoiceSessions.TrySubscribeTurns(chatSessionId, voiceSession,
             progress => _ = InvokeAsync(async () =>
             {
                 if (!IsCurrentSession(version) || voiceSessionId != id || !voiceMode || chatEnded || isEnding) return;
@@ -877,7 +913,19 @@ public partial class Home : ComponentBase, IAsyncDisposable
             }).ContinueWith(
                 task => Logger.LogWarning(task.Exception,
                     "Applying voice transcript progress failed for session {VoiceSessionId}.", id),
-                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default));
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default),
+            out var turnSubscription))
+        {
+            closedSubscription.Dispose();
+            Logger.LogWarning(
+                "Rejected voice transcript subscription for {VoiceSessionId}: it is not owned by active chat session {ChatSessionId}.",
+                id, chatSessionId);
+            return false;
+        }
+
+        voiceClosedSubscription = closedSubscription;
+        voiceTurnSubscription = turnSubscription;
+        return true;
     }
 
     private void StopWatchingVoiceRelay()

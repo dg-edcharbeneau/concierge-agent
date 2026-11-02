@@ -125,6 +125,7 @@ public sealed class ConciergeApiTests(PostgreSqlFixture postgreSql)
         var session = await response.Content.ReadFromJsonAsync<ConciergeSessionResponse>();
 
         Assert.Equal(ConciergeTestHost.HotelMidnightUtc(today.AddDays(2)), session!.ExpiresAtUtc);
+        Assert.NotEqual(Guid.Empty, session.SessionId);
     }
 
     [Fact]

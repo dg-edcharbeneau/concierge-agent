@@ -18,8 +18,8 @@ public sealed class VoiceSessionRegistryTests
     {
         var connection = registry.Open(Stay(), null);
         var notices = new System.Collections.Concurrent.ConcurrentQueue<VoiceTurnProgress>();
-        using var broken = registry.SubscribeTurns(connection.Session.Id, _ => throw new InvalidOperationException());
-        using var working = registry.SubscribeTurns(connection.Session.Id, notices.Enqueue);
+        using var broken = SubscribeTurns(connection, _ => throw new InvalidOperationException());
+        using var working = SubscribeTurns(connection, notices.Enqueue);
         var reply = new ConciergeTurnResult("turn", "Reply", 1);
         Assert.Equal(reply, await connection.Session.JoinOrStart("turn", () => Task.FromResult(reply), "Guest"));
         Assert.Equal([false, true], notices.Select(notice => notice.Finished));
@@ -234,7 +234,7 @@ public sealed class VoiceSessionRegistryTests
     {
         var connection = registry.Open(Stay(), null);
         var closed = new List<int>();
-        using var subscription = registry.SubscribeConnectionClosed(connection.Session.Id, closed.Add);
+        using var subscription = SubscribeClosed(connection, closed.Add);
 
         registry.Close(connection);
         registry.Close(connection);
@@ -247,7 +247,7 @@ public sealed class VoiceSessionRegistryTests
     {
         var connection = registry.Open(Stay(), null);
         var closed = new List<int>();
-        using var subscription = registry.SubscribeConnectionClosed(connection.Session.Id, closed.Add);
+        using var subscription = SubscribeClosed(connection, closed.Add);
 
         time.Advance(VoiceSessionRegistry.ConnectionLifetime);
 
@@ -261,7 +261,7 @@ public sealed class VoiceSessionRegistryTests
         var stay = Stay();
         var first = registry.Open(stay, null);
         var closed = new List<int>();
-        using var subscription = registry.SubscribeConnectionClosed(first.Session.Id, closed.Add);
+        using var subscription = SubscribeClosed(first, closed.Add);
 
         var second = registry.Open(stay, first.Session.Id);
         registry.Close(first);
@@ -278,7 +278,7 @@ public sealed class VoiceSessionRegistryTests
         var stay = Stay();
         var connection = registry.Open(stay, null);
         var closed = new List<int>();
-        using var subscription = registry.SubscribeConnectionClosed(connection.Session.Id, closed.Add);
+        using var subscription = SubscribeClosed(connection, closed.Add);
         Assert.Equal(1, registry.ClosedSubscriberCount(connection.Session.Id));
 
         registry.EndSession(stay.SessionId);
@@ -294,7 +294,7 @@ public sealed class VoiceSessionRegistryTests
     public void AbandonedSessionRemovalDropsSubscribers()
     {
         var abandoned = registry.Open(Stay(), null);
-        using var subscription = registry.SubscribeConnectionClosed(abandoned.Session.Id, _ => { });
+        using var subscription = SubscribeClosed(abandoned, _ => { });
         registry.Close(abandoned);
 
         time.Advance(VoiceSessionRegistry.ConnectionLifetime + TimeSpan.FromSeconds(1));
@@ -308,7 +308,7 @@ public sealed class VoiceSessionRegistryTests
     {
         var connection = registry.Open(Stay(), null);
         var called = false;
-        var subscription = registry.SubscribeConnectionClosed(connection.Session.Id, _ => called = true);
+        var subscription = SubscribeClosed(connection, _ => called = true);
 
         subscription.Dispose();
         subscription.Dispose();
@@ -319,11 +319,20 @@ public sealed class VoiceSessionRegistryTests
     }
 
     [Fact]
-    public void SubscribingToAnUnknownVoiceSessionIsANoOp()
+    public void VoiceSubscriptionsRequireTheOwningChatSession()
     {
-        using var subscription = registry.SubscribeConnectionClosed(Guid.NewGuid(), _ => throw new InvalidOperationException());
+        var connection = registry.Open(Stay(), null);
+        var anotherChatSession = Guid.NewGuid();
 
-        Assert.Equal(0, registry.SessionCount);
+        Assert.False(registry.TrySubscribeConnectionClosed(
+            anotherChatSession, connection.Session.Id, _ => throw new InvalidOperationException(), out _));
+        Assert.False(registry.TrySubscribeTurns(
+            anotherChatSession, connection.Session.Id, _ => throw new InvalidOperationException(), out _));
+        Assert.False(registry.TrySubscribeConnectionClosed(
+            connection.Session.Stay.SessionId, Guid.NewGuid(), _ => throw new InvalidOperationException(), out _));
+        Assert.False(registry.TrySubscribeTurns(
+            connection.Session.Stay.SessionId, Guid.NewGuid(), _ => throw new InvalidOperationException(), out _));
+        Assert.Equal(1, registry.SessionCount);
     }
 
     [Fact]
@@ -332,8 +341,8 @@ public sealed class VoiceSessionRegistryTests
         var stay = Stay();
         var connection = registry.Open(stay, null);
         var closed = new List<int>();
-        using var bad = registry.SubscribeConnectionClosed(connection.Session.Id, _ => throw new InvalidOperationException("bad"));
-        using var good = registry.SubscribeConnectionClosed(connection.Session.Id, closed.Add);
+        using var bad = SubscribeClosed(connection, _ => throw new InvalidOperationException("bad"));
+        using var good = SubscribeClosed(connection, closed.Add);
 
         registry.Close(connection);
 
@@ -366,6 +375,20 @@ public sealed class VoiceSessionRegistryTests
         Assert.NotSame(first, next);
         Assert.Equal(2, submissions);
         Assert.Equal(0, session.InFlightCount);
+    }
+
+    private IDisposable SubscribeClosed(VoiceConnection connection, Action<int> onClosed)
+    {
+        Assert.True(registry.TrySubscribeConnectionClosed(
+            connection.Session.Stay.SessionId, connection.Session.Id, onClosed, out var subscription));
+        return subscription;
+    }
+
+    private IDisposable SubscribeTurns(VoiceConnection connection, Action<VoiceTurnProgress> onTurn)
+    {
+        Assert.True(registry.TrySubscribeTurns(
+            connection.Session.Stay.SessionId, connection.Session.Id, onTurn, out var subscription));
+        return subscription;
     }
 
     private static ConciergeSessionContext Stay(DateTimeOffset? deadline = null) =>

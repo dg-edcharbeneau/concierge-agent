@@ -65,7 +65,7 @@ public sealed class ConciergeService(
         }
 
         return new ConciergeSessionResponse(
-            credential, verified.EligibilityDeadlineUtc, verified.StayId);
+            credential, verified.EligibilityDeadlineUtc, verified.StayId, verified.SessionId);
     }
 
     /// <inheritdoc/>

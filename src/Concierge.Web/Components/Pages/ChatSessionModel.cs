@@ -68,6 +68,7 @@ internal sealed record ChatSessionModel(
         var verifiedSession = new ChatSessionState
         {
             StayId = response.StayId,
+            SessionId = response.SessionId,
             Credential = response.Credential,
             ExpiresAtUtc = response.ExpiresAtUtc,
             Pending = recoveredPending,
@@ -222,6 +223,7 @@ internal sealed record ChatSessionModel(
         new()
         {
             StayId = source.StayId,
+            SessionId = source.SessionId,
             Credential = source.Credential,
             ExpiresAtUtc = source.ExpiresAtUtc,
             Pending = pending,

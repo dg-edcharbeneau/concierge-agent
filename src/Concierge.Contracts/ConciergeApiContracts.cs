@@ -4,7 +4,11 @@ namespace Concierge.Contracts;
 
 public sealed record ConciergeVerificationRequest(string LastName, string RoomNumber);
 
-public sealed record ConciergeSessionResponse(string Credential, DateTimeOffset ExpiresAtUtc, Guid StayId = default);
+public sealed record ConciergeSessionResponse(
+    string Credential,
+    DateTimeOffset ExpiresAtUtc,
+    Guid StayId,
+    Guid SessionId);
 
 public sealed record ConciergeTurnRequest(string TurnId, string UserMessage, string Channel);
 

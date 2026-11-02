@@ -16,10 +16,12 @@ public sealed class ChatSessionModelTests
     {
         var now = DateTimeOffset.Parse("2026-10-12T12:00:00Z");
         var stayId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
         var pending = Pending("retry-id");
         var stored = new ChatSessionState
         {
             StayId = stayId,
+            SessionId = sessionId,
             Credential = "credential",
             ExpiresAtUtc = now,
             Pending = pending,
@@ -29,6 +31,7 @@ public sealed class ChatSessionModelTests
         var restored = Transition(Initial(), "Restore", stored, now);
 
         Assert.Equal("credential", Get<ChatSessionState?>(restored, "Session")?.Credential);
+        Assert.Equal(sessionId, Get<ChatSessionState?>(restored, "Session")?.SessionId);
         Assert.Equal(pending, Get<PendingTurnState?>(restored, "Pending"));
         Assert.Equal("separate draft", Get<string>(restored, "Draft"));
         Assert.Equal(stayId, Get<Guid>(restored, "RecoveryStayId"));
@@ -43,6 +46,7 @@ public sealed class ChatSessionModelTests
     {
         var stayId = Guid.NewGuid();
         var pending = Pending("retry-id");
+        var sessionId = Guid.NewGuid();
         var restored = Transition(Initial(), "Restore", new ChatSessionState
         {
             StayId = stayId,
@@ -61,9 +65,11 @@ public sealed class ChatSessionModelTests
         var result = Transition(verifying, "VerificationSucceeded", new ConciergeSessionResponse(
             "new-credential",
             DateTimeOffset.UtcNow.AddHours(1),
-            sameStay ? stayId : Guid.NewGuid()), DateTimeOffset.UtcNow);
+            sameStay ? stayId : Guid.NewGuid(),
+            sessionId), DateTimeOffset.UtcNow);
 
         Assert.Equal("new-credential", Get<ChatSessionState?>(result, "Session")?.Credential);
+        Assert.Equal(sessionId, Get<ChatSessionState?>(result, "Session")?.SessionId);
         Assert.Equal(sameStay ? pending : null, Get<PendingTurnState?>(result, "Pending"));
         Assert.Equal(sameStay ? "separate draft" : string.Empty, Get<string>(result, "Draft"));
         Assert.Equal(Get<int>(verifying, "Version") + 1, Get<int>(result, "Version"));

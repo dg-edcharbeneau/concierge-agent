@@ -10,6 +10,8 @@ public sealed class ChatSessionState
 {
     public Guid StayId { get; set; }
 
+    public Guid SessionId { get; set; }
+
     public string? Credential { get; set; }
 
     public DateTimeOffset? ExpiresAtUtc { get; set; }

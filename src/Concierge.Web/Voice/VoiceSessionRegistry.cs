@@ -116,51 +116,90 @@ public sealed class VoiceSessionRegistry(
     /// Calls <paramref name="onClosed"/> with the connection number when the active connection of
     /// voice session <paramref name="voiceSessionId"/> goes away because its relay closed or its
     /// bearer expired. Replaced and ended connections are not reported. The callback runs on the
-    /// revoking thread and must not block. Returns a no-op subscription for an unknown session.
+    /// revoking thread and must not block. Subscription succeeds only for its owning chat session.
     /// </summary>
-    public IDisposable SubscribeConnectionClosed(Guid voiceSessionId, Action<int> onClosed)
+    public bool TrySubscribeConnectionClosed(
+        Guid chatSessionId,
+        Guid voiceSessionId,
+        Action<int> onClosed,
+        out IDisposable subscription)
     {
         ArgumentNullException.ThrowIfNull(onClosed);
-        if (!sessions.TryGetValue(voiceSessionId, out var session))
+        subscription = ClosedSubscription.None;
+        if (!TryGetOwnedSession(chatSessionId, voiceSessionId, out var session))
         {
-            return ClosedSubscription.None;
+            return false;
         }
 
-        var subscription = new ClosedSubscription(session, onClosed);
+        var closedSubscription = new ClosedSubscription(session, onClosed);
         lock (session.Gate)
         {
-            session.ClosedSubscribers.Add(subscription);
+            session.ClosedSubscribers.Add(closedSubscription);
         }
 
         // The session may have been removed between the lookup and the add; never keep a
         // subscriber on a session the registry no longer owns.
         if (!sessions.TryGetValue(voiceSessionId, out var current) || !ReferenceEquals(current, session))
         {
-            subscription.Dispose();
-            return ClosedSubscription.None;
+            closedSubscription.Dispose();
+            return false;
         }
 
-        return subscription;
+        subscription = closedSubscription;
+        return true;
     }
 
-    public IDisposable SubscribeTurns(Guid voiceSessionId, Action<VoiceTurnProgress> onTurn)
+    public bool TrySubscribeTurns(
+        Guid chatSessionId,
+        Guid voiceSessionId,
+        Action<VoiceTurnProgress> onTurn,
+        out IDisposable subscription)
     {
         ArgumentNullException.ThrowIfNull(onTurn);
-        return sessions.TryGetValue(voiceSessionId, out var session)
-            ? session.SubscribeTurns(progress =>
+        subscription = ClosedSubscription.None;
+        if (!TryGetOwnedSession(chatSessionId, voiceSessionId, out var session))
+        {
+            return false;
+        }
+
+        var turnSubscription = session.SubscribeTurns(progress =>
+        {
+            try
             {
-                try
-                {
-                    onTurn(progress);
-                }
-                catch (Exception exception)
-                {
-                    // Presentation failures must not fail admitted Temporal work.
-                    logger?.LogWarning(exception,
-                        "Voice transcript subscriber failed for session {VoiceSessionId}.", voiceSessionId);
-                }
-            })
-            : ClosedSubscription.None;
+                onTurn(progress);
+            }
+            catch (Exception exception)
+            {
+                // Presentation failures must not fail admitted Temporal work.
+                logger?.LogWarning(exception,
+                    "Voice transcript subscriber failed for session {VoiceSessionId}.", voiceSessionId);
+            }
+        });
+        if (!sessions.TryGetValue(voiceSessionId, out var current) || !ReferenceEquals(current, session))
+        {
+            turnSubscription.Dispose();
+            return false;
+        }
+
+        subscription = turnSubscription;
+        return true;
+    }
+
+    private bool TryGetOwnedSession(
+        Guid chatSessionId,
+        Guid voiceSessionId,
+        [NotNullWhen(true)] out VoiceSession? session)
+    {
+        session = null;
+        if (chatSessionId == Guid.Empty
+            || !sessions.TryGetValue(voiceSessionId, out var found)
+            || found.Stay.SessionId != chatSessionId)
+        {
+            return false;
+        }
+
+        session = found;
+        return true;
     }
 
     /// <summary>
