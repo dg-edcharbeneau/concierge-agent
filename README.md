@@ -19,6 +19,30 @@ find nearby places and more
 
 Run all commands below from the repository root.
 
+## Set up with an AI agent
+
+The repo includes a `concierge-setup` [agent skill](.agents/skills/concierge-setup/SKILL.md)
+that checks prerequisites, walks you through each account and key, and starts and
+verifies the app. Open the repo in your agent and ask it to set up the project,
+or invoke the skill directly:
+
+| Agent | Invoke |
+| --- | --- |
+| Claude Code | `/concierge-setup` |
+| Codex | `$concierge-setup`, or pick it from `/skills` |
+| GitHub Copilot | Ask to "use the concierge-setup skill"; Copilot selects skills from your prompt |
+
+The agent never handles your keys. When it asks for one, run the command it gives
+you in your own terminal; the key is typed at a hidden prompt:
+
+```bash
+.agents/skills/concierge-setup/scripts/set-secret.sh Parameters:<parameter-name>
+```
+
+Without an agent, run `.agents/skills/concierge-setup/scripts/check-setup.sh` to see
+what's missing, and follow the [account steps](.agents/skills/concierge-setup/references/accounts.md)
+and the sections below.
+
 ## Run locally
 
 ### 1. Prepare the models
