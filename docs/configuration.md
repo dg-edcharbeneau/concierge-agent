@@ -147,8 +147,7 @@ non-hotel pickups still use the normal resolver. The later explicit confirmation
 consumed-offer, uncertainty, cancellation, and mixed-batch guards are unchanged.
 Offers ask “Shall I book it …?” and retain material timing and additional-ride
 warnings. The `ride-conversation` live-model gate and six-turn Chrome check with
-synthetic microphone audio passed; see [verification status](../README.md#verification-status)
-for the exercised paths and limits. These runs do not establish that every
+synthetic microphone audio passed. These runs do not establish that every
 conversational reference works.
 
 ## Browser voice
@@ -190,8 +189,7 @@ not a 409, empty success, or replacement SSE reply. A caller disconnect alone
 still leaves admitted Temporal work running. These server guarantees do not
 establish whether Deepgram aborts speculative custom-Think requests or whether
 an already-delivered obsolete reply was audible. The current code has passed
-the live-model and synthetic-microphone browser checks described in
-[verification status](../README.md#verification-status); physical audio quality
+the live-model and synthetic-microphone browser checks; physical audio quality
 and obsolete-reply audibility are not independently verified. Future incompatible
 workflow command changes require explicit approval for the repository-mandated
 Temporal/Postgres reset before starting against existing histories.
