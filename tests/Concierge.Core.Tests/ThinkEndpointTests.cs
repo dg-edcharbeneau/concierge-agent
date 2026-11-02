@@ -248,7 +248,7 @@ public sealed class ThinkEndpointTests : IDisposable
     }
 
     [Fact]
-    public void DeepgramSettingsDeferTheClientSideEndFunctionUntilEndOfTurn()
+    public void DeepgramSettingsUseFluxListenAndAuraSpeakDefaultsAndDeferEndChat()
     {
         using var settings = JsonDocument.Parse(VoiceAgentSettings.Build(
             new DeepgramVoiceOptions(),
@@ -263,9 +263,76 @@ public sealed class ThinkEndpointTests : IDisposable
         Assert.False(function.TryGetProperty("endpoint", out _));
         Assert.Equal(JsonValueKind.Object, function.GetProperty("parameters").GetProperty("properties").ValueKind);
 
-        var speak = settings.RootElement
-            .GetProperty("agent").GetProperty("speak").GetProperty("provider");
+        var agent = settings.RootElement.GetProperty("agent");
+        var listen = agent.GetProperty("listen").GetProperty("provider");
+        Assert.Equal("flux-general-en", listen.GetProperty("model").GetString());
+        Assert.Equal("v2", listen.GetProperty("version").GetString());
+        var speak = agent.GetProperty("speak").GetProperty("provider");
+        Assert.Equal("aura-2-thalia-en", speak.GetProperty("model").GetString());
+        Assert.Equal("v1", speak.GetProperty("version").GetString());
         Assert.Equal(1.0, speak.GetProperty("speed").GetDouble());
+    }
+
+    [Fact]
+    public void DeepgramNovaOverrideAndAuraDefaultKeepTheV1ProviderContract()
+    {
+        using var settings = JsonDocument.Parse(VoiceAgentSettings.Build(
+            new DeepgramVoiceOptions
+            {
+                ListenModel = "nova-3",
+            },
+            new Uri("https://think.example/v1/chat/completions"),
+            "opaque-bearer",
+            hasTurns: false));
+        var agent = settings.RootElement.GetProperty("agent");
+        var listen = agent.GetProperty("listen").GetProperty("provider");
+        var speak = agent.GetProperty("speak").GetProperty("provider");
+
+        Assert.Equal("nova-3", listen.GetProperty("model").GetString());
+        Assert.Equal("v1", listen.GetProperty("version").GetString());
+        Assert.Equal("aura-2-thalia-en", speak.GetProperty("model").GetString());
+        Assert.Equal("v1", speak.GetProperty("version").GetString());
+        Assert.Equal(1.0, speak.GetProperty("speed").GetDouble());
+    }
+
+    [Fact]
+    public void DeepgramFluxSpeakOverrideKeepsTheV2ProviderContract()
+    {
+        using var settings = JsonDocument.Parse(VoiceAgentSettings.Build(
+            new DeepgramVoiceOptions
+            {
+                SpeakModel = "flux-sienna-en",
+                Speed = 1.2,
+            },
+            new Uri("https://think.example/v1/chat/completions"),
+            "opaque-bearer",
+            hasTurns: false));
+        var speak = settings.RootElement.GetProperty("agent").GetProperty("speak").GetProperty("provider");
+
+        Assert.Equal("flux-sienna-en", speak.GetProperty("model").GetString());
+        Assert.Equal("v2", speak.GetProperty("version").GetString());
+        Assert.Equal(1.2, speak.GetProperty("speed").GetDouble());
+    }
+
+    [Theory]
+    [InlineData("flux-sienna-en", 0.5, true)]
+    [InlineData("flux-sienna-en", 1.2, true)]
+    [InlineData("flux-sienna-en", 0.55, true)]
+    [InlineData("flux-sienna-en", 0.56, false)]
+    [InlineData("aura-2-thalia-en", 0.7, true)]
+    [InlineData("aura-2-thalia-en", 0.65, false)]
+    [InlineData("aura:2-thalia-en", 1.5, true)]
+    [InlineData("other", 0.5, true)]
+    [InlineData("other", 1.5, true)]
+    [InlineData("other", 1.51, false)]
+    public void TtsSpeedValidationFollowsProviderFamily(string model, double speed, bool expected) =>
+        Assert.Equal(expected, VoiceAgentSettings.IsValidSpeakSpeed(model, speed));
+
+    [Fact]
+    public void TtsSpeedValidationRejectsNonFiniteValues()
+    {
+        Assert.False(VoiceAgentSettings.IsValidSpeakSpeed("other", double.NaN));
+        Assert.False(VoiceAgentSettings.IsValidSpeakSpeed("flux-sienna-en", double.PositiveInfinity));
     }
 
     [Fact]

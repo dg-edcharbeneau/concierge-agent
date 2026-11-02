@@ -60,8 +60,9 @@ builder.Services.AddOptions<DeepgramVoiceOptions>()
         options => options.IdleTimeoutMinutes is >= 1 and <= 60,
         $"{DeepgramVoiceOptions.SectionName}:IdleTimeoutMinutes must be between 1 and 60.")
     .Validate(
-        options => options.Speed is >= 0.5 and <= 1.5,
-        $"{DeepgramVoiceOptions.SectionName}:Speed must be between 0.5 and 1.5.")
+        options => VoiceAgentSettings.IsValidSpeakSpeed(options.SpeakModel, options.Speed),
+        $"{DeepgramVoiceOptions.SectionName}:Speed must match the selected TTS family "
+        + "(Flux: 0.5–1.5 in 0.05 steps; Aura: 0.7–1.5).")
     .ValidateOnStart();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<VoiceSessionRegistry>();

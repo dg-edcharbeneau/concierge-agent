@@ -11,17 +11,17 @@ public sealed class DeepgramVoiceOptions
     /// <summary>Server-held key; never sent to the browser or logged.</summary>
     public string? ApiKey { get; set; }
 
-    /// <summary>Speech-to-text model.</summary>
+    /// <summary>Speech-to-text model; Flux STT is sent with provider version v2.</summary>
     public string ListenModel { get; set; } = "flux-general-en";
 
-    /// <summary>Text-to-speech voice model.</summary>
-    public string SpeakModel { get; set; } = "flux-sienna-en";
+    /// <summary>Text-to-speech model; Aura TTS is sent with provider version v1.</summary>
+    public string SpeakModel { get; set; } = "aura-2-thalia-en";
 
     /// <summary>Minutes without speech before ending an otherwise idle chat.</summary>
     public int IdleTimeoutMinutes { get; set; } = 2;
 
-    /// <summary>TTS speech rate (0.5 to 1.5, default 1.0).</summary>
-    public double Speed { get; set; } = 1.2;
+    /// <summary>TTS speech rate (default 1.0; valid range depends on the voice family).</summary>
+    public double Speed { get; set; } = 1.0;
 }
 
 /// <summary>Builds the Voice Agent <c>Settings</c> message for one relay connection.</summary>
@@ -55,7 +55,7 @@ internal static class VoiceAgentSettings
             {
                 language = "en",
                 greeting = hasTurns ? WelcomeBackGreeting : FirstTimeGreeting,
-                listen = new { provider = new { type = "deepgram", model = options.ListenModel } },
+                listen = new { provider = DeepgramProvider(options.ListenModel) },
                 think = new
                 {
                     provider = new { type = "open_ai", model = "concierge" },
@@ -83,15 +83,52 @@ internal static class VoiceAgentSettings
                 },
                 speak = new
                 {
-                    provider = new
-                    {
-                        type = "deepgram",
-                        model = options.SpeakModel,
-                        speed = options.Speed,
-                    },
+                    provider = DeepgramProvider(options.SpeakModel, options.Speed),
                 },
             },
         });
+
+    internal static bool IsValidSpeakSpeed(string model, double speed)
+    {
+        if (!double.IsFinite(speed) || speed is < 0.5 or > 1.5)
+        {
+            return false;
+        }
+
+        if (IsFluxModel(model))
+        {
+            var stepsFromMinimum = (speed - 0.5) / 0.05;
+            return Math.Abs(stepsFromMinimum - Math.Round(stepsFromMinimum)) < 1e-8;
+        }
+
+        return !IsAuraModel(model) || speed >= 0.7;
+    }
+
+    private static object DeepgramProvider(string model, double? speed = null)
+    {
+        var version = IsFluxModel(model) ? "v2" : IsNovaOrAuraModel(model) ? "v1" : null;
+        if (version is null)
+        {
+            return speed is { } unversionedSpeed
+                ? new { type = "deepgram", model, speed = unversionedSpeed }
+                : new { type = "deepgram", model };
+        }
+
+        return speed is { } versionedSpeed
+            ? new { type = "deepgram", version, model, speed = versionedSpeed }
+            : new { type = "deepgram", version, model };
+    }
+
+    private static bool IsFluxModel(string model) =>
+        model.StartsWith("flux-", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsNovaOrAuraModel(string model) =>
+        model.StartsWith("nova-", StringComparison.OrdinalIgnoreCase)
+        || IsAuraModel(model);
+
+    private static bool IsAuraModel(string model) =>
+        model.StartsWith("aura-", StringComparison.OrdinalIgnoreCase)
+        || model.StartsWith("aura:", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Resolves the public Think URL from <c>THINK_PUBLIC_URL</c>; Deepgram can call only HTTPS.

@@ -99,9 +99,11 @@ reply includes the earliest available pickup time when one exists.
 Matching active rides do not prohibit an explicit new booking. The proposal
 includes a bounded warning about existing rides and states that the offer is
 additional, not a change; a later explicit confirmation is still required.
-If existing rides cannot be checked, no new offer is made and an older pending
-offer is closed. Repeated confirmations and same-ordinal voice revisions do
-not authorize another booking.
+When a valid replacement proposal is dispatched, the previous unbooked offer
+closes; it cannot be confirmed if that replacement activity fails or returns an
+invalid result. A genuine destination clarification does not dispatch a proposal
+and leaves the existing offer unchanged. Repeated confirmations and same-ordinal
+voice revisions do not authorize another booking.
 
 Nearby-place continuity is a fixed workflow contract, with no additional
 configuration:
@@ -201,10 +203,13 @@ options.
 | Setting | Default | Units | Validation and purpose |
 | --- | --- | --- | --- |
 | `Deepgram:ApiKey` | Empty | n/a | Required for browser voice; supplied through AppHost `Parameters:deepgram-api-key`. The key must be valid at Deepgram; Web does not validate it at startup. |
-| `Deepgram:ListenModel` | `nova-3` | n/a | Deepgram-supported model identifier for speech recognition; configure on Web, not forwarded by AppHost. |
-| `Deepgram:SpeakModel` | `aura-2-thalia-en` | n/a | Deepgram-supported model identifier for speech synthesis; configure on Web, not forwarded by AppHost. |
-| `Deepgram:Speed` | `1.0` | Number | Decimal between `0.5` and `1.5`; sets voice playback speed; configure on Web, not forwarded by AppHost. |
+| `Deepgram:ListenModel` | `flux-general-en` | n/a | Deepgram speech-to-text model; Flux uses provider version `v2`, Nova uses `v1`; configure on Web, not forwarded by AppHost. |
+| `Deepgram:SpeakModel` | `aura-2-thalia-en` | n/a | Deepgram text-to-speech model; Aura uses provider version `v1`, Flux uses `v2`; configure on Web, not forwarded by AppHost. |
+| `Deepgram:Speed` | `1.0` | Number | TTS speed; Flux accepts `0.5–1.5` in `0.05` steps, Aura accepts `0.7–1.5`; configure on Web, not forwarded by AppHost. |
 | `Deepgram:IdleTimeoutMinutes` | `2` | Minutes | Integer `1–60`; ends an idle voice chat; configure on Web, not forwarded by AppHost. |
+
+Provider versions and speed ranges follow Deepgram's
+[Voice Agent Settings documentation](https://developers.deepgram.com/docs/voice-agent-settings).
 
 Voice chats show an accessible inactivity warning about 30 seconds before this
 timeout. The server uses detected guest speech and its existing reply-in-progress

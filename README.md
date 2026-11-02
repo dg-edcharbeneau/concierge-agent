@@ -128,6 +128,9 @@ at the same pickup time. The offer warns about matching active rides and makes
 clear that this is an additional booking, not a change. Nothing is booked until
 the guest confirms that offer in a later turn. To change an existing booking,
 cancel it first, then request and confirm a replacement.
+A newly dispatched proposal closes any older unbooked offer, even if the
+replacement check fails; a clarification that has not dispatched a proposal
+does not replace the existing offer.
 
 <details>
 <summary>Ride update delivery</summary>
@@ -227,6 +230,54 @@ The latest reported cinema turn measured Think
 at 9.1 seconds, Deepgram total at 10.2 seconds, and TTS at 41 milliseconds;
 this is one turn, not a latency guarantee.
 
+**Post-review corrections (2026-10-31, changes after `0269dc1`):** At that
+revision, source defaults and serialized Deepgram settings used Flux `v2` at
+speed `1.2`, with Nova/Aura `v1` overrides; replacement ride attempts closed
+older offers at dispatch; and Home subscriptions required the verified
+chat-session owner. The current TTS default is Aura `v1` at speed `1.0`; Flux
+remains configurable. The focused correction suite passed **141/141** using
+isolated outputs. An initial full run exposed 15 AI-configuration fixture
+failures because the subprocess helper assumed standard AppHost output paths.
+The helper now supports both standard and isolated build layouts. The final
+correction-revision isolated run, `dotnet test Concierge.slnx --artifacts-path
+.artifacts/corrections-20261031`, passed **1,075/1,075**, with no failed or
+skipped tests.
+
+**Historical runtime verification (2026-10-31, 11:29 p.m. EDT; before the TTS
+default was changed back to Aura):** The exact
+AppHost ordinary stop reported it was already stopped. With no AppHost running,
+`dotnet test Concierge.slnx` rebuilt standard outputs from the then-current source and
+passed **1,075/1,075**, with no failed or skipped tests. An earlier concurrent
+build attempt hit a file lock; an earlier full run passed 1,074 tests and failed
+one ride-publication timing bound. That check passed individually, then the
+entire suite passed without changing its assertions. All four JavaScript test
+files passed **25/25**, including five browser-layout subtests, using the
+documented `PLAYWRIGHT_MODULE` override with cached Playwright and installed
+Chrome. Offline action-harness selftests passed **35/35** and the weather
+validator passed **8/8** cases.
+
+`aspire start --non-interactive --apphost
+src/Concierge.AppHost/Concierge.AppHost.csproj` started the then-current source app
+without resetting data. A real headless Chrome session signed in as demo guest
+Rivera in room 412 and received Deepgram `SettingsApplied` with the then-current
+Flux defaults (`flux-general-en`/`flux-sienna-en`, provider `v2`, speed `1.2`,
+raw linear16 output at 24 kHz). The greeting returned **149,760 PCM bytes**;
+the harmless spoken question “What time is checkout?” also returned
+**149,760 PCM bytes**, including **158 nonzero frames**, and playback-worklet
+acknowledgements covered **74,880 samples**. The answer, “Checkout is at
+11:00 a.m. Eastern Time,” appeared in Home's owner-fed transcript and was
+persisted in Postgres. First returned answer audio arrived 2,301 ms after
+synthetic speech ended; this is one turn, not a latency guarantee.
+
+Only voice was ended; the stay/chat was not ended. The Aspire-managed app was
+left running and healthy at `https://localhost:7097/`. No workflow/database
+reset, volume deletion, or guest-data replacement was performed, and worker
+logs contained no nondeterminism entries. Browser events and worklet
+acknowledgements verify returned/rendered audio, not physical speaker
+audibility. No live ride booking/cancellation or induced live provider failure
+was attempted; failed replacement offers were verified by automated regression
+tests, not this browser check.
+
 ## Configuration
 
 The [Development settings](src/Concierge.AppHost/appsettings.Development.json)
@@ -290,8 +341,9 @@ through Web's own appsettings or service environment:
 | Key | Default | Units, validation, and purpose |
 | --- | --- | --- |
 | `Parameters:deepgram-api-key` → `Deepgram:ApiKey` | Empty | Secret Voice Agent key; required to use browser voice. Set with the Deepgram command above. |
-| `Deepgram:ListenModel` | `nova-3` | Deepgram-supported model identifier; speech recognition. |
-| `Deepgram:SpeakModel` | `aura-2-thalia-en` | Deepgram-supported model identifier; speech synthesis. |
+| `Deepgram:ListenModel` | `flux-general-en` | Deepgram speech-to-text model; Flux uses provider version `v2`, while Nova uses `v1`. |
+| `Deepgram:SpeakModel` | `aura-2-thalia-en` | Deepgram text-to-speech model; Aura uses provider version `v1`, while Flux uses `v2`. |
+| `Deepgram:Speed` | `1.0` | TTS speed; Flux accepts `0.5–1.5` in `0.05` steps, Aura accepts `0.7–1.5`. |
 | `Deepgram:IdleTimeoutMinutes` | `2` | Minutes; integer `1–60`; ends a voice chat after inactivity. |
 | `Concierge:Persistence:FlushIntervalSeconds` | `30` | Seconds; integer `1–600`; maximum interval for batching transcript writes. |
 | `Concierge:Persistence:FlushBatchSize` | `5` | Turns; integer `1–100`; transcript batch size. |
