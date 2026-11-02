@@ -266,7 +266,12 @@ public sealed class AIConfigurationTests
     {
         var outputPath = Path.Combine(Path.GetTempPath(), $"concierge-manifest-{Guid.NewGuid():N}.json");
         var appHostDirectory = Path.Combine(RepoRoot, "src/Concierge.AppHost");
-        var buildConfiguration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+        var testOutput = new DirectoryInfo(AppContext.BaseDirectory);
+        var appHostAssembly = testOutput.Parent?.Name == "Concierge.Core.Tests"
+            ? Path.Combine(testOutput.Parent.Parent!.FullName, "Concierge.AppHost",
+                testOutput.Name, "Concierge.AppHost.dll")
+            : Path.Combine(appHostDirectory, "bin", testOutput.Parent!.Name,
+                "net10.0/Concierge.AppHost.dll");
         var start = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = appHostDirectory,
@@ -285,8 +290,7 @@ public sealed class AIConfigurationTests
         // No user-secrets, Docker, Dev Tunnel login, or running resources are needed.
         start.Environment["DOTNET_ENVIRONMENT"] = "Production";
         start.Environment["ASPNETCORE_ENVIRONMENT"] = "Production";
-        start.ArgumentList.Add(Path.Combine(appHostDirectory, "bin", buildConfiguration,
-            "net10.0/Concierge.AppHost.dll"));
+        start.ArgumentList.Add(appHostAssembly);
         foreach (var argument in new[] { "--publisher", "manifest", "--output-path", outputPath,
             "--Parameters:deepgram-api-key=", "--Parameters:foundry-chat-api-key=",
             "--Parameters:foundry-embeddings-api-key=" })
