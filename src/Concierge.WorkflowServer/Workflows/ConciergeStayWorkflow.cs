@@ -951,6 +951,12 @@ public sealed class ConciergeStayWorkflow
                 // This boundary precedes activity scheduling, not its HTTP acknowledgement.
                 // Once crossed, neither revisions nor caller aborts may abandon the outcome.
                 if (sideEffect) activeAttempt!.SideEffectDispatched = true;
+                if (call.Name == ConciergeToolDefinitions.ProposeRide)
+                {
+                    // A replacement attempt closes the old offer even when its activity or result
+                    // fails. A superseded reversible turn restores this state from its checkpoint.
+                    pendingRideProposal = null;
+                }
                 var invocation = durableTool.InvokeAsync(new AIFunctionArguments(activityArguments)).AsTask();
                 var result = sideEffect
                     ? await invocation
@@ -1060,12 +1066,6 @@ public sealed class ConciergeStayWorkflow
                             null,
                             request.TurnId,
                             nextSequence);
-                    }
-                    // A failed active-ride check must not leave an older offer confirmable.
-                    if (call.Name == ConciergeToolDefinitions.ProposeRide
-                        && interpretation.Decoded is ConciergeRideProposalToolResult { Status: "ActiveRidesUnavailable" })
-                    {
-                        pendingRideProposal = null;
                     }
                     // A new offer replaces any other open offer.
                     if (interpretedResult.ProposedStateChange is { } proposal)

@@ -547,6 +547,38 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
     }
 
     [Fact]
+    public async Task FailedReplacementProposalCannotLeaveAnOlderOfferConfirmable()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "first-offer", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "South Beach", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "first-offer", "A ride to South Beach.");
+
+        host.ActionTools.BeforeResult = name => name == ConciergeToolDefinitions.ProposeRide
+            ? Task.FromException(new InvalidOperationException("proposal activity failed"))
+            : Task.CompletedTask;
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "failed-replacement", ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "Wayan Miami", ["immediate"] = true }));
+        var failed = await SubmitAsync(
+            host, handle, stayId, "failed-replacement", "Actually, a ride to Wayan Miami.");
+        host.ActionTools.BeforeResult = null;
+
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "confirm-failed-replacement", ConciergeToolDefinitions.ConfirmRide,
+            new Dictionary<string, object?>()));
+        var confirmation = await SubmitAsync(
+            host, handle, stayId, "confirm-failed-replacement", "Yes, book it.");
+
+        Assert.Contains("no ride has been booked", failed.AssistantMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("there's no ride offer", confirmation.AssistantMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(host.ActionTools.Calls, call => call.Name == ConciergeToolDefinitions.ConfirmRide);
+        await ReplayAsync(await handle.FetchHistoryAsync());
+    }
+
+    [Fact]
     public async Task VoiceEndChatAlonePreservesTheClientHandshake()
     {
         await using var host = await ConciergeTestHost.StartAsync(postgreSql);
