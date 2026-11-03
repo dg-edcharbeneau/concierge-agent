@@ -1,7 +1,7 @@
 ---
 name: concierge-setup
 description: Sets up the Concierge Agent repo on a new machine - checks prerequisite tools, walks the user through creating Geoapify, Deepgram, and Microsoft Foundry (or local Ollama) accounts and keys, stores settings in the AppHost user-secrets store without exposing key values, then starts the Aspire AppHost and verifies it is healthy. Use when someone has just cloned the repo, asks how to get it running, is missing API keys, or startup fails on a missing or rejected key or AI provider setting.
-compatibility: Requires a POSIX shell (macOS, Linux, or WSL/Git Bash), perl, and network access. Key entry needs the user's own interactive terminal.
+compatibility: Needs the .NET SDK the AppHost targets (the setup check is a dotnet run --file app) and network access. Works on macOS, Linux, and Windows; every command the user runs works in any shell, PowerShell included.
 ---
 
 # Concierge setup
@@ -16,9 +16,10 @@ this skill or from memory; they can drift from the code.
 - Never read, print, log, or ask the user to paste a secret value into the
   conversation. That includes `dotnet user-secrets list` output: show setting
   *names* only.
-- The user enters each secret themselves with `scripts/set-secret.sh` in their
-  own terminal. It needs a TTY, so agents can't run it, and must not try to pipe
-  values into it.
+- The user enters each secret themselves in their own terminal with
+  `dotnet user-secrets set "<parameter>" "<your-key>" --project <AppHost dir>`,
+  replacing `<your-key>` with their key. Never run that command with a real
+  value yourself.
 - You may set non-secret values yourself (provider, endpoint, deployment/model
   name, timeouts) with `dotnet user-secrets set ... --project <AppHost dir>`
   after the user gives you the values.
@@ -46,15 +47,26 @@ Read these as needed instead of assuming:
 
 ### 1. Check current state
 
-Run from the repo root:
+The checker is a .NET file-based app, so it needs the .NET SDK first. Run
+`dotnet --list-sdks`. If the major version in the AppHost csproj's
+`<TargetFramework>` isn't listed, install that SDK from the README prerequisites
+link before going on. Then run, from the repo root:
 
 ```bash
-.agents/skills/concierge-setup/scripts/check-setup.sh
+dotnet run --file .agents/skills/concierge-setup/scripts/check-setup.cs
 ```
 
-It reports tools, Docker, the HTTPS dev cert, dev tunnel login, which
-user-secrets *names* are set, and each AI capability's effective provider. It
-derives the required parameters from `AppHost.cs`. If it says the AppHost shape
+The first run restores one package and compiles, which takes a few seconds.
+
+It reports:
+
+- Tools, Docker, the HTTPS dev cert, and dev tunnel login.
+- Whether the user-secrets store is readable.
+- Which secret parameters are set. It never shows their values.
+- Each AI capability's effective provider, endpoint, and model.
+
+It reads configuration in the same order as the AppHost, and finds the required
+parameters by parsing `AppHost.cs`. If it says the AppHost shape
 changed, read `AppHost.cs` and continue manually. Re-run it after each step
 below.
 
@@ -80,28 +92,42 @@ Settings for a chosen provider override the Development defaults through
 user-secrets. Set each one the configuration reference marks as needed for that
 provider.
 
-### 4. Create accounts and store secrets
+### 4. Give the user the walkthrough
 
-Go through the parameters `check-setup.sh` reports as missing, one at a time:
+This step matters most to the user. Fill in
+[assets/walkthrough-template.md](assets/walkthrough-template.md) and send it as
+one message. It covers each missing account and key, plus any one-time machine
+setup. For every service it gives:
 
-1. Walk the user through the matching section of
-   [references/accounts.md](references/accounts.md), including the link.
-2. Have them run, in their own terminal:
-   ```bash
-   .agents/skills/concierge-setup/scripts/set-secret.sh Parameters:<parameter-name>
-   ```
-   The script prints only the stored length. If the length looks wrong for that
-   service, have them re-enter it.
+- Numbered account steps, with the sign-up link, copied in full from
+  [references/accounts.md](references/accounts.md).
+- The exact `dotnet user-secrets set` command for that service's parameter,
+  with `<your-key>` as the value placeholder.
+- The docs link.
 
-Foundry API-key parameters are optional. Without them the app uses
-`DefaultAzureCredential`, so the user can run `az login` instead.
+Don't shrink the steps into one-line comments beside commands. A user who has
+never seen these services needs every click and link.
 
-### 5. One-time machine setup
+Key facts to carry into the walkthrough:
 
-Have the user run these themselves (both are interactive):
+- The user copies each `dotnet user-secrets set` command, replaces
+  `<your-key>` with their key, and runs it in their own terminal. Tell them not
+  to paste the filled-in command back into the conversation.
+- Foundry API-key parameters are optional. Without them the app uses
+  `DefaultAzureCredential`, so the user can run `az login` instead.
+- `dotnet dev-certs https --trust` and `devtunnel user login` are interactive,
+  so the user runs those too.
 
-- `dotnet dev-certs https --trust` if the cert isn't trusted.
-- `devtunnel user login` (add `-g` for GitHub) if not logged in. Voice needs it.
+### 5. Set non-secret settings
+
+Once the user has given you the provider values (endpoint, deployment or model
+names), set them with `dotnet user-secrets set`. Then re-run the checker
+and follow up on anything still missing.
+
+In every follow-up, list each command the user still has to run in a fenced
+`bash` block, ready to copy and paste, with the step it belongs to above it.
+Don't put user-run commands in inline code inside prose or bullets; they're
+hard to copy from there.
 
 ### 6. Start and verify
 
@@ -143,7 +169,8 @@ Tell the user:
 
 | Symptom | Cause and fix |
 | --- | --- |
-| WorkflowServer exits: `Geoapify returned HTTP 401` | Key mistyped, from another project, or restricted by origin/IP in the Geoapify project. Fix it in Geoapify, re-run `set-secret.sh`, restart the AppHost. |
+| `dotnet user-secrets` fails with `Error_JSONParseError` on `secrets.json` | The store file is empty or only a byte-order mark. Don't read it; it may hold keys. Have the user inspect it and, if it holds nothing, reset it to `{}`. Then set the values again. |
+| WorkflowServer exits: `Geoapify returned HTTP 401` | Key mistyped, from another project, or restricted by origin/IP in the Geoapify project. Fix it in Geoapify, set the key again with `dotnet user-secrets set`, restart the AppHost. |
 | AppHost throws `AI:<Capability>:<Key> is required` | That provider's endpoint or model isn't set. Set it as a non-secret user-secret. |
 | Foundry endpoint rejected | Use the bare resource URL. Paths other than `/openai/v1`, and query strings, are rejected (see `docs/configuration.md`). |
 | Foundry chat request rejected for reasoning effort | The deployment doesn't support the configured effort, or isn't a reasoning model. Pick one that the evaluation README shows working. |

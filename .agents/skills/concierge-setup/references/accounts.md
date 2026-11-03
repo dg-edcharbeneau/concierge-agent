@@ -3,7 +3,7 @@
 These steps describe third-party sites, which change their UI on their own
 schedule. If a step doesn't match what the user sees, follow the linked doc.
 
-Setting names don't appear here on purpose. Get them from `check-setup.sh`
+Setting names don't appear here on purpose. Get them from `check-setup.cs`
 output or `src/Concierge.AppHost/AppHost.cs`.
 
 ## Geoapify

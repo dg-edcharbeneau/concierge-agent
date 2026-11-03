@@ -32,15 +32,20 @@ or invoke the skill directly:
 | Codex | `$concierge-setup`, or pick it from `/skills` |
 | GitHub Copilot | Ask to "use the concierge-setup skill"; Copilot selects skills from your prompt |
 
-The agent never handles your keys. When it asks for one, run the command it gives
-you in your own terminal; the key is typed at a hidden prompt:
+The agent never handles your keys. When it asks for one, copy the command it
+gives you, replace `<your-key>` with your key, and run it in your own terminal:
 
 ```bash
-.agents/skills/concierge-setup/scripts/set-secret.sh Parameters:<parameter-name>
+dotnet user-secrets set "Parameters:<parameter-name>" "<your-key>" --project src/Concierge.AppHost
 ```
 
-Without an agent, run `.agents/skills/concierge-setup/scripts/check-setup.sh` to see
-what's missing, and follow the [account steps](.agents/skills/concierge-setup/references/accounts.md)
+Without an agent, run the setup check to see what's missing:
+
+```bash
+dotnet run --file .agents/skills/concierge-setup/scripts/check-setup.cs
+```
+
+Then follow the [account steps](.agents/skills/concierge-setup/references/accounts.md)
 and the sections below.
 
 ## Run locally
