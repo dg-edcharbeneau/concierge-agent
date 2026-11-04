@@ -1,13 +1,13 @@
 # Concierge Agent
 
 A virtual concierge for Hotel ZGY, a fictional hotel in Wynwood, Miami. Built
-with .NET 10, ASP.NET Core, Aspire, Temporal, and Deepgram’s Voice Agent API.
+with .NET 11, ASP.NET Core, Aspire, Temporal, and Deepgram’s Voice Agent API.
 Guests can use text or browser voice to ask about the hotel, check weather,
 find nearby places and more
 
 ## Prerequisites
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+- [.NET 11 SDK](https://dotnet.microsoft.com/download/dotnet/11.0) (11.0.100-rc.3 or later; pinned in `global.json`)
 - [Docker](https://www.docker.com/products/)
 - [just](https://just.systems)
 - [Aspire CLI](https://aspire.dev)
