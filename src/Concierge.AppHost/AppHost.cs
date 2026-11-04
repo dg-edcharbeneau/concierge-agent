@@ -89,6 +89,15 @@ web.WithEnvironment(
     "THINK_PUBLIC_URL",
     thinkTunnel.GetEndpoint(web.GetEndpoint("think")));
 
+// Opt-in: publishes the guest UI and /api/concierge/* for clients that cannot reach localhost,
+// such as phones or hardware on another network. Guest verification (last name + room) is the
+// only gate, so it stays off unless a demo needs it.
+if (bool.TryParse(builder.Configuration["RemoteAccess:PublicTunnel"], out var publicTunnel) && publicTunnel)
+{
+    builder.AddDevTunnel("api-tunnel")
+        .WithReference(web.GetEndpoint("https"), allowAnonymous: true);
+}
+
 builder.Build().Run();
 
 // The provider decides which resources exist, so it is read from configuration while the

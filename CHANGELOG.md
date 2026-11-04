@@ -6,6 +6,7 @@ All notable project changes are documented here.
 
 ### Added
 
+- Opt-in `RemoteAccess:PublicTunnel` AppHost setting. It adds an anonymous `api-tunnel` dev tunnel to Web's HTTPS endpoint, so off-machine clients can reach the guest HTTP API. The setting defaults to off, and the remote-client contract is documented in `docs/configuration.md` under "Remote API clients".
 - **Start over** button in the chat header. After a confirmation step it deletes the signed-in stay's transcript, conversation memory, ride offers, and rides, and keeps the guest signed in. It is backed by `POST /api/concierge/reset`, the `ResetStay` stay-workflow update, and a RideService `POST /stays/{stayId}/rides/purge` endpoint, which terminates the stay's booking workflows and deletes their rows.
 - Independent Foundry/Ollama chat and embedding configuration, plus a 768-dimensional knowledge-embedding migration.
 - Temporal startup setup for fictional guest/stay data and Hotel ZGY Markdown ingestion from `knowledge/hotel-zgy/`.
