@@ -504,6 +504,29 @@ public sealed class ConciergeService(
         }
     }
 
+    /// <inheritdoc/>
+    public async Task ResetAsync(
+        string? bearerCredential,
+        CancellationToken cancellationToken = default)
+    {
+        var session = await AuthenticateAsync(bearerCredential, cancellationToken);
+        RequireVerifiedGuest(session);
+        // A voice turn admitted after the reset would otherwise speak from the cleared context.
+        voiceSessions.EndSession(session.SessionId, VoiceRevocation.Reset);
+        try
+        {
+            var workflow = await GetStayWorkflowAsync(session, cancellationToken);
+            await workflow.ExecuteUpdateAsync(
+                ConciergeWorkflowNames.ResetStayUpdate,
+                [session.VerifiedGuest!],
+                UpdateOptions(cancellationToken));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not ConciergeApiException)
+        {
+            throw MapTemporalFailure(exception, nameof(ResetAsync));
+        }
+    }
+
     private async Task<ConciergeSessionContext> AuthenticateAsync(
         string? bearerCredential,
         CancellationToken cancellationToken)
@@ -785,6 +808,11 @@ public sealed class ConciergeService(
                     "The turn identifier was already used.",
                     StatusCodes.Status409Conflict),
                 ConciergeWorkflowNames.StayExpiredErrorType => Unauthorized(),
+                // Workflow-authored guidance that says which part of the reset did not happen.
+                ConciergeWorkflowNames.ResetIncompleteErrorType => new ConciergeApiException(
+                    "reset_incomplete",
+                    failure.Message,
+                    StatusCodes.Status503ServiceUnavailable),
                 _ => Unavailable(),
             }
             : Unavailable();

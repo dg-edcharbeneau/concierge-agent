@@ -163,6 +163,7 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
             .AddWorkflow<ConciergeStayWorkflow>()
             .AddScopedActivities<HotelKnowledgeActivities>()
             .AddScopedActivities<ConciergeTranscriptActivities>()
+            .AddScopedActivities<ConciergeStayResetActivities>()
             .AddScopedActivities<ConciergeSessionActivities>();
 
         var app = builder.Build();
@@ -515,6 +516,22 @@ internal sealed class ScriptedActionToolBackend : IConciergeActionToolBackend
                 immediate ? null : DateTimeOffset.Parse(pickupAt!),
                 720),
             "About 3.1 mi; around 12 minutes by car.", null, ["Head north."]));
+    }
+
+    public ConcurrentQueue<(Guid GuestId, Guid StayId, DateOnly CheckoutDate)> RidePurges { get; } = new();
+
+    /// <summary>Arranged failures for successive purge attempts before the purge succeeds.</summary>
+    public ConcurrentQueue<Exception> RidePurgeFailures { get; } = new();
+
+    public Task PurgeStayRidesAsync(Guid guestId, Guid stayId, DateOnly checkoutDate, CancellationToken cancellationToken)
+    {
+        if (RidePurgeFailures.TryDequeue(out var failure))
+        {
+            throw failure;
+        }
+
+        RidePurges.Enqueue((guestId, stayId, checkoutDate));
+        return Task.CompletedTask;
     }
 
     public async Task<string> ConfirmRideAsync(

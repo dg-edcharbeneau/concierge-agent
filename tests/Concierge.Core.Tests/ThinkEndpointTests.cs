@@ -596,6 +596,9 @@ public sealed class ThinkEndpointTests : IDisposable
         public Task EndAsync(string? bearerCredential, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
         /// <summary>Not used by the Think handler.</summary>
+        public Task ResetAsync(string? bearerCredential, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        /// <summary>Not used by the Think handler.</summary>
         public Task MarkVoiceTurnInterruptedAsync(
             ConciergeSessionContext session, string turnId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();

@@ -152,6 +152,17 @@ public sealed class ConciergeTranscriptActivities(NpgsqlDataSource dataSource)
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>Deletes a stay's whole persisted transcript for a guest-requested reset. Idempotent.</summary>
+    [Activity(nameof(DeleteForStayAsync))]
+    public async Task DeleteForStayAsync(DeleteStayTranscriptRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        await using var command = dataSource.CreateCommand(
+            "DELETE FROM transcript_turns WHERE stay_id = $1;");
+        command.Parameters.AddWithValue(request.StayId);
+        await command.ExecuteNonQueryAsync(ActivityExecutionContext.Current.CancellationToken);
+    }
+
     private static ConciergeTranscriptTurn ReadTurn(NpgsqlDataReader reader) =>
         new(
             reader.GetString(0),

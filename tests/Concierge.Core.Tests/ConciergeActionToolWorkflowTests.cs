@@ -237,6 +237,51 @@ public sealed class ConciergeActionToolWorkflowTests(PostgreSqlFixture postgreSq
         await ReplayAsync(await handle.FetchHistoryAsync());
     }
 
+    // Reproduces a live stay: a Places-only label ("Street Art, North Miami Avenue") was booked from
+    // a nearby search, then re-offered after the nearby window lapsed. Without the verified endpoint
+    // the label went to the geocoder, which cannot resolve it ("I couldn't identify the destination").
+    [Fact]
+    public async Task ReofferingBookedDestinationAfterNearbyWindowReusesVerifiedCoordinates()
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql);
+        var (stayId, handle) = await StartStayAsync(host);
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "nearby-ride",
+            ConciergeToolDefinitions.FindNearbyPlaces,
+            new Dictionary<string, object?> { ["category"] = "pharmacy", ["forRideProposal"] = true }));
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "propose-pharmacy",
+            ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = "Scripted Pharmacy", ["immediate"] = true }));
+        await SubmitAsync(host, handle, stayId, "propose-pharmacy", "Book me a ride to the nearest pharmacy.");
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "confirm-pharmacy", ConciergeToolDefinitions.ConfirmRide, new Dictionary<string, object?>()));
+        await SubmitAsync(host, handle, stayId, "confirm-pharmacy", "Yes, book it.");
+
+        // Nearby results are retained for six turns after the search turn.
+        for (var turn = 0; turn < 5; turn++)
+        {
+            await SubmitAsync(host, handle, stayId, $"filler-{turn}", $"What time is breakfast? ({turn})");
+        }
+
+        var bookedLabel = "Scripted Pharmacy, Miami Beach, Florida, United States of America";
+        host.ChatClient.ScriptedResponses.Enqueue(ToolCall(
+            "reoffer-pharmacy",
+            ConciergeToolDefinitions.ProposeRide,
+            new Dictionary<string, object?> { ["dropoff"] = bookedLabel, ["immediate"] = true }));
+        var result = await SubmitAsync(
+            host, handle, stayId, "reoffer-pharmacy", "Book another ride to the same pharmacy.");
+
+        var reoffer = host.ActionTools.Calls.Last(call => call.Name == ConciergeToolDefinitions.ProposeRide);
+        Assert.Equal(bookedLabel, reoffer.Arguments["dropoff"]);
+        var trusted = JsonSerializer.Deserialize<ConciergeCanonicalPlace>(
+            reoffer.Arguments[ConciergeToolDefinitions.TrustedDestinationKey]!.ToString()!,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(new ConciergeCanonicalPlace(bookedLabel, null, null, 25.7745, -80.1329), trusted);
+        Assert.Contains("No ride has been booked.", result.AssistantMessage, StringComparison.Ordinal);
+        await ReplayAsync(await handle.FetchHistoryAsync());
+    }
+
     [Fact]
     public async Task RideLookupWithNoNearbyResultsDoesNotRequestAnotherModelRound()
     {

@@ -502,6 +502,86 @@ public sealed class HomeSessionTests
         Assert.Equal("Keep draft", harness.Get<string>("draft"));
     }
 
+    [Fact]
+    public async Task StartOverClearsTheChatAndKeepsTheGuestSignedIn()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        harness.Set("turns", History("before-reset").Turns);
+        harness.Set("draft", "Unsent words");
+
+        await harness.Call("StartOverAsync");
+        Assert.True(harness.Get<bool>("showResetConfirmation"));
+        Assert.Equal(0, harness.Service.ResetCalls);
+
+        await harness.Call("ResetStayAsync");
+
+        Assert.Equal(1, harness.Service.ResetCalls);
+        Assert.Empty(harness.Get<List<ConciergeTranscriptTurn>>("turns"));
+        Assert.Equal(string.Empty, harness.Get<string>("draft"));
+        Assert.Equal("current", harness.Get<ChatSessionState>("session").Credential);
+        Assert.False(harness.Get<bool>("showResetConfirmation"));
+        Assert.False(harness.Get<bool>("isResetting"));
+        Assert.False(harness.Get<bool>("chatEnded"));
+        Assert.Contains("conciergeChat.saveSession", harness.JavaScript.Calls);
+        Assert.DoesNotContain("conciergeChat.clearSession", harness.JavaScript.Calls);
+    }
+
+    [Fact]
+    public async Task FailedStartOverKeepsTheChatAndShowsWhatDidNotHappen()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        harness.Set("turns", History("kept").Turns);
+        const string guidance = "Your rides were removed, but the conversation could not be cleared. Please try Start over again.";
+        harness.Service.Reset = _ => Task.FromException(new ConciergeApiException("reset_incomplete", guidance, 503));
+
+        await harness.Call("StartOverAsync");
+        await harness.Call("ResetStayAsync");
+
+        Assert.Equal(guidance, harness.Get<string>("resetError"));
+        Assert.True(harness.Get<bool>("showResetConfirmation"));
+        Assert.False(harness.Get<bool>("isResetting"));
+        Assert.Equal("kept", Assert.Single(harness.Get<List<ConciergeTranscriptTurn>>("turns")).TurnId);
+
+        await harness.Call("CancelResetStay");
+        Assert.False(harness.Get<bool>("showResetConfirmation"));
+        Assert.Null(harness.Get<string?>("resetError"));
+        Assert.Equal("current", harness.Get<ChatSessionState>("session").Credential);
+    }
+
+    [Fact]
+    public async Task UnauthorizedStartOverMarksTheSessionExpired()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        harness.Service.Reset = _ => Task.FromException(
+            new ConciergeApiException("unauthorized", "Authenticate again to continue.", 401));
+
+        await harness.Call("StartOverAsync");
+        await harness.Call("ResetStayAsync");
+
+        Assert.True(harness.Get<bool>("hasExpired"));
+        Assert.False(harness.Get<bool>("showResetConfirmation"));
+    }
+
+    [Fact]
+    public async Task StartOverInvalidatesOutstandingHistory()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        var response = new TaskCompletionSource<ConciergeHistoryResult>();
+        harness.Service.History = _ => response.Task;
+        var oldRead = harness.Call("LoadHistoryAndReconcileAsync", false);
+
+        await harness.Call("StartOverAsync");
+        await harness.Call("ResetStayAsync");
+        response.SetResult(History("late-turn"));
+        await oldRead;
+
+        Assert.Empty(harness.Get<List<ConciergeTranscriptTurn>>("turns"));
+    }
+
     /// <summary>Offers same-ID recovery after failed End discards an outstanding reply callback.</summary>
     [Theory]
     [InlineData(false, false)]
@@ -597,9 +677,9 @@ public sealed class HomeSessionTests
             .Where(element => element.Tag == "button")
             .ToArray();
 
-        Assert.Equal(4, controls.Length);
+        Assert.Equal(5, controls.Length);
         Assert.Equal(
-            ["Activity", "Mute microphone", "End voice", "End chat"],
+            ["Activity", "Mute microphone", "End voice", "Start over", "End chat"],
             controls.Select(element => element.Attributes.GetValueOrDefault("aria-label")));
         Assert.Equal("ride-activity-panel", controls[0].Attributes.GetValueOrDefault("aria-controls"));
         // The visible label switches Mute/Unmute, so the name carries state; aria-pressed would double it.
@@ -694,8 +774,15 @@ public sealed class HomeSessionTests
         var endVoice = Assert.Single(elements, element =>
             element.Tag == "button"
             && Equals(element.Attributes.GetValueOrDefault("aria-label"), "End voice"));
+        var startOver = Assert.Single(elements, element =>
+            element.Tag == "button"
+            && Equals(element.Attributes.GetValueOrDefault("aria-label"), "Start over"));
         Assert.True(endVoice.Index < endChat.Index);
-        Assert.Equal(endChat.Index, endVoice.EndIndex);
+        Assert.Equal(startOver.Index, endVoice.EndIndex);
+        // Start over sits directly between End voice and End chat among the toolbar's children.
+        var siblings = elements.Where(element => element.ParentIndex == controls.Index).ToList();
+        Assert.Equal(siblings.IndexOf(startOver) + 1, siblings.IndexOf(endChat));
+        Assert.Equal(controls.Index, startOver.ParentIndex);
         Assert.Equal(header.Index, headerActions.ParentIndex);
         Assert.Equal(headerActions.Index, controls.ParentIndex);
         Assert.Equal(controls.Index, endVoice.ParentIndex);
@@ -833,9 +920,9 @@ public sealed class HomeSessionTests
             .Where(element => element.Tag == "button")
             .ToArray();
 
-        Assert.Equal(4, controls.Length);
+        Assert.Equal(5, controls.Length);
         Assert.Equal(
-            ["Activity", action, "End voice", "End chat"],
+            ["Activity", action, "End voice", "Start over", "End chat"],
             controls.Select(element => element.Attributes.GetValueOrDefault("aria-label")));
         Assert.Equal("ride-activity-panel", controls[0].Attributes.GetValueOrDefault("aria-controls"));
         Assert.DoesNotContain(controls, element => Equals(element.Attributes.GetValueOrDefault("aria-label"), "Mute microphone"));
@@ -1602,6 +1689,14 @@ public sealed class HomeSessionTests
         }
         /// <summary>Completes the interaction without external services.</summary>
         public Task EndAsync(string? bearerCredential, CancellationToken cancellationToken = default) => End(bearerCredential);
+        public Func<string?, Task> Reset { get; set; } = _ => Task.CompletedTask;
+        public int ResetCalls { get; private set; }
+        /// <summary>Counts reset requests and returns the arranged task.</summary>
+        public Task ResetAsync(string? bearerCredential, CancellationToken cancellationToken = default)
+        {
+            ResetCalls++;
+            return Reset(bearerCredential);
+        }
         /// <summary>Voice is outside these component tests.</summary>
         public Task<ConciergeVoiceAuthorization> AuthorizeVoiceAsync(string? bearerCredential, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();

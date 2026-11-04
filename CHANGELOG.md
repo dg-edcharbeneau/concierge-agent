@@ -6,6 +6,7 @@ All notable project changes are documented here.
 
 ### Added
 
+- **Start over** button in the chat header. After a confirmation step it deletes the signed-in stay's transcript, conversation memory, ride offers, and rides, and keeps the guest signed in. It is backed by `POST /api/concierge/reset`, the `ResetStay` stay-workflow update, and a RideService `POST /stays/{stayId}/rides/purge` endpoint, which terminates the stay's booking workflows and deletes their rows.
 - Independent Foundry/Ollama chat and embedding configuration, plus a 768-dimensional knowledge-embedding migration.
 - Temporal startup setup for fictional guest/stay data and Hotel ZGY Markdown ingestion from `knowledge/hotel-zgy/`.
 - Hotel ZGY evaluation package (`tests/Concierge.Evaluation/`) with a validator, negative tests, and a hashed corpus snapshot.
@@ -20,6 +21,9 @@ All notable project changes are documented here.
 
 ### Fixed
 
+- Voice no longer drops the final "Y" of "Hotel ZGY." at the end of a sentence. Aura-2 TTS (`aura-2-thalia-en` and `aura-2-andromeda-en`) cuts off the last phoneme when its text ends in "ZGY", and the Voice Agent synthesizes speech a sentence at a time. Flux `flux-hannah-en`, now the default (see Changed), renders it completely. Setting `Deepgram:SpeakModel` back to Aura brings the clipping back.
+- Long voice replies no longer turn jittery or make the voice state flip between speaking and listening. The relay sent only one 20 ms frame per browser playback acknowledgement, but the worklet acknowledges every 512 samples. So once Deepgram had delivered a reply, the 380 ms playback lead shrank by 32 samples per acknowledgement and ran dry after about 6 s of speech. The sender now sends every frame the lead allows before it waits.
+- Re-offering a ride to a destination chosen from nearby places no longer fails with "I couldn't identify the destination" once the six-turn nearby window has lapsed. If no retained place matches, `ProposeRide` now reuses the route-verified drop-off coordinates of the open or last confirmed ride offer when the destination text exactly matches that offer's label. Places-only labels such as "Street Art, North Miami Avenue" cannot be geocoded.
 - Setup seeding rejects a configured stay whose `stay_id`/`external_stay_key` pair differs from the persisted pair. It fails with a non-retryable `StayIdentityMismatch` and rolls back instead of silently keeping the old UUID or retrying a primary-key violation.
 - Corrected stale setup/provider/schema implementation status. The live setup evidence is an idempotent re-run against persisted state, not a clean initial ingest.
 - Kept evaluation-package human review, corpus-absence confirmation, activation, Foundry live-call validation, retrieval comparisons, and retrieval-quality results explicitly pending.

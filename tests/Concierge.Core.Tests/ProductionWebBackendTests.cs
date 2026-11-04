@@ -398,10 +398,11 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         Assert.Empty(replayLogs.Entries);
     }
 
-    /// <summary>Both HTTP fallback handlers redact unexpected failures from replacement service implementations.</summary>
+    /// <summary>The HTTP fallback handlers redact unexpected failures from replacement service implementations.</summary>
     [Theory]
     [InlineData("/api/concierge/history", "ReadHistoryAsync")]
     [InlineData("/api/concierge/end", "EndAsync")]
+    [InlineData("/api/concierge/reset", "ResetAsync")]
     public async Task EndpointFallbackLogsOnlyOperationAndCauseTypes(string path, string operation)
     {
         var logs = new ServiceLogProvider();
@@ -416,7 +417,7 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         });
         using var http = factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "PrivateCredential");
-        var response = path.EndsWith("/end", StringComparison.Ordinal)
+        var response = path.EndsWith("/end", StringComparison.Ordinal) || path.EndsWith("/reset", StringComparison.Ordinal)
             ? await http.PostAsync(path, null)
             : await http.GetAsync(path);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
@@ -460,6 +461,9 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
             string? bearerCredential, long snapshotOffset, CancellationToken cancellationToken = default) => throw Failure();
         /// <inheritdoc/>
         public Task EndAsync(
+            string? bearerCredential, CancellationToken cancellationToken = default) => throw Failure();
+        /// <inheritdoc/>
+        public Task ResetAsync(
             string? bearerCredential, CancellationToken cancellationToken = default) => throw Failure();
         /// <inheritdoc/>
         public Task<ConciergeVoiceAuthorization> AuthorizeVoiceAsync(

@@ -59,6 +59,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private bool chatEnded => model.ChatEnded;
     private string? turnError => model.TurnError;
     private string? endError => model.EndError;
+    private bool showResetConfirmation => model.ShowResetConfirmation;
+    private bool isResetting => model.IsResetting;
+    private string? resetError => model.ResetError;
     private int sessionVersion => model.Version;
     private string lastName = string.Empty;
     private string roomNumber = string.Empty;
@@ -116,11 +119,11 @@ public partial class Home : ComponentBase, IAsyncDisposable
     };
 
     private bool TranscriptVisible =>
-        ready && session?.Credential is not null && !showEndConfirmation && !chatEnded;
+        ready && session?.Credential is not null && !showEndConfirmation && !showResetConfirmation && !chatEnded;
 
     /// <summary>Keeps the header control group identical outside the voice chat, including the end-of-chat views.</summary>
     private string HeaderControlsClass =>
-        voiceMode && !showEndConfirmation && !chatEnded
+        voiceMode && !showEndConfirmation && !showResetConfirmation && !chatEnded
             ? "voice-header-controls has-voice-mode"
             : "voice-header-controls";
 
@@ -444,6 +447,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
         && !hasExpired
         && !isEnding
         && !showEndConfirmation
+        && !isResetting
+        && !showResetConfirmation
         && session?.Credential is not null;
 
     private async Task StartTurnAsync(string message, bool clearDraft)
@@ -730,6 +735,90 @@ public partial class Home : ComponentBase, IAsyncDisposable
                 }
 
                 if (!chatEnded && !hasExpired && session?.Credential is { } activeCredential)
+                {
+                    await StartRideActivityFeedAsync(currentVersion, activeCredential);
+                }
+            }
+        }
+    }
+
+    private async Task StartOverAsync()
+    {
+        if (session?.Credential is null || isResetting || isEnding)
+        {
+            return;
+        }
+
+        // Nothing should keep listening or streaming behind the confirmation dialog.
+        CloseActivity();
+        await StopRideActivityFeedAsync();
+        await StopVoiceAsync("Voice stopped.");
+        voiceMode = false;
+        voiceSessionId = null;
+        StopWatchingVoiceRelay();
+        model = model.RequestResetConfirmation();
+    }
+
+    private async Task CancelResetStay()
+    {
+        model = model.CancelReset();
+        if (!hasExpired && session?.Credential is { } credential)
+        {
+            await StartRideActivityFeedAsync(sessionVersion, credential);
+        }
+    }
+
+    private async Task ResetStayAsync()
+    {
+        if (session?.Credential is null || isResetting)
+        {
+            return;
+        }
+
+        model = model.BeginReset();
+        var currentVersion = sessionVersion;
+        var credential = session.Credential;
+        isWorking = false;
+        StateHasChanged();
+        try
+        {
+            await Concierge.ResetAsync(credential);
+            if (!IsCurrentSession(currentVersion)) return;
+            await ResetRideActivityAsync();
+            voicePendingTranscripts.Clear();
+            model = model.CompleteReset();
+            suggestionsExpanded = false;
+            await PersistSessionAsync();
+        }
+        catch (ConciergeApiException exception)
+        {
+            if (!IsCurrentSession(currentVersion)) return;
+            if (IsUnauthorized(exception))
+            {
+                model = model.CancelReset();
+                await MarkExpiredAsync();
+                return;
+            }
+
+            model = model.ResetFailed(ApiMessage(exception, "The stay could not be reset. Please try again."));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            if (!IsCurrentSession(currentVersion)) return;
+            model = model.ResetFailed("The stay could not be reset because the concierge service is unavailable.");
+        }
+        finally
+        {
+            if (IsCurrentSession(currentVersion))
+            {
+                if (isResetting)
+                {
+                    model = model.FinishResetAttempt();
+                }
+
+                // After success the dialog is gone and the feed resumes from the reset stream;
+                // after a failure it resumes once the guest chooses Keep chatting.
+                if (!showResetConfirmation && !hasExpired && session?.Credential is { } activeCredential)
                 {
                     await StartRideActivityFeedAsync(currentVersion, activeCredential);
                 }

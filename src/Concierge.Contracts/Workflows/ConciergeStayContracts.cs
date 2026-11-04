@@ -182,3 +182,7 @@ public sealed record FindTranscriptTurnRequest(Guid StayId, string TurnId);
 public sealed record MarkTranscriptTurnInterruptedRequest(Guid StayId, string TurnId);
 
 public sealed record MarkTranscriptTurnSupersededRequest(Guid StayId, string TurnId);
+
+public sealed record DeleteStayTranscriptRequest(Guid StayId);
+
+public sealed record PurgeStayRidesRequest(Guid GuestId, Guid StayId, DateOnly CheckoutDate);

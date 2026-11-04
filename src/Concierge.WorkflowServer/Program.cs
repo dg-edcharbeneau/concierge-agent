@@ -104,6 +104,7 @@ builder.Services.AddHostedTemporalWorker(TemporalWorkerConnection.TaskQueue)
     .AddWorkflow<ConciergeStayWorkflow>()
     .AddWorkflow<HotelSetupWorkflow>()
     .AddScopedActivities<ConciergeTranscriptActivities>()
+    .AddScopedActivities<ConciergeStayResetActivities>()
     .AddScopedActivities<HotelKnowledgeActivities>()
     // Session activities run as Standalone Activities started directly by Web.
     .AddScopedActivities<ConciergeSessionActivities>()

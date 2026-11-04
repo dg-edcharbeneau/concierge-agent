@@ -907,7 +907,9 @@ public sealed class ConciergeStayWorkflow
                 placeClarification = ConciergePlaceContinuity.Current(placeClarification, Workflow.UtcNow, nextSequence, 2);
                 var destination = callArguments["dropoff"]!.ToString()!;
                 if (!ConciergePlaceContinuity.TrySelect(destination,
-                        nearbyPlaces, placeClarification, out selectedDestination))
+                        nearbyPlaces, placeClarification,
+                        [pendingRideProposal?.Dropoff, consumedRideOffer?.Dropoff],
+                        out selectedDestination))
                 {
                     return new(ConciergePlaceContinuity.Clarify, null);
                 }
@@ -1909,6 +1911,132 @@ public sealed class ConciergeStayWorkflow
                 errorType: UnavailableErrorType,
                 nonRetryable: true);
         }
+    }
+
+    [WorkflowUpdateValidator(nameof(ResetStayAsync))]
+    public void ValidateResetStay(ConciergeVerifiedGuest guest)
+    {
+        ArgumentNullException.ThrowIfNull(guest);
+        if (guest.StayId != stayId || guest.GuestId == Guid.Empty || guest.CheckoutDate == default)
+        {
+            throw new ArgumentException(
+                "A stay reset requires this stay's verified guest; the guest must sign in again.",
+                nameof(guest));
+        }
+    }
+
+    /// <summary>
+    /// Guest-requested start-over: removes the stay's rides and transcript and clears every piece of
+    /// conversation state. It takes a turn arrival slot, so earlier turns finish (and are then deleted)
+    /// and later turns start from the empty state. Rides go first so their booking workflows stop
+    /// publishing before the stream is cut; if that fails nothing has been reset.
+    /// </summary>
+    [WorkflowUpdate(ConciergeWorkflowNames.ResetStayUpdate)]
+    public async Task ResetStayAsync(ConciergeVerifiedGuest guest)
+    {
+        var arrival = nextArrival++;
+        await Workflow.WaitConditionAsync(() => arrival == nextToProcess);
+        try
+        {
+            await Workflow.WaitConditionAsync(() => !flushInProgress);
+            flushInProgress = true;
+            try
+            {
+                try
+                {
+                    await Workflow.ExecuteActivityAsync(
+                        (ConciergeStayResetActivities activities) => activities.PurgeRidesAsync(
+                            new PurgeStayRidesRequest(guest.GuestId, stayId, guest.CheckoutDate)),
+                        RideResetActivityOptions);
+                }
+                catch (ActivityFailureException)
+                {
+                    throw new ApplicationFailureException(
+                        "Your rides could not be removed, so nothing was reset. Please try Start over again.",
+                        errorType: ConciergeWorkflowNames.ResetIncompleteErrorType,
+                        nonRetryable: true);
+                }
+
+                pendingPersistence.Clear();
+                try
+                {
+                    // Commit the delete before rewinding the sequence: leftover rows would collide
+                    // with the restarted sequence numbers on the next flush.
+                    await Workflow.ExecuteActivityAsync(
+                        (ConciergeTranscriptActivities activities) =>
+                            activities.DeleteForStayAsync(new DeleteStayTranscriptRequest(stayId)),
+                        TranscriptActivityOptions);
+                }
+                catch (ActivityFailureException)
+                {
+                    throw new ApplicationFailureException(
+                        "Your rides were removed, but the conversation could not be cleared. Please try Start over again.",
+                        errorType: ConciergeWorkflowNames.ResetIncompleteErrorType,
+                        nonRetryable: true);
+                }
+
+                ClearConversationState();
+            }
+            finally
+            {
+                flushInProgress = false;
+            }
+        }
+        finally
+        {
+            nextToProcess++;
+        }
+    }
+
+    private static readonly ActivityOptions RideResetActivityOptions = new()
+    {
+        // Above the ride client's total request budget, so one attempt is never cut short.
+        StartToCloseTimeout = ConciergeActionToolService.RideClientTimeout + TimeSpan.FromSeconds(5),
+        RetryPolicy = new RetryPolicy
+        {
+            InitialInterval = TimeSpan.FromSeconds(1),
+            MaximumInterval = TimeSpan.FromSeconds(5),
+            BackoffCoefficient = 2,
+            MaximumAttempts = 3,
+        },
+    };
+
+    private void ClearConversationState()
+    {
+        runTurns.Clear();
+        recentTurns.Clear();
+        stayMemory.Clear();
+        acceptedTurns.Clear();
+        // Turns queued behind the reset already registered their attempt and voice revision;
+        // keep those so they still run, now against the empty state.
+        foreach (var finished in admittedTurns.Where(entry => entry.Value.Finished).Select(entry => entry.Key).ToArray())
+        {
+            admittedTurns.Remove(finished);
+        }
+        foreach (var family in voiceRevisions.Values
+                     .Where(revision => !admittedTurns.ContainsKey(revision.LatestTurnId))
+                     .Select(revision => revision.Family).ToArray())
+        {
+            voiceRevisions.Remove(family);
+        }
+        voiceRevisionCheckpoint = null;
+        pendingRideProposal = null;
+        pendingRideCancellationProposal = null;
+        lastConfirmedCancellation = null;
+        consumedRideOffer = null;
+        consumedRideOfferSequence = -1;
+        consumedRideOfferSpokenRequestKey = null;
+        consumedRideConfirmationOutcome = null;
+        nearbyPlaces = null;
+        placeClarification = null;
+        nextSequence = 0;
+        hasEarlierRuns = false;
+
+        // Offsets only move forward so subscribers' retained-window checks stay valid.
+        var streamState = rideStream.GetState();
+        var endOffset = streamState.BaseOffset + streamState.Log.Count;
+        rideStream.Truncate(endOffset);
+        rideReadOffset = endOffset;
     }
 
     internal static string Fingerprint(string channel, string userMessage, bool enableEndChatFunction = false) =>

@@ -121,6 +121,9 @@ aspire stop --non-interactive --apphost src/Concierge.AppHost/Concierge.AppHost.
 
 Startup prepares the database, demo stays, and Markdown knowledge base.
 
+To restart one guest's demo, use **Start over** in the chat header. It deletes that stay's
+conversation and rides and keeps you checked in. Use `just reset` only to wipe every stay.
+
 #### Demo guest check-in information
 
 These are seeded demo stays. Use any row's last name and room number to verify
