@@ -152,7 +152,7 @@ Commonly changed settings:
 | `AI:Chat:Provider` / `AI:Embeddings:Provider` | `Ollama` | `Ollama` or `Foundry`. |
 | `Hotel:Address` | `2217 NW Miami Court, Miami, FL 33127` | Anchor for weather, routes, and rides. |
 | `Deepgram:ListenModel` | `flux-general-en` | Speech-to-text model. |
-| `Deepgram:SpeakModel` | `aura-2-thalia-en` | Text-to-speech voice. |
+| `Deepgram:SpeakModel` | `flux-hannah-en` | Text-to-speech voice. |
 | `Deepgram:Speed` | `1.0` | Speech rate. |
 
 ### Use Foundry
