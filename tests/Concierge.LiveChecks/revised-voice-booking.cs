@@ -1,7 +1,6 @@
 #:project ../../src/Concierge.WorkflowServer/Concierge.WorkflowServer.csproj
 #:project ../../src/Concierge.RideService/Concierge.RideService.csproj
 #:project ../../src/Concierge.Web/Concierge.Web.csproj
-#:property NoWarn=$(NoWarn);CS9057
 #:property JsonSerializerIsReflectionEnabledByDefault=true
 #:property PublishAot=false
 #:property AssemblyName=Concierge.Core.Tests

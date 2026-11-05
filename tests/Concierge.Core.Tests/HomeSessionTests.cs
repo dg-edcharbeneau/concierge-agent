@@ -184,6 +184,61 @@ public sealed class HomeSessionTests
         Assert.True(harness.Get<bool>("chatEndedForInactivity"));
     }
 
+    [Fact]
+    public async Task CircuitLossDuringFirstRenderStopsWithoutFaulting()
+    {
+        await using var harness = new Harness();
+        harness.Set("ready", false);
+        harness.JavaScript.Disconnected.Add("conciergeChat.loadSession");
+
+        await harness.Call("OnAfterRenderAsync", true);
+
+        Assert.False(harness.Get<bool>("ready"));
+        Assert.DoesNotContain("conciergeChat.clearSession", harness.JavaScript.Calls);
+    }
+
+    [Fact]
+    public async Task CircuitLossWhileStoppingVoiceStillEndsTheChat()
+    {
+        await using var harness = new Harness();
+        harness.SetSession("current", Guid.NewGuid());
+        harness.Set("voiceMode", true);
+        harness.JavaScript.Disconnected.Add("conciergeVoice.stop");
+        var endCalls = 0;
+        harness.Service.End = _ =>
+        {
+            endCalls++;
+            return Task.CompletedTask;
+        };
+
+        await harness.Call("EndChatAsync");
+
+        Assert.Equal(1, endCalls);
+        Assert.True(harness.Get<bool>("chatEnded"));
+        Assert.Equal("disconnected", harness.Get<string>("voiceState"));
+    }
+
+    [Fact]
+    public async Task CircuitLossWhileMutingKeepsTheLastKnownMuteState()
+    {
+        await using var harness = new Harness();
+        harness.Set("voiceMuted", true);
+        harness.JavaScript.Disconnected.Add("conciergeVoice.setMuted");
+
+        await harness.Call("ToggleVoiceMuteAsync");
+
+        Assert.True(harness.Get<bool>("voiceMuted"));
+    }
+
+    [Fact]
+    public async Task ScriptFailuresStillPropagate()
+    {
+        await using var harness = new Harness();
+        harness.JavaScript.Failures["conciergeChat.loadTheme"] = new JSException("loadTheme failed");
+
+        await Assert.ThrowsAsync<JSException>(() => harness.Call("OnAfterRenderAsync", true));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1627,13 +1682,34 @@ public sealed class HomeSessionTests
     private sealed class FakeJavaScript : IJSRuntime
     {
         public List<string> Calls { get; } = [];
+        /// <summary>Identifiers that throw as if the Blazor Server circuit dropped mid-call.</summary>
+        public HashSet<string> Disconnected { get; } = new(StringComparer.Ordinal);
+        /// <summary>Identifiers that throw the given exception, e.g. a JSException from a script defect.</summary>
+        public Dictionary<string, Exception> Failures { get; } = new(StringComparer.Ordinal);
+        // BL0016 treats every member call on an IJSRuntime implementation as browser interop, including
+        // this fake's own helper. Nothing here crosses a circuit, so there is nothing to guard.
+#pragma warning disable BL0016
         /// <summary>Records browser interop with default cancellation.</summary>
         public ValueTask<TValue> InvokeAsync<TValue>(string identifier, object?[]? args) =>
-            InvokeAsync<TValue>(identifier, CancellationToken.None, args);
+            Respond<TValue>(identifier);
         /// <summary>Records browser interop and returns a deterministic scroll position.</summary>
-        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, CancellationToken cancellationToken, object?[]? args)
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, CancellationToken cancellationToken, object?[]? args) =>
+            Respond<TValue>(identifier);
+#pragma warning restore BL0016
+
+        private ValueTask<TValue> Respond<TValue>(string identifier)
         {
             Calls.Add(identifier);
+            if (Disconnected.Contains(identifier))
+            {
+                return ValueTask.FromException<TValue>(new JSDisconnectedException("Circuit disconnected."));
+            }
+
+            if (Failures.TryGetValue(identifier, out var failure))
+            {
+                return ValueTask.FromException<TValue>(failure);
+            }
+
             return ValueTask.FromResult(identifier == "conciergeChat.isNearBottom" ? (TValue)(object)true : default!);
         }
     }

@@ -173,19 +173,20 @@ public partial class Home : ComponentBase, IAsyncDisposable
         var currentVersion = sessionVersion;
         if (firstRender)
         {
-            theme = await JavaScript.InvokeAsync<string>("conciergeChat.loadTheme");
-            if (!IsCurrentSession(currentVersion)) return;
-            await JavaScript.InvokeVoidAsync("conciergeChat.applyTheme", theme);
-            if (!IsCurrentSession(currentVersion)) return;
-            var storedSession = await JavaScript.InvokeAsync<ChatSessionState?>("conciergeChat.loadSession");
-            if (!IsCurrentSession(currentVersion)) return;
+            var (themeLoaded, storedTheme) = await TryInvokeAsync<string>("conciergeChat.loadTheme");
+            if (!themeLoaded || !IsCurrentSession(currentVersion)) return;
+            theme = storedTheme!;
+            if (!await TryInvokeVoidAsync("conciergeChat.applyTheme", theme)
+                || !IsCurrentSession(currentVersion)) return;
+            var (sessionLoaded, storedSession) = await TryInvokeAsync<ChatSessionState?>("conciergeChat.loadSession");
+            if (!sessionLoaded || !IsCurrentSession(currentVersion)) return;
             model = model.Restore(storedSession, DateTimeOffset.UtcNow);
             if (storedSession is not null)
             {
                 if (string.IsNullOrWhiteSpace(storedSession.Credential))
                 {
-                    await JavaScript.InvokeVoidAsync("conciergeChat.clearSession");
-                    if (!IsCurrentSession(currentVersion)) return;
+                    if (!await TryInvokeVoidAsync("conciergeChat.clearSession")
+                        || !IsCurrentSession(currentVersion)) return;
                 }
             }
 
@@ -206,7 +207,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             if (wiredCredential is not null)
             {
                 wiredCredential = null;
-                await JavaScript.InvokeVoidAsync("conciergeChat.unwireTranscript");
+                await TryInvokeVoidAsync("conciergeChat.unwireTranscript");
             }
             return;
         }
@@ -214,8 +215,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
         if (scrollAfterRender)
         {
             scrollAfterRender = false;
-            await JavaScript.InvokeVoidAsync("conciergeChat.scrollToBottom", transcriptElement);
-            if (!IsCurrentSession(currentVersion) || !TranscriptVisible) return;
+            if (!await TryInvokeVoidAsync("conciergeChat.scrollToBottom", transcriptElement)
+                || !IsCurrentSession(currentVersion) || !TranscriptVisible) return;
             showNewMessage = false;
             transcriptNearBottom = true;
         }
@@ -226,7 +227,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
             scrollReference ??= DotNetObjectReference.Create(this);
             wiredCredential = session!.Credential;
             wiredVersion = currentVersion;
-            await JavaScript.InvokeVoidAsync(
+            await TryInvokeVoidAsync(
                 "conciergeChat.wireTranscript",
                 transcriptElement,
                 scrollReference,
@@ -237,7 +238,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private async Task ChangeThemeAsync(ChangeEventArgs args)
     {
         theme = args.Value?.ToString() is "light" or "dark" ? args.Value!.ToString()! : "system";
-        await JavaScript.InvokeVoidAsync("conciergeChat.applyTheme", theme);
+        await TryInvokeVoidAsync("conciergeChat.applyTheme", theme);
     }
 
     private async Task VerifyAsync()
@@ -460,10 +461,10 @@ public partial class Home : ComponentBase, IAsyncDisposable
             return;
         }
 
-        var nearBottom = await JavaScript.InvokeAsync<bool>(
+        var (connected, nearBottom) = await TryInvokeAsync<bool>(
             "conciergeChat.isNearBottom",
             transcriptElement);
-        if (!IsCurrentSession(currentVersion) || !CanSend) return;
+        if (!connected || !IsCurrentSession(currentVersion) || !CanSend) return;
         transcriptNearBottom = nearBottom;
 
         model = model.StartTurn(new PendingTurnState(
@@ -564,7 +565,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
         if (voiceMode)
         {
             // An expired credential must not leave the microphone open; the server revokes the bearer on close.
-            _ = JavaScript.InvokeVoidAsync("conciergeVoice.stop").AsTask().ContinueWith(
+            _ = TryInvokeVoidAsync("conciergeVoice.stop").ContinueWith(
                 static task => _ = task.Exception, TaskContinuationOptions.OnlyOnFaulted);
         }
 
@@ -586,7 +587,6 @@ public partial class Home : ComponentBase, IAsyncDisposable
         verificationError = null;
         isWorking = false;
         isVerifying = false;
-        StateHasChanged();
     }
 
     private async Task VerifyStayAgain()
@@ -614,10 +614,41 @@ public partial class Home : ComponentBase, IAsyncDisposable
         await PersistSessionAsync();
     }
 
+    // A lost circuit has no browser storage left to write; callers continue their server-side work.
     private Task PersistSessionAsync() =>
         session is null
             ? Task.CompletedTask
-            : JavaScript.InvokeVoidAsync("conciergeChat.saveSession", session).AsTask();
+            : TryInvokeVoidAsync("conciergeChat.saveSession", session);
+
+    // Blazor Server drops the circuit when the tab closes or the network blips, and any JS call in
+    // flight then throws JSDisconnectedException. There is no browser left to update, so callers get
+    // false and decide whether to stop or finish their server-side work instead of faulting the
+    // circuit. JSException and interop timeouts still propagate: those are defects, not disconnects.
+    private async Task<bool> TryInvokeVoidAsync(string identifier, params object?[]? args)
+    {
+        try
+        {
+            await JavaScript.InvokeVoidAsync(identifier, args);
+            return true;
+        }
+        catch (JSDisconnectedException)
+        {
+            return false;
+        }
+    }
+
+    /// <inheritdoc cref="TryInvokeVoidAsync"/>
+    private async Task<(bool Connected, T? Value)> TryInvokeAsync<T>(string identifier, params object?[]? args)
+    {
+        try
+        {
+            return (true, await JavaScript.InvokeAsync<T>(identifier, args));
+        }
+        catch (JSDisconnectedException)
+        {
+            return (false, default);
+        }
+    }
 
     private async Task EndChatAsync()
     {
@@ -779,7 +810,6 @@ public partial class Home : ComponentBase, IAsyncDisposable
         var currentVersion = sessionVersion;
         var credential = session.Credential;
         isWorking = false;
-        StateHasChanged();
         try
         {
             await Concierge.ResetAsync(credential);
@@ -841,7 +871,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
         lastName = string.Empty;
         roomNumber = string.Empty;
         isWorking = false;
-        await JavaScript.InvokeVoidAsync("conciergeChat.clearSession");
+        await TryInvokeVoidAsync("conciergeChat.clearSession");
     }
 
     private bool CanStartVoice => CanSend && !voiceMode;
@@ -888,14 +918,15 @@ public partial class Home : ComponentBase, IAsyncDisposable
         StopWatchingVoiceRelay();
         voiceState = "connecting";
         voiceMessage = null;
-        await JavaScript.InvokeVoidAsync("conciergeVoice.start", session.Credential, voiceSessionId, voiceReference);
+        await TryInvokeVoidAsync("conciergeVoice.start", session.Credential, voiceSessionId, voiceReference);
     }
 
-    private Task ResumeVoiceAsync() => JavaScript.InvokeVoidAsync("conciergeVoice.resume").AsTask();
+    private Task ResumeVoiceAsync() => TryInvokeVoidAsync("conciergeVoice.resume");
 
     private async Task ToggleVoiceMuteAsync()
     {
-        voiceMuted = await JavaScript.InvokeAsync<bool>("conciergeVoice.setMuted", !voiceMuted);
+        var (connected, muted) = await TryInvokeAsync<bool>("conciergeVoice.setMuted", !voiceMuted);
+        if (connected) voiceMuted = muted;
     }
 
     private async Task StopVoiceAsync(string? message)
@@ -908,7 +939,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
         voiceMuted = false;
         StopWatchingVoiceRelay();
-        await JavaScript.InvokeVoidAsync("conciergeVoice.stop");
+        // A lost circuit already closed the page's voice socket; callers such as EndChatAsync still
+        // need the local state cleared so they can finish ending the chat server-side.
+        await TryInvokeVoidAsync("conciergeVoice.stop");
         voiceState = "disconnected";
         voiceMessage = message;
     }
@@ -1515,8 +1548,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
             return;
         }
 
-        await JavaScript.InvokeVoidAsync("conciergeChat.scrollToBottom", transcriptElement);
-        if (!IsCurrentSession(currentVersion) || !TranscriptVisible) return;
+        if (!await TryInvokeVoidAsync("conciergeChat.scrollToBottom", transcriptElement)
+            || !IsCurrentSession(currentVersion) || !TranscriptVisible) return;
         showNewMessage = false;
         transcriptNearBottom = true;
     }
