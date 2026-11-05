@@ -250,6 +250,11 @@ The tunnel exposes the guest UI and the guest HTTP API:
 - **Sessions per stay.** Each verification creates a separate session for the
   same stay workflow. A browser and another client can run side by side and
   share the stay's memory and rides.
+- **Live transcript.** A turn another session adds to the stay, through the
+  API, another tab or browser voice, appears on open guest pages for that stay
+  without a reload. A reset from another session clears them. This is
+  in-process, so it only works while every client goes through the same Web
+  instance, which is how the app runs.
 
 Errors are `{code, message}`. The codes are `invalid_request` (400),
 `unauthorized` (401), `guest_not_found` (404), `turn_conflict` (409) and

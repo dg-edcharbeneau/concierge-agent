@@ -6,6 +6,7 @@ All notable project changes are documented here.
 
 ### Added
 
+- The "Your stay conversation" page updates live when another session adds a turn to the same stay, for example a room device using `POST /api/concierge/turns` or a second browser tab, and empties when another session uses Start over. `ConciergeService` raises an in-process `StayTranscriptNotifier` event after the stay workflow accepts a turn, interrupt or reset. Pages then re-read history in the background, without touching the busy state, a visible error, suggestions or scroll position unless the transcript changed.
 - Opt-in `RemoteAccess:PublicTunnel` AppHost setting. It adds an anonymous `api-tunnel` dev tunnel to Web's HTTPS endpoint, so off-machine clients can reach the guest HTTP API. The setting defaults to off, and the remote-client contract is documented in `docs/configuration.md` under "Remote API clients".
 - **Start over** button in the chat header. After a confirmation step it deletes the signed-in stay's transcript, conversation memory, ride offers, and rides, and keeps the guest signed in. It is backed by `POST /api/concierge/reset`, the `ResetStay` stay-workflow update, and a RideService `POST /stays/{stayId}/rides/purge` endpoint, which terminates the stay's booking workflows and deletes their rows.
 - Independent Foundry/Ollama chat and embedding configuration, plus a 768-dimensional knowledge-embedding migration.

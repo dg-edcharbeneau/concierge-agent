@@ -41,6 +41,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
     [Inject]
     private VoiceSessionRegistry VoiceSessions { get; set; } = default!;
 
+    [Inject]
+    private StayTranscriptNotifier TranscriptNotifier { get; set; } = default!;
+
     private ChatSessionModel model = ChatSessionModel.Initial;
     private ElementReference transcriptElement;
     private DotNetObjectReference<Home>? scrollReference;
@@ -95,6 +98,20 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private IDisposable? voiceTurnSubscription;
     private readonly Dictionary<string, VoiceTurnProgress> voicePendingTranscripts = new(StringComparer.Ordinal);
     private HistoryRefreshBatch? historyRefreshBatch;
+    // Turns another client adds to this stay (another tab, a room device) arrive through this.
+    private IDisposable? transcriptSubscription;
+    private int transcriptSubscriptionVersion = -1;
+    private BackgroundHistoryRefresh? backgroundHistoryRefresh;
+    // Read tickets, so a slow background read cannot replace a newer history already shown.
+    private long historyReadsStarted;
+    private long historyReadApplied;
+
+    private sealed class BackgroundHistoryRefresh(int sessionVersion)
+    {
+        public int SessionVersion { get; } = sessionVersion;
+        public bool Requested { get; set; } = true;
+        public Task? RefreshTask { get; set; }
+    }
 
     private sealed class HistoryRefreshBatch(int sessionVersion, bool replayPending)
     {
@@ -366,10 +383,12 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
         isWorking = pending is not null;
         model = model.SetTurnError(null);
+        var ticket = ++historyReadsStarted;
         try
         {
             var history = await Concierge.ReadHistoryAsync(credential);
             if (!IsCurrentSession(currentVersion)) return false;
+            historyReadApplied = Math.Max(historyReadApplied, ticket);
             var pendingBeforeReconciliation = pending;
             model = model.ReconcileHistory(history.Turns);
             foreach (var turn in history.Turns) voicePendingTranscripts.Remove(turn.TurnId);
@@ -572,6 +591,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
         voiceMode = false;
         voiceSessionId = null;
         StopWatchingVoiceRelay();
+        StopTranscriptSubscription();
         await ResetRideActivityAsync();
         model = model.MarkExpired();
         isWorking = false;
@@ -654,6 +674,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     {
         // The guest is leaving the conversation; voice must not keep listening behind the dialog.
         CloseActivity();
+        StopTranscriptSubscription();
         await StopRideActivityFeedAsync();
         await StopVoiceAsync("Voice stopped.");
         if (!model.HasEndContent)
@@ -697,6 +718,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
         await StopVoiceAsync("Voice stopped.");
         CloseActivity();
+        StopTranscriptSubscription();
         await StopRideActivityFeedAsync();
         model = model.BeginEnd();
         var currentVersion = sessionVersion;
@@ -782,6 +804,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
         // Nothing should keep listening or streaming behind the confirmation dialog.
         CloseActivity();
+        StopTranscriptSubscription();
         await StopRideActivityFeedAsync();
         await StopVoiceAsync("Voice stopped.");
         voiceMode = false;
@@ -1255,6 +1278,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private async Task StartRideActivityFeedAsync(int version, string credential)
     {
+        EnsureTranscriptSubscription(version);
         if (StringComparer.Ordinal.Equals(rideActivityCredential, credential)
             && rideActivityStreamTask is not null)
         {
@@ -1492,6 +1516,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
         disposed = true;
         voiceIdleWarning = false;
         StopWatchingVoiceRelay();
+        StopTranscriptSubscription();
         await ResetRideActivityAsync();
         model = model.InvalidateOutstandingWork();
         if (voiceReference is not null)
@@ -1524,6 +1549,151 @@ public partial class Home : ComponentBase, IAsyncDisposable
         }
         scrollReference?.Dispose();
     }
+
+    private void EnsureTranscriptSubscription(int version)
+    {
+        if (session is not { } current
+            || (transcriptSubscription is not null && transcriptSubscriptionVersion == version))
+        {
+            return;
+        }
+
+        StopTranscriptSubscription();
+        var ownSessionId = current.SessionId;
+        transcriptSubscriptionVersion = version;
+        transcriptSubscription = TranscriptNotifier.Subscribe(current.StayId, change =>
+        {
+            // This page's own turns already reconcile through their own submit and voice flows.
+            if (change.SourceSessionId == ownSessionId) return;
+            _ = InvokeAsync(() => OnStayChangedByAnotherClientAsync(version, change.Kind)).ContinueWith(
+                static task => _ = task.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        });
+    }
+
+    private void StopTranscriptSubscription()
+    {
+        transcriptSubscription?.Dispose();
+        transcriptSubscription = null;
+        transcriptSubscriptionVersion = -1;
+    }
+
+    private async Task OnStayChangedByAnotherClientAsync(int version, StayTranscriptChangeKind kind)
+    {
+        if (!IsCurrentSession(version) || session?.Credential is not { } credential)
+        {
+            return;
+        }
+
+        if (kind == StayTranscriptChangeKind.StayReset)
+        {
+            // Another credential started the stay over: its ride rows and pending speech are gone too.
+            voicePendingTranscripts.Clear();
+            await ResetRideActivityAsync();
+            if (!IsCurrentSession(version)) return;
+            await RefreshHistoryInBackgroundAsync(version);
+            if (IsCurrentSession(version) && !hasExpired && !chatEnded && !isEnding
+                && !showEndConfirmation && !showResetConfirmation)
+            {
+                await StartRideActivityFeedAsync(version, credential);
+            }
+
+            return;
+        }
+
+        await RefreshHistoryInBackgroundAsync(version);
+    }
+
+    /// <summary>
+    /// Re-reads history for a change another client made, without the foreground refresh's side
+    /// effects: the busy state, a visible turn error, suggestions and the load-error banner are left
+    /// alone. Joins a foreground refresh already running for this session, otherwise coalesces.
+    /// </summary>
+    private Task RefreshHistoryInBackgroundAsync(int version)
+    {
+        if (historyRefreshBatch is { } foreground && foreground.SessionVersion == version)
+        {
+            foreground.Requested = true;
+            return foreground.RefreshTask ?? Task.CompletedTask;
+        }
+
+        if (backgroundHistoryRefresh is { } running && running.SessionVersion == version)
+        {
+            running.Requested = true;
+            return running.RefreshTask ?? Task.CompletedTask;
+        }
+
+        var refresh = new BackgroundHistoryRefresh(version);
+        backgroundHistoryRefresh = refresh;
+        refresh.RefreshTask = DrainBackgroundHistoryAsync(refresh);
+        return refresh.RefreshTask;
+    }
+
+    private async Task DrainBackgroundHistoryAsync(BackgroundHistoryRefresh refresh)
+    {
+        // Keep task assignment visible before a synchronously-completing fake/API read can finish.
+        await Task.Yield();
+        try
+        {
+            while (refresh.Requested && IsCurrentSession(refresh.SessionVersion))
+            {
+                refresh.Requested = false;
+                await ReadHistoryInBackgroundOnceAsync(refresh.SessionVersion);
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(backgroundHistoryRefresh, refresh))
+            {
+                backgroundHistoryRefresh = null;
+            }
+        }
+    }
+
+    private async Task ReadHistoryInBackgroundOnceAsync(int version)
+    {
+        var credential = IsCurrentSession(version) ? session?.Credential : null;
+        if (credential is null)
+        {
+            return;
+        }
+
+        var ticket = ++historyReadsStarted;
+        try
+        {
+            var history = await Concierge.ReadHistoryAsync(credential);
+            if (!IsCurrentSession(version) || ticket < historyReadApplied) return;
+            historyReadApplied = ticket;
+
+            var before = TranscriptSignature();
+            var pendingBeforeReconciliation = pending;
+            model = model.ReconcileHistory(history.Turns);
+            foreach (var turn in history.Turns) voicePendingTranscripts.Remove(turn.TurnId);
+            if (pendingBeforeReconciliation is not null && pending is null)
+            {
+                await PersistSessionAsync();
+                if (!IsCurrentSession(version)) return;
+            }
+
+            if (TranscriptSignature() != before)
+            {
+                await FinishTranscriptChangeAsync();
+            }
+        }
+        catch (ConciergeApiException exception) when (IsUnauthorized(exception))
+        {
+            if (IsCurrentSession(version)) await MarkExpiredAsync();
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Background only: the transcript stays as it is and the next change or action re-reads it.
+            Logger.LogInformation(
+                "Background history refresh failed. Cause types: {CauseTypes}.",
+                ConciergeDiagnostics.ExceptionTypeChain(exception));
+        }
+    }
+
+    private (int Count, string? LastTurnId, int Interrupted) TranscriptSignature() =>
+        (turns.Count, turns.Count > 0 ? turns[^1].TurnId : null, turns.Count(turn => turn.Interrupted));
 
     private async Task FinishTranscriptChangeAsync()
     {

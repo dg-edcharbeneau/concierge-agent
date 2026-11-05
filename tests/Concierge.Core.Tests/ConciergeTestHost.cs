@@ -136,6 +136,7 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
             });
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<Concierge.Web.Voice.VoiceSessionRegistry>();
+        builder.Services.AddSingleton<StayTranscriptNotifier>();
         builder.Services.AddScoped<IConciergeService, ConciergeService>();
         builder.Services.AddSingleton<IChatClient>(
             new BoundedChatClient(chatClient, TimeSpan.FromMinutes(2), maxConcurrency: 4));

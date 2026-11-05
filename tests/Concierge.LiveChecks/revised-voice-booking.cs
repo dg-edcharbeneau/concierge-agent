@@ -267,6 +267,7 @@ try
     builder.Services.AddSingleton<EmbeddingModelIdentityStore>();
     builder.Services.AddSingleton<ConciergeSessionService>();
     builder.Services.AddSingleton<VoiceSessionRegistry>();
+    builder.Services.AddSingleton<StayTranscriptNotifier>();
     builder.Services.AddScoped<IConciergeService, ConciergeService>();
     builder.Services.AddHostedTemporalWorker(TemporalWorkerConnection.TaskQueue)
         .ConfigureOptions(o => o.Interceptors = [new ConciergeTurnDeadlineInterceptor()])

@@ -66,6 +66,7 @@ builder.Services.AddOptions<DeepgramVoiceOptions>()
     .ValidateOnStart();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<VoiceSessionRegistry>();
+builder.Services.AddSingleton<StayTranscriptNotifier>();
 builder.Services.AddScoped<IConciergeService, ConciergeService>();
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
 builder.Services.AddRazorComponents()

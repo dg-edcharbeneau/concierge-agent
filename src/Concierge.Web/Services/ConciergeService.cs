@@ -17,6 +17,7 @@ public sealed class ConciergeService(
     ITemporalClient temporalClient,
     IOptions<ConciergePersistenceOptions> persistenceOptions,
     VoiceSessionRegistry voiceSessions,
+    StayTranscriptNotifier transcriptNotifier,
     ILogger<ConciergeService> logger) : IConciergeService
 {
     private static readonly TimeSpan InitialRideStreamRetryDelay = TimeSpan.FromMilliseconds(250);
@@ -141,6 +142,7 @@ public sealed class ConciergeService(
                 ConciergeWorkflowNames.MarkTurnInterruptedUpdate,
                 [new ConciergeTurnInterruption(turnId)],
                 UpdateOptions(cancellationToken));
+            transcriptNotifier.Notify(session.StayId, session.SessionId, StayTranscriptChangeKind.TurnsChanged);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -162,12 +164,16 @@ public sealed class ConciergeService(
             var workflow = await GetStayWorkflowAsync(session, cancellationToken);
             var options = UpdateOptions(cancellationToken);
             // Generated RPC IDs let both retries and revisions reach the workflow's TurnId fence.
-            return await workflow.ExecuteUpdateAsync<ConciergeTurnResult>(
+            var result = await workflow.ExecuteUpdateAsync<ConciergeTurnResult>(
                 ConciergeWorkflowNames.SubmitTurnUpdate,
                 [new ConciergeTurnSubmission(
                 request.TurnId, request.UserMessage, request.Channel, session.VerifiedGuest, enableEndChatFunction,
                 authenticatedVoice ? VoiceUtterance.FromTurnId(request.TurnId, request.UserMessage) : null)],
                 options);
+            // Other open pages for this stay (another tab, a room device's guest) show it without
+            // reloading. An exact retry that joins an admitted turn notifies again; pages coalesce.
+            transcriptNotifier.Notify(session.StayId, session.SessionId, StayTranscriptChangeKind.TurnsChanged);
+            return result;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -520,6 +526,8 @@ public sealed class ConciergeService(
                 ConciergeWorkflowNames.ResetStayUpdate,
                 [session.VerifiedGuest!],
                 UpdateOptions(cancellationToken));
+            // Other credentials for the stay no longer keep a stale transcript until they reload (ADR 0010).
+            transcriptNotifier.Notify(session.StayId, session.SessionId, StayTranscriptChangeKind.StayReset);
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not ConciergeApiException)
         {

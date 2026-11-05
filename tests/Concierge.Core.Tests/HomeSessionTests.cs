@@ -1395,6 +1395,119 @@ public sealed class HomeSessionTests
     private static ConciergeSessionResponse SessionResponse(string credential, Guid stay)
         => new(credential, DateTimeOffset.UtcNow.AddHours(1), stay, Guid.NewGuid());
 
+    /// <summary>A turn another client (a room device) adds to the stay shows up without a page action.</summary>
+    [Fact]
+    public async Task AnotherClientsTurnRefreshesHistoryInTheBackgroundAndCoalesces()
+    {
+        await using var harness = new Harness();
+        var stay = Guid.NewGuid();
+        var own = Guid.NewGuid();
+        harness.SetSession("credential", stay, own);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        harness.Service.History = async _ =>
+        {
+            var read = Interlocked.Increment(ref reads);
+            if (read == 1) return new ConciergeHistoryResult([]);
+            if (read == 2) await gate.Task;
+            return History("device-turn");
+        };
+        await harness.Call("LoadHistoryAndReconcileAsync", false);
+        Assert.Equal(1, Volatile.Read(ref reads));
+        // A visible error and the idle state must survive a refresh the guest did not ask for.
+        harness.Set("model", harness.Get<ChatSessionModel>("model").SetTurnError("Your last message failed."));
+
+        var device = Guid.NewGuid();
+        harness.Transcripts.Notify(stay, device, StayTranscriptChangeKind.TurnsChanged);
+        await harness.WaitUntil(() => Volatile.Read(ref reads) == 2);
+        // Bursts while a read is in flight collapse into one more read.
+        harness.Transcripts.Notify(stay, device, StayTranscriptChangeKind.TurnsChanged);
+        harness.Transcripts.Notify(stay, device, StayTranscriptChangeKind.TurnsChanged);
+        await Task.Delay(50);
+        gate.SetResult();
+        await harness.WaitUntil(() => Volatile.Read(ref reads) == 3
+            && harness.Get<List<ConciergeTranscriptTurn>>("turns").Count == 1);
+        await Task.Delay(50);
+
+        Assert.Equal(3, Volatile.Read(ref reads));
+        Assert.Equal("device-turn", Assert.Single(harness.Get<List<ConciergeTranscriptTurn>>("turns")).TurnId);
+        Assert.Equal("Your last message failed.", harness.Get<string?>("turnError"));
+        Assert.False(harness.Get<bool>("isWorking"));
+    }
+
+    [Fact]
+    public async Task OwnSessionAndOtherStayNotificationsDoNotRefresh()
+    {
+        await using var harness = new Harness();
+        var stay = Guid.NewGuid();
+        var own = Guid.NewGuid();
+        harness.SetSession("credential", stay, own);
+        var reads = 0;
+        harness.Service.History = _ =>
+        {
+            Interlocked.Increment(ref reads);
+            return Task.FromResult(History("turn"));
+        };
+        await harness.Call("LoadHistoryAndReconcileAsync", false);
+
+        harness.Transcripts.Notify(stay, own, StayTranscriptChangeKind.TurnsChanged);
+        harness.Transcripts.Notify(Guid.NewGuid(), Guid.NewGuid(), StayTranscriptChangeKind.TurnsChanged);
+        await Task.Delay(100);
+
+        Assert.Equal(1, Volatile.Read(ref reads));
+    }
+
+    [Theory]
+    [InlineData("EndChatAsync")]
+    [InlineData("StartOverAsync")]
+    public async Task LeavingTheConversationStopsListeningForOtherClients(string action)
+    {
+        await using var harness = new Harness();
+        var stay = Guid.NewGuid();
+        harness.SetSession("credential", stay, Guid.NewGuid());
+        var reads = 0;
+        harness.Service.History = _ =>
+        {
+            Interlocked.Increment(ref reads);
+            return Task.FromResult(History("turn"));
+        };
+        await harness.Call("LoadHistoryAndReconcileAsync", false);
+
+        await harness.Call(action);
+        harness.Transcripts.Notify(stay, Guid.NewGuid(), StayTranscriptChangeKind.TurnsChanged);
+        await Task.Delay(100);
+
+        Assert.Equal(1, Volatile.Read(ref reads));
+    }
+
+    [Fact]
+    public async Task AnotherClientsResetEmptiesTheTranscriptAndRestartsTheRideFeed()
+    {
+        await using var harness = new Harness();
+        var stay = Guid.NewGuid();
+        harness.SetSession("credential", stay, Guid.NewGuid());
+        var cleared = false;
+        harness.Service.History = _ => Task.FromResult(Volatile.Read(ref cleared)
+            ? new ConciergeHistoryResult([])
+            : History("before-reset"));
+        var snapshots = 0;
+        harness.Service.RideSnapshot = _ =>
+        {
+            Interlocked.Increment(ref snapshots);
+            return Task.FromResult(new ConciergeRideActivitySnapshot(new ConciergeRideReadState(0, 0, 0), []));
+        };
+        await harness.Call("LoadHistoryAndReconcileAsync", false);
+        await harness.WaitUntil(() => Volatile.Read(ref snapshots) == 1);
+        Assert.Single(harness.Get<List<ConciergeTranscriptTurn>>("turns"));
+
+        Volatile.Write(ref cleared, true);
+        harness.Transcripts.Notify(stay, Guid.NewGuid(), StayTranscriptChangeKind.StayReset);
+
+        await harness.WaitUntil(() => harness.Get<List<ConciergeTranscriptTurn>>("turns").Count == 0
+            && Volatile.Read(ref snapshots) == 2);
+        Assert.Empty(harness.Get<List<ConciergeTranscriptTurn>>("turns"));
+    }
+
     private static ConciergeHistoryResult History(string id) =>
         new([new ConciergeTranscriptTurn(id, 1, "web", "Guest", "Reply", DateTimeOffset.UtcNow)]);
 
@@ -1453,6 +1566,7 @@ public sealed class HomeSessionTests
         public FakeService Service { get; } = new();
         public FakeJavaScript JavaScript { get; } = new();
         public VoiceSessionRegistry Voice { get; } = new(TimeProvider.System);
+        public StayTranscriptNotifier Transcripts { get; } = new(NullLogger<StayTranscriptNotifier>.Instance);
 
         /// <summary>Attaches Home without triggering implicit browser callbacks.</summary>
         public Harness()
@@ -1461,6 +1575,7 @@ public sealed class HomeSessionTests
             Set("JavaScript", JavaScript);
             Set("Logger", NullLogger<Home>.Instance);
             Set("VoiceSessions", Voice);
+            Set("TranscriptNotifier", Transcripts);
             Set("ready", true);
             componentId = renderer.Attach(home);
         }
