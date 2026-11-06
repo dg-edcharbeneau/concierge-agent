@@ -1436,7 +1436,7 @@ public sealed class HomeSessionTests
     }
 
     [Fact]
-    public async Task OwnSessionAndOtherStayNotificationsDoNotRefresh()
+    public async Task OwnSessionOtherStayAndStartedTurnNotificationsDoNotRefresh()
     {
         await using var harness = new Harness();
         var stay = Guid.NewGuid();
@@ -1452,6 +1452,8 @@ public sealed class HomeSessionTests
 
         harness.Transcripts.Notify(stay, own, StayTranscriptChangeKind.TurnsChanged);
         harness.Transcripts.Notify(Guid.NewGuid(), Guid.NewGuid(), StayTranscriptChangeKind.TurnsChanged);
+        // A started turn has nothing in history yet; only its TurnsChanged is worth a read.
+        harness.Transcripts.Notify(stay, Guid.NewGuid(), StayTranscriptChangeKind.TurnStarted, "Where is breakfast?");
         await Task.Delay(100);
 
         Assert.Equal(1, Volatile.Read(ref reads));

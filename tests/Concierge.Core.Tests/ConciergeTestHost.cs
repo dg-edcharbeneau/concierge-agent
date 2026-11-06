@@ -8,6 +8,8 @@ using Concierge.WorkflowServer.Location;
 using Concierge.WorkflowServer.Setup;
 using Concierge.WorkflowServer.Workflows;
 using Concierge.Contracts;
+using Concierge.Web.Agentic;
+using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
 using Concierge.Web.Endpoints;
 using Concierge.Web.Services;
 using Microsoft.AspNetCore.Builder;
@@ -100,7 +102,9 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         int flushBatchSize = ConciergePersistenceOptions.DefaultFlushBatchSize,
         ILoggerProvider? logProvider = null,
         bool timeSkipping = false,
-        Action<TemporalWorkerOptions>? configureWorker = null)
+        Action<TemporalWorkerOptions>? configureWorker = null,
+        Func<IServiceProvider, IChatClient, IChatClient>? wrapChat = null,
+        bool streamAnswers = false)
     {
         var database = await postgreSql.CreateDatabaseAsync();
         var dataSource = NpgsqlDataSource.Create(database.ConnectionString);
@@ -137,9 +141,26 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<Concierge.Web.Voice.VoiceSessionRegistry>();
         builder.Services.AddSingleton<StayTranscriptNotifier>();
+        builder.Services.AddAGUIServer();
         builder.Services.AddScoped<IConciergeService, ConciergeService>();
-        builder.Services.AddSingleton<IChatClient>(
-            new BoundedChatClient(chatClient, TimeSpan.FromMinutes(2), maxConcurrency: 4));
+        IChatClient boundedChat = new BoundedChatClient(chatClient, TimeSpan.FromMinutes(2), maxConcurrency: 4);
+        if (streamAnswers)
+        {
+            // ADR 0015: the production wiring, publisher and listener on this test database.
+            builder.Services.AddSingleton<AnswerStreamPublisher>();
+            builder.Services.AddHostedService(services => services.GetRequiredService<AnswerStreamPublisher>());
+            builder.Services.AddSingleton(services => new AnswerStreamListener(
+                database.ConnectionString, services.GetRequiredService<ILogger<AnswerStreamListener>>()));
+            builder.Services.AddHostedService(services => services.GetRequiredService<AnswerStreamListener>());
+        }
+
+        builder.Services.AddSingleton<IChatClient>(services =>
+        {
+            var model = streamAnswers
+                ? new AnswerStreamPublishingChatClient(boundedChat, services.GetRequiredService<AnswerStreamPublisher>())
+                : boundedChat;
+            return wrapChat?.Invoke(services, model) ?? model;
+        });
         builder.Services.AddSingleton<IConciergeActionToolBackend>(actionTools);
         builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(
             new ZeroEmbeddingGenerator());
@@ -169,7 +190,12 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
 
         var app = builder.Build();
         app.MapConciergeApi();
+        app.MapAGUIServer(AgenticConcierge.EndpointPath, AgenticConcierge.CreateAgent);
         await app.StartAsync();
+        if (streamAnswers)
+        {
+            await app.Services.GetRequiredService<AnswerStreamListener>().Listening.WaitAsync(TimeSpan.FromSeconds(30));
+        }
         return new ConciergeTestHost(
             database,
             dataSource,
@@ -373,6 +399,12 @@ internal sealed class ScriptedChatClient : IChatClient
         };
     }
 
+    /// <summary>
+    /// When set, streamed answers arrive word by word with this delay between words, the way a
+    /// provider streams; otherwise each response is one update.
+    /// </summary>
+    public TimeSpan? StreamWordDelay { get; set; }
+
     public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
@@ -382,7 +414,22 @@ internal sealed class ScriptedChatClient : IChatClient
         var response = await GetResponseAsync(messages, options, cancellationToken);
         foreach (var update in response.ToChatResponseUpdates())
         {
-            yield return update;
+            if (StreamWordDelay is not { } delay || update.Contents is not [TextContent { Text.Length: > 0 } text])
+            {
+                yield return update;
+                continue;
+            }
+
+            foreach (var word in System.Text.RegularExpressions.Regex.Split(text.Text, @"(?<= )"))
+            {
+                await Task.Delay(delay, cancellationToken);
+                yield return new ChatResponseUpdate(update.Role, word)
+                {
+                    MessageId = update.MessageId,
+                    ResponseId = update.ResponseId,
+                    FinishReason = update.FinishReason,
+                };
+            }
         }
     }
 

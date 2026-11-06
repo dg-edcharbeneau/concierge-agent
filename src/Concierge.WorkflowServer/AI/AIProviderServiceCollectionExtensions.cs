@@ -45,12 +45,14 @@ public static class AIProviderServiceCollectionExtensions
             var options = services.GetRequiredService<IOptions<ChatProviderOptions>>().Value;
             var inner = CreateChatClient(options);
             var hotelTimeZoneId = services.GetService<IOptions<Location.HotelLocationOptions>>()?.Value.TimeZoneId;
-            return new BoundedChatClient(
+            var bounded = new BoundedChatClient(
                 inner,
                 TimeSpan.FromSeconds(options.RequestTimeoutSeconds),
                 options.MaxConcurrentRequests,
                 services.GetService<TimeProvider>() ?? TimeProvider.System,
                 string.IsNullOrWhiteSpace(hotelTimeZoneId) ? null : TimeZoneInfo.FindSystemTimeZoneById(hotelTimeZoneId));
+            // Outside the bound: publishing partial text must never count against the model call.
+            return new AnswerStreamPublishingChatClient(bounded, services.GetService<AnswerStreamPublisher>());
         });
         services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(services =>
         {
@@ -435,6 +437,8 @@ internal sealed class BoundedChatClient(
             return options;
         }
 
+        // Normally taken by AnswerStreamPublishingChatClient; never forwarded to the provider.
+        properties.Remove(ConciergeAnswerStream.ModelOptionKey);
         var includeEndChat = properties.Remove(ConciergeEndChat.ModelOptionKey, out var endChatMarker)
             && IsEndChatFunctionMarker(endChatMarker);
         var includeActionTools = properties.Remove(ConciergeToolDefinitions.ModelOptionKey, out var toolsMarker)

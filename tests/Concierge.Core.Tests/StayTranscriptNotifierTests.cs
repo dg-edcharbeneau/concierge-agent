@@ -108,19 +108,25 @@ public sealed class StayTranscriptNotificationTests(PostgreSqlFixture postgreSql
         var turn = await SendAsync(host, "/api/concierge/turns", device.Credential,
             new ConciergeTurnRequest("dev:1", "What time does the pool open?", "voice"));
         Assert.Equal(HttpStatusCode.OK, turn.StatusCode);
-        var committed = Assert.Single(rivera);
-        Assert.Equal(new StayTranscriptChange(riveraStay, device.SessionId, StayTranscriptChangeKind.TurnsChanged), committed);
+        // The question is announced when handed to the workflow, then the turn when it is committed.
+        Assert.Equal(
+            [
+                new StayTranscriptChange(riveraStay, device.SessionId, StayTranscriptChangeKind.TurnStarted,
+                    "What time does the pool open?"),
+                new StayTranscriptChange(riveraStay, device.SessionId, StayTranscriptChangeKind.TurnsChanged),
+            ],
+            rivera);
         Assert.Empty(other);
 
         // A rejected turn never reaches the workflow, so nothing changed and nobody is told.
         var rejected = await SendAsync(host, "/api/concierge/turns", device.Credential,
             new ConciergeTurnRequest("dev:2", " ", "voice"));
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
-        Assert.Single(rivera);
+        Assert.Equal(2, rivera.Count);
 
         var reset = await SendAsync(host, "/api/concierge/reset", browser.Credential, body: null);
         Assert.Equal(HttpStatusCode.NoContent, reset.StatusCode);
-        Assert.Equal(2, rivera.Count);
+        Assert.Equal(3, rivera.Count);
         Assert.Equal(
             new StayTranscriptChange(riveraStay, browser.SessionId, StayTranscriptChangeKind.StayReset),
             rivera.Last());

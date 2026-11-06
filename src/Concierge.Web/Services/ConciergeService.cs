@@ -163,6 +163,9 @@ public sealed class ConciergeService(
         {
             var workflow = await GetStayWorkflowAsync(session, cancellationToken);
             var options = UpdateOptions(cancellationToken);
+            // Lets another open page show the question while the desk is still working on it.
+            transcriptNotifier.Notify(
+                session.StayId, session.SessionId, StayTranscriptChangeKind.TurnStarted, request.UserMessage);
             // Generated RPC IDs let both retries and revisions reach the workflow's TurnId fence.
             var result = await workflow.ExecuteUpdateAsync<ConciergeTurnResult>(
                 ConciergeWorkflowNames.SubmitTurnUpdate,

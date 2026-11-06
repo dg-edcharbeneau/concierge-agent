@@ -439,7 +439,7 @@ public sealed class ConciergeStayWorkflow
 
         // Revision authority changes before queue waiting. Caller disconnects never enter here.
         var supersedes = AdmitVoiceRevision(request);
-        var attempt = new TurnAttempt(fingerprint, Workflow.UtcNow + ActionTurnDeadline);
+        var attempt = new TurnAttempt(request.TurnId, fingerprint, Workflow.UtcNow + ActionTurnDeadline);
         admittedTurns.Add(request.TurnId, attempt);
         // Handlers start in update-delivery order; each waits for its arrival slot.
         var arrival = nextArrival++;
@@ -468,7 +468,8 @@ public sealed class ConciergeStayWorkflow
                             persisted.AssistantMessage,
                             persisted.Sequence,
                             request.VoiceUtterance is { } endChatUtterance
-                                ? voiceRevisions[endChatUtterance.Family].EndChatFunctionCall : null));
+                                ? voiceRevisions[endChatUtterance.Family].EndChatFunctionCall : null,
+                            persisted.RideCard));
                     acceptedTurns.Add(request.TurnId, accepted);
                     attempt.Result = MatchOrReject(accepted, fingerprint);
                     return attempt.Result;
@@ -586,7 +587,8 @@ public sealed class ConciergeStayWorkflow
                 request.UserMessage,
                 answer,
                 Workflow.UtcNow,
-                Superseded: attempt.Superseded);
+                Superseded: attempt.Superseded,
+                RideCard: actionResult.RideCard);
             if (!attempt.Superseded || actionResult.ConfirmedRequestSequence is not null)
             {
                 stayMemory.Clear();
@@ -596,11 +598,12 @@ public sealed class ConciergeStayWorkflow
             {
                 recentTurns.Clear();
                 recentTurns.AddRange(includedRecentTurns.Where(IsEffectiveTurn));
-                recentTurns.Add(turn);
+                // Prompts and Continue-As-New never use the card; keep their budget unchanged.
+                recentTurns.Add(turn with { RideCard = null });
             }
             TrimRecentTurnsToStorageBudget();
 
-            var result = new ConciergeTurnResult(turn.TurnId, answer, turn.Sequence, endChatCall);
+            var result = new ConciergeTurnResult(turn.TurnId, answer, turn.Sequence, endChatCall, turn.RideCard);
             acceptedTurns.Add(turn.TurnId, new AcceptedTurn(fingerprint, result));
             runTurns.Add(turn);
             if (attempt.SideEffectDispatched && request.VoiceUtterance is { } actionUtterance)
@@ -671,6 +674,9 @@ public sealed class ConciergeStayWorkflow
         actionTurnStartedUtc = Workflow.UtcNow;
         var modelCalls = 0;
         var toolRounds = 0;
+        // From the ride service's decoded result, never the model's wording; the last card-producing
+        // call wins. Only answers carry it: deadline, failure and limit replies describe no ride.
+        ConciergeRideCard? rideCard = null;
         nearbyPlaces = ConciergePlaceContinuity.Current(nearbyPlaces, Workflow.UtcNow, nextSequence, 6);
         placeClarification = ConciergePlaceContinuity.Current(placeClarification, Workflow.UtcNow, nextSequence, 2);
 
@@ -745,7 +751,7 @@ public sealed class ConciergeStayWorkflow
                     || !ConciergeToolCallPolicy.TrySynthesizeWeatherCalls(
                         request.UserMessage, "workflow-weather", out calls))
                 {
-                    return new(FirstAnswerText(response), null);
+                    return new(FirstAnswerText(response), null, RideCard: rideCard);
                 }
             }
             else if (ConciergeToolCallPolicy.TryGetMultiDayWeather(calls, request.UserMessage, out var weatherPlan))
@@ -1036,6 +1042,15 @@ public sealed class ConciergeStayWorkflow
                         compactResult += " " + CancellationOutcomeReply(recalledCancellation);
                         guestFacingAnswer = compactResult;
                     }
+                    if (call.Name == ConciergeToolDefinitions.GetRideHistory
+                        && !selectRideFromHistory
+                        && ConciergeToolCallPolicy.TryOptionalString(callArguments, "when", 16, out var cardWhen)
+                        && cardWhen is null or "upcoming"
+                        && interpretation.Decoded is ConciergeRideActionResult { Message: null } upcoming
+                        && ConciergeRideCards.Scheduled(upcoming.Rides) is { } scheduledCard)
+                    {
+                        rideCard = scheduledCard;
+                    }
                     // A sentence saying "canceled" is not a confirmation. Bind the activity's
                     // explicit success to the workflow-owned offer before retaining its outcome.
                     if (call.Name == ConciergeToolDefinitions.ConfirmRideCancellation
@@ -1068,6 +1083,7 @@ public sealed class ConciergeStayWorkflow
                             null,
                             request.TurnId,
                             nextSequence);
+                        rideCard = ConciergeRideCards.Booked(bookedRide);
                     }
                     // A new offer replaces any other open offer.
                     if (interpretedResult.ProposedStateChange is { } proposal)
@@ -1174,7 +1190,7 @@ public sealed class ConciergeStayWorkflow
             if (call.Name is ConciergeToolDefinitions.ConfirmRide
                 or ConciergeToolDefinitions.ConfirmRideCancellation)
             {
-                return new(returnedAnswer ? guestFacingAnswer : compactResult, null, confirmedRequestSequence);
+                return new(returnedAnswer ? guestFacingAnswer : compactResult, null, confirmedRequestSequence, rideCard);
             }
 
             if (!prompt.FitActionContext(request.EnableEndChatFunction))
@@ -1189,7 +1205,7 @@ public sealed class ConciergeStayWorkflow
 
             if (returnedAnswer)
             {
-                return new(guestFacingAnswer, null);
+                return new(guestFacingAnswer, null, RideCard: rideCard);
             }
 
             try
@@ -1251,6 +1267,9 @@ public sealed class ConciergeStayWorkflow
         };
         options.AdditionalProperties ??= [];
         options.AdditionalProperties[ConciergeToolDefinitions.ModelOptionKey] = "true";
+        // The model activity publishes this turn's partial text under its ID (ADR 0015). An activity
+        // input only, so replay is unaffected.
+        options.AdditionalProperties[ConciergeAnswerStream.ModelOptionKey] = activeAttempt!.TurnId;
         if (enableEndChat)
         {
             options.AdditionalProperties[ConciergeEndChat.ModelOptionKey] = "true";
@@ -1718,7 +1737,8 @@ public sealed class ConciergeStayWorkflow
     private sealed record ActionToolLoopResult(
         string AssistantMessage,
         ConciergeEndChatFunctionCall? EndChatFunctionCall,
-        long? ConfirmedRequestSequence = null)
+        long? ConfirmedRequestSequence = null,
+        ConciergeRideCard? RideCard = null)
     {
         public string Answer => AssistantMessage;
     }
@@ -1885,8 +1905,9 @@ public sealed class ConciergeStayWorkflow
 
     private sealed class TurnSupersededException : Exception;
 
-    private sealed class TurnAttempt(string fingerprint, DateTimeOffset deadline)
+    private sealed class TurnAttempt(string turnId, string fingerprint, DateTimeOffset deadline)
     {
+        public string TurnId { get; } = turnId;
         public string Fingerprint { get; } = fingerprint;
         public DateTimeOffset Deadline { get; } = deadline;
         public bool Superseded { get; set; }

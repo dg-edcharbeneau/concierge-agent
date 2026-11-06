@@ -10,10 +10,21 @@ public enum StayTranscriptChangeKind
 
     /// <summary>The stay's conversation, memory and rides were cleared (Start over).</summary>
     StayReset,
+
+    /// <summary>
+    /// A turn was handed to the stay workflow and has no answer yet; <see cref="StayTranscriptChange.GuestMessage"/>
+    /// carries the guest's words so another page can show "the room device is asking…". Its
+    /// <see cref="TurnsChanged"/> follows when the workflow answers.
+    /// </summary>
+    TurnStarted,
 }
 
 /// <summary>A stay transcript change and the chat session that caused it.</summary>
-public sealed record StayTranscriptChange(Guid StayId, Guid SourceSessionId, StayTranscriptChangeKind Kind);
+public sealed record StayTranscriptChange(
+    Guid StayId,
+    Guid SourceSessionId,
+    StayTranscriptChangeKind Kind,
+    string? GuestMessage = null);
 
 /// <summary>
 /// In-process notification that a stay's transcript changed, so an open page can show turns another
@@ -52,7 +63,7 @@ public sealed class StayTranscriptNotifier(ILogger<StayTranscriptNotifier> logge
     }
 
     /// <summary>Notifies every current subscriber of <paramref name="stayId"/>. Never throws.</summary>
-    public void Notify(Guid stayId, Guid sourceSessionId, StayTranscriptChangeKind kind)
+    public void Notify(Guid stayId, Guid sourceSessionId, StayTranscriptChangeKind kind, string? guestMessage = null)
     {
         Subscription[] targets;
         lock (gate)
@@ -65,7 +76,7 @@ public sealed class StayTranscriptNotifier(ILogger<StayTranscriptNotifier> logge
             targets = [.. list];
         }
 
-        var change = new StayTranscriptChange(stayId, sourceSessionId, kind);
+        var change = new StayTranscriptChange(stayId, sourceSessionId, kind, guestMessage);
         foreach (var target in targets)
         {
             try

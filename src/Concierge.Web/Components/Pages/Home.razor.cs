@@ -11,16 +11,9 @@ namespace Concierge.Web.Components.Pages;
 
 public partial class Home : ComponentBase, IAsyncDisposable
 {
-    private static readonly TimeZoneInfo HotelTimeZone =
-        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+    private static readonly TimeZoneInfo HotelTimeZone = ConciergeGuestUi.HotelTimeZone;
 
-    private static readonly string[] Suggestions =
-    [
-        "What time is breakfast?",
-        "How do I connect to Wi-Fi?",
-        "What amenities are available?",
-        "Can you recommend a nearby restaurant?"
-    ];
+    private static readonly IReadOnlyList<string> Suggestions = ConciergeGuestUi.Suggestions;
 
     private readonly List<RideActivityEntry> rideActivityEntries = [];
     private readonly HashSet<string> rideActivityReadEntryKeys = new(StringComparer.Ordinal);
@@ -1563,8 +1556,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
         transcriptSubscriptionVersion = version;
         transcriptSubscription = TranscriptNotifier.Subscribe(current.StayId, change =>
         {
-            // This page's own turns already reconcile through their own submit and voice flows.
-            if (change.SourceSessionId == ownSessionId) return;
+            // This page's own turns already reconcile through their own submit and voice flows; a turn
+            // that has only started has nothing in history yet.
+            if (change.SourceSessionId == ownSessionId || change.Kind == StayTranscriptChangeKind.TurnStarted) return;
             _ = InvokeAsync(() => OnStayChangedByAnotherClientAsync(version, change.Kind)).ContinueWith(
                 static task => _ = task.Exception, TaskContinuationOptions.OnlyOnFaulted);
         });

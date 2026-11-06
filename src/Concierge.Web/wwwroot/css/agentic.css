@@ -1,0 +1,215 @@
+/*
+ * PROTOTYPE (ADR 0015): the AG-UI page (/agentic) in Home's look.
+ *
+ * The Components.AI kit declares its theme on .sc-ai-root with no dark mode of its own. These rules map
+ * its variables onto app.css tokens, which already follow data-theme and prefers-color-scheme, so the
+ * kit flips with Home's theme picker. ai-chat.css loads after app.css, hence the .page-shell prefix.
+ */
+.page-shell .sc-ai-root {
+    --sc-ai-font-family: inherit;
+    --sc-ai-color-bg: var(--transcript-background);
+    --sc-ai-color-surface: var(--composer-background);
+    --sc-ai-color-surface-hover: var(--panel-background);
+    --sc-ai-color-text: var(--text-primary);
+    --sc-ai-color-text-secondary: var(--text-secondary);
+    --sc-ai-color-text-on-accent: var(--primary-action-text);
+    --sc-ai-color-accent: var(--primary-action-background);
+    --sc-ai-color-accent-hover: var(--primary-action-hover);
+    --sc-ai-color-border: var(--border-color);
+    --sc-ai-color-error: var(--error-text);
+    --sc-ai-color-error-bg: var(--error-background);
+    --sc-ai-color-bubble-user: var(--guest-message-background);
+    --sc-ai-color-bubble-user-text: var(--guest-message-text);
+    --sc-ai-color-bubble-assistant: var(--concierge-message-background);
+    --sc-ai-color-bubble-assistant-text: var(--text-primary);
+    --sc-ai-focus-ring: 0 0 0 2px var(--focus-ring);
+    --sc-ai-border-radius-lg: 16px;
+    --sc-ai-max-width: 100%;
+}
+
+/* Inside Home's chat panel instead of a full-viewport page. */
+.page-shell .sc-ai-chat-page {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+}
+
+/* The scroll area is Home's .transcript; the kit's list only stacks the rows (StayMessage markup). */
+.page-shell .agentic-transcript {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 90px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 20px 22px 24px;
+    background: var(--transcript-background);
+    scrollbar-color: var(--border-color) transparent;
+    scrollbar-width: thin;
+}
+
+.page-shell .agentic-transcript .sc-ai-message-list {
+    gap: 0;
+    margin: 0;
+    padding: 0;
+}
+
+.page-shell .agentic-transcript .sc-ai-message-list__footer {
+    padding: 0;
+}
+
+/* The composer row in Home's composer band. */
+.page-shell .sc-ai-chat-page__footer {
+    padding: 13px 18px 16px;
+    background: var(--composer-background);
+    border-top: 1px solid var(--border-color);
+}
+
+.page-shell .agentic-transcript .new-message-button[hidden] {
+    display: none;
+}
+
+/* Starter questions: Home's suggestion colours as one-tap chips. */
+.agentic-suggestions {
+    display: grid;
+    gap: 12px;
+    justify-items: start;
+    padding: 6px 0 12px;
+}
+
+.agentic-suggestions__title {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 650;
+}
+
+.agentic-suggestions__chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.agentic-suggestion-chip {
+    padding: 8px 14px;
+    color: var(--suggestion-text);
+    background: var(--suggestion-background);
+    border: 1px solid var(--suggestion-border);
+    border-radius: 999px;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.agentic-suggestion-chip:hover:not(:disabled) {
+    border-color: var(--accent-color);
+}
+
+.agentic-suggestion-chip:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+
+.agentic-suggestion-chip:disabled {
+    cursor: default;
+    opacity: .55;
+}
+
+/* In the conversation heading, clear of the header's mobile voice grid. */
+.conversation-heading .agentic-preview-badge {
+    margin-left: auto;
+}
+
+.agentic-preview-badge {
+    padding: 2px 8px;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .04em;
+}
+
+/* Ride cards (ADR 0015): under the concierge bubble, in the app tokens so every theme follows. */
+.ride-card-row {
+    display: flex;
+    justify-content: flex-start;
+    margin: -6px 0 18px;
+}
+
+.ride-card {
+    width: min(420px, 100%);
+    padding: 14px 16px;
+    color: var(--text-primary);
+    background: var(--surface-background);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--accent-color);
+    border-radius: 14px;
+}
+
+.ride-card__header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.ride-card__header h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.ride-card__note {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.ride-card__rides {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.ride-card__ride + .ride-card__ride {
+    padding-top: 10px;
+    border-top: 1px solid var(--border-color);
+}
+
+.ride-card__ride-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.ride-card__dropoff {
+    overflow-wrap: anywhere;
+}
+
+.ride-card__status {
+    flex: none;
+    padding: 2px 8px;
+    color: var(--suggestion-text);
+    background: var(--suggestion-background);
+    border: 1px solid var(--suggestion-border);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.ride-card__time {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.ride-card__detail {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}

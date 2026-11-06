@@ -75,6 +75,8 @@ ConfigureAIProvider(builder, workflowServer, "Embeddings", "foundry-embeddings-a
 
 var web = builder.AddProject<Projects.Concierge_Web>("web")
     .WithReference(temporal)
+    // LISTEN only: partial answer text from the model activity (ADR 0015).
+    .WithReference(concierge)
     .WithEnvironment("Deepgram__ApiKey", deepgramApiKey)
     .WaitFor(temporal)
     .WaitFor(workflowServer)
