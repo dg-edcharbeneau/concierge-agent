@@ -6,7 +6,7 @@
 @using Microsoft.AspNetCore.Components.AI
 
 @* PROTOTYPE (ADR 0015): the guest chat over AG-UI with Microsoft.AspNetCore.Components.AI, in Home's
-   shell and styles. Text only; voice stays on Home. *@
+   shell and styles. Voice lives in the message input, as in the AgenticUI sample. *@
 
 <PageTitle>Hotel ZGY Concierge · AG-UI preview</PageTitle>
 <HeadContent>
@@ -109,15 +109,7 @@
     {
         <SiteHeader VoiceChrome="@(session is not null)">
             <Actions>
-                @if (voice?.Mode == true)
-                {
-                    <div class="voice-status voice-@voice.State @(voice.Muted ? "is-muted" : "")"
-                         role="status" aria-live="polite" title="@voice.Message">
-                        <span class="voice-indicator" aria-hidden="true"></span>
-                        <strong>@(voice.Muted ? "Muted" : voice.StateLabel)</strong>
-                    </div>
-                }
-                <div class="@HeaderControlsClass" role="group" aria-label="Chat controls">
+                <div class="voice-header-controls" role="group" aria-label="Chat controls">
                     @if (session is not null && rides is not null)
                     {
                         <button class="voice-control-button activity-button" type="button"
@@ -133,59 +125,6 @@
                                 <span class="activity-unread-badge" aria-hidden="true">@rides.Badge</span>
                             }
                         </button>
-                        @if (voice?.Mode == true)
-                        {
-                            if (voice.Active)
-                            {
-                                <button class="voice-control-button" type="button"
-                                        aria-label="@(voice.Muted ? "Unmute microphone" : "Mute microphone")"
-                                        @onclick="voice.ToggleMuteAsync">
-                                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                                        <rect x="9" y="2" width="6" height="12" rx="3" />
-                                        <path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" />
-                                        @if (voice.Muted)
-                                        {
-                                            <path d="m3 3 18 18" />
-                                        }
-                                    </svg>
-                                    <span>@(voice.Muted ? "Unmute" : "Mute")</span>
-                                </button>
-                            }
-                            else if (voice.State == "paused")
-                            {
-                                <button class="voice-control-button" type="button" aria-label="Resume voice" @onclick="voice.ResumeAsync">
-                                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                                        <path d="m8 4 12 8-12 8Z" />
-                                    </svg>
-                                    <span>Resume</span>
-                                </button>
-                            }
-                            else
-                            {
-                                <button class="voice-control-button" type="button" aria-label="Reconnect voice" @onclick="voice.ConnectAsync">
-                                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                                        <path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5M20 7l-3-3" />
-                                    </svg>
-                                    <span>Reconnect</span>
-                                </button>
-                            }
-                            <button class="voice-end-voice-button" type="button" aria-label="End voice" @onclick="voice.EndVoiceAsync">
-                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                                    <path d="M12 3v18M5 8v8M19 8v8M2 10v4M22 10v4" />
-                                </svg>
-                                <span>End voice</span>
-                            </button>
-                        }
-                        else
-                        {
-                            <button class="voice-control-button" type="button" @onclick="StartVoiceAsync" disabled="@(!CanStartVoice)">
-                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                                    <rect x="9" y="2" width="6" height="12" rx="3" />
-                                    <path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" />
-                                </svg>
-                                <span>Start voice</span>
-                            </button>
-                        }
                         <button class="voice-end-voice-button" type="button" aria-label="Start over"
                                 @onclick="StartOverAsync" disabled="@(isEnding || isResetting || runInFlight)">
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -246,8 +185,7 @@
                                             <SuggestionChips />
                                         </EmptyContent>
                                         <Footer Context="footerContext">
-                                            <ChatFooter Context="footerContext" DeviceQuestion="@deviceQuestion"
-                                                        SpokenTranscript="@voice?.PendingTranscript" />
+                                            <ChatFooter Context="footerContext" DeviceQuestion="@deviceQuestion" />
                                         </Footer>
                                     </MessageList>
                                     <button class="new-message-button" type="button" hidden>New message ↓</button>
@@ -261,9 +199,7 @@
                                             {
                                                 <strong>Chat ending soon</strong>
                                                 <span>This chat will end within 30 seconds due to inactivity.</span>
-                                                <small>@(voice.State == "paused" ? "Resume voice and speak to continue."
-                                                    : voice.Muted ? "Unmute your microphone and speak to continue."
-                                                    : "Speak to continue.")</small>
+                                                <small>@(voice.State == "paused" ? "Resume voice and speak to continue." : "Speak to continue.")</small>
                                             }
                                             else
                                             {
@@ -275,7 +211,15 @@
                                 }
                                 <div class="sc-ai-chat-page__footer">
                                     <div class="sc-ai-chat-page__input-container">
-                                        <MessageInput Placeholder="Ask the concierge…" />
+                                        <VoiceStatus Voice="voice" />
+                                        <MessageInput Placeholder="Ask the concierge…">
+                                            @* LeadingActions, shown on the right by agentic.css: in this kit version
+                                               TrailingActions replaces the Send button. *@
+                                            <LeadingActions>
+                                                <VoiceInputControls Voice="voice" CanStart="CanStartVoice"
+                                                                    OnMic="OnMicAsync" OnSpeaker="OnSpeakerAsync" />
+                                            </LeadingActions>
+                                        </MessageInput>
                                     </div>
                                 </div>
                             </div>

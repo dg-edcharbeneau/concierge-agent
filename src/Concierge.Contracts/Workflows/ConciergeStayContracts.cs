@@ -35,7 +35,8 @@ public sealed record ConciergeStayWorkflowInput(
     ConciergePlacePresentation? NearbyPlaces = null,
     ConciergePlacePresentation? PlaceClarification = null,
     IReadOnlyList<ConciergeVoiceRevision>? VoiceRevisions = null,
-    ConciergeVoiceRevisionCheckpoint? VoiceRevisionCheckpoint = null);
+    ConciergeVoiceRevisionCheckpoint? VoiceRevisionCheckpoint = null,
+    int IdleRolloverSeconds = 0);
 
 /// <summary>Activity-verified places, never model-supplied coordinates or identifiers.</summary>
 public sealed record ConciergeCanonicalPlace(

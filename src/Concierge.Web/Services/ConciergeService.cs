@@ -650,7 +650,8 @@ public sealed class ConciergeService(
                     session.EligibilityDeadlineUtc,
                     persistenceOptions.Value.FlushIntervalSeconds,
                     TranscriptFlushBatchSize: persistenceOptions.Value.FlushBatchSize,
-                    VerifiedGuest: session.VerifiedGuest),
+                    VerifiedGuest: session.VerifiedGuest,
+                    IdleRolloverSeconds: persistenceOptions.Value.IdleRolloverSeconds),
             ],
             new WorkflowOptions(workflowId, TemporalWorkerConnection.TaskQueue)
             {

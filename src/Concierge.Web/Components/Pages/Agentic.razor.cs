@@ -149,6 +149,18 @@ public sealed partial class Agentic : IAsyncDisposable
             verificationError = "Your session ended. Verify your stay again to continue.";
             return;
         }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Thrown out of the first render, this would end the circuit and leave a dead page. The
+            // stored session stays, so a reload or a new verification tries again.
+            Logger.LogInformation(
+                "AG-UI preview could not load the stay conversation. Cause types: {CauseTypes}.",
+                ConciergeDiagnostics.ExceptionTypeChain(exception));
+            verificationError = exception is ConciergeApiException { StatusCode: < 500 } api
+                ? api.Message
+                : "The concierge couldn't load your conversation. Try again in a moment.";
+            return;
+        }
 
         await TearDownSessionAsync();
         session = stored;
@@ -175,24 +187,33 @@ public sealed partial class Agentic : IAsyncDisposable
             RefreshFromHistoryAsync, OnSessionExpiredAsync, OnVoiceEndedChatAsync);
     }
 
-    /// <summary>Keeps the header control group identical outside voice, including the end-of-chat views.</summary>
-    private string HeaderControlsClass =>
-        voice?.Mode == true && !showEndConfirmation && !showResetConfirmation && !chatEnded
-            ? "voice-header-controls has-voice-mode"
-            : "voice-header-controls";
-
     /// <summary>As Home: not while the page's own turn runs or the chat is ending or starting over.</summary>
     private bool CanStartVoice =>
         session is not null && voice is { Mode: false } && !runInFlight
         && !isEnding && !isResetting && !showEndConfirmation && !showResetConfirmation;
 
-    private async Task StartVoiceAsync()
+    /// <summary>The input's mic button: start voice, or end, resume or reconnect the session.</summary>
+    private async Task OnMicAsync()
     {
-        if (CanStartVoice && session is not null)
+        if (voice is null || session is null)
         {
-            await voice!.StartAsync(session.Credential, session.SessionId);
+            return;
         }
+
+        if (!voice.Mode)
+        {
+            if (CanStartVoice)
+            {
+                await voice.StartAsync(session.Credential, session.SessionId);
+            }
+
+            return;
+        }
+
+        await voice.MicActionAsync();
     }
+
+    private Task OnSpeakerAsync() => voice?.ToggleSpeakerAsync() ?? Task.CompletedTask;
 
     /// <summary>A spoken farewell or the idle timeout: the End chat flow, without its confirmation.</summary>
     private async Task OnVoiceEndedChatAsync(string reason)

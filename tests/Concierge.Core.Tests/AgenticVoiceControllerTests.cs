@@ -167,6 +167,35 @@ public sealed class AgenticVoiceControllerTests
     }
 
     [Fact]
+    public async Task TheInputMicEndsResumesOrReconnectsByStateAndTheSpeakerTogglesReplies()
+    {
+        await using var harness = new Harness();
+        await harness.Voice.MicActionAsync();
+        Assert.Empty(harness.Js.Calls);
+
+        await harness.ListenAsync();
+        await harness.Voice.ToggleSpeakerAsync();
+        Assert.True(harness.Voice.SpeakerMuted);
+        await harness.Voice.ToggleSpeakerAsync();
+        Assert.False(harness.Voice.SpeakerMuted);
+
+        await harness.Voice.OnVoiceState("paused", null, 0);
+        await harness.Voice.MicActionAsync();
+        Assert.Contains("resume", harness.Js.Calls);
+
+        await harness.Voice.OnVoiceState("disconnected", "Voice disconnected.", 4000);
+        var starts = harness.Js.Calls.Count(call => call.StartsWith("start", StringComparison.Ordinal));
+        await harness.Voice.MicActionAsync();
+        Assert.Equal(starts + 1, harness.Js.Calls.Count(call => call.StartsWith("start", StringComparison.Ordinal)));
+        Assert.Equal("connecting", harness.Voice.State);
+
+        await harness.Voice.OnVoiceState("listening", null, 0);
+        await harness.Voice.MicActionAsync();
+        Assert.False(harness.Voice.Mode);
+        Assert.Equal(["speaker True", "speaker False"], harness.Js.Calls.Where(call => call.StartsWith("speaker", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public async Task DisposeStopsVoiceAndLaterCallbacksAreIgnored()
     {
         var harness = new Harness();
@@ -284,6 +313,12 @@ public sealed class AgenticVoiceControllerTests
         }
 
         public Task<bool?> SetMutedAsync(bool muted) => Task.FromResult<bool?>(Running ? muted : null);
+
+        public Task<bool?> SetSpeakerMutedAsync(bool muted)
+        {
+            Calls.Enqueue($"speaker {muted}");
+            return Task.FromResult<bool?>(muted);
+        }
 
         public Task StopAsync()
         {

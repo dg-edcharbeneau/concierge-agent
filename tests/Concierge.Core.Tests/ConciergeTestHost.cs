@@ -253,13 +253,15 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
     /// <summary>Starts the stay workflow exactly as the API does for a verified session.</summary>
     public async Task<WorkflowHandle<ConciergeStayWorkflow>> StartStayAsync(
         Guid stayId,
-        DateTimeOffset deadline)
+        DateTimeOffset deadline,
+        int idleRolloverSeconds = 0)
     {
         var workflowId = $"concierge-stay-{stayId:N}";
+        var input = new ConciergeStayWorkflowInput(
+            stayId, deadline, FlushIntervalSeconds, 0, null, FlushBatchSize,
+            IdleRolloverSeconds: idleRolloverSeconds);
         await Environment.Client.StartWorkflowAsync(
-            (ConciergeStayWorkflow workflow) => workflow.RunAsync(
-                new ConciergeStayWorkflowInput(
-                    stayId, deadline, FlushIntervalSeconds, 0, null, FlushBatchSize)),
+            (ConciergeStayWorkflow workflow) => workflow.RunAsync(input),
             new WorkflowOptions(workflowId, TemporalWorkerConnection.TaskQueue)
             {
                 IdConflictPolicy = WorkflowIdConflictPolicy.UseExisting,

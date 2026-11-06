@@ -315,6 +315,141 @@ public sealed class AgenticPageRenderTests
         }
     }
 
+    /// <summary>The input's voice controls follow the AgenticUI sample: mic to start and end, speaker to mute replies.</summary>
+    [Fact]
+    public async Task VoiceInputControlsFollowTheVoiceState()
+    {
+        var registry = new Concierge.Web.Voice.VoiceSessionRegistry(TimeProvider.System);
+        var stay = new ConciergeSessionContext(Guid.NewGuid(), Guid.NewGuid(), DateTimeOffset.UtcNow.AddDays(1));
+        var host = new VoiceInputHost();
+        var renderer = new PageRenderer();
+        var id = renderer.Attach(host);
+        host.Voice = new AgenticVoiceController(registry, new SilentVoice(), NullLogger.Instance,
+            callback => renderer.Dispatcher.InvokeAsync(callback), () => _ = renderer.Dispatcher.InvokeAsync(host.Refresh),
+            () => Task.CompletedTask, () => Task.CompletedTask, _ => Task.CompletedTask);
+        host.CanStart = false;
+        await renderer.Dispatcher.InvokeAsync(() => renderer.RenderRoot(id));
+
+        var mic = renderer.Attributes(id, "voice-input__mic")!;
+        Assert.Equal("Start voice", mic["aria-label"]);
+        Assert.True(mic.ContainsKey("disabled"), "A turn in flight disables Start voice.");
+        Assert.Null(renderer.Attributes(id, "voice-input__meter--speaker"));
+        Assert.Null(renderer.Attributes(id, "voice-status-row"));
+        Assert.DoesNotContain("Listening", Normalized(renderer.Text(id)));
+
+        await host.Voice.StartAsync("credential", stay.SessionId);
+        var connection = registry.Open(stay, null);
+        await host.Voice.OnVoiceSession(connection.Session.Id.ToString());
+        await host.Voice.OnVoiceState("listening", null, 0);
+        await renderer.Dispatcher.InvokeAsync(host.Refresh);
+        Assert.Equal("listening", renderer.Attributes(id, "voice-input")!["data-state"]);
+        Assert.Equal("listening", renderer.Attributes(id, "voice-status-row")!["data-state"]);
+        Assert.Equal("End voice", renderer.Attributes(id, "voice-input__mic")!["aria-label"]);
+        Assert.Equal(["End voice", "Mute spoken replies"],
+            renderer.AllAttributes(id, "voice-input__button").Select(button => button["aria-label"] as string));
+        Assert.Contains("Listening", Normalized(renderer.Text(id)));
+
+        // What the guest said shows above the input until the turn finishes.
+        var reply = new TaskCompletionSource<ConciergeTurnResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var turn = connection.Session.JoinOrStart("v:1", () => reply.Task, "Is the pool open?");
+        await WaitUntil(() => Normalized(renderer.Text(id)).Contains("You said: “Is the pool open?”"));
+        Assert.Equal("status", renderer.Attributes(id, "voice-input__bubble")!["role"]);
+        reply.SetResult(new ConciergeTurnResult("v:1", "Yes.", 1));
+        await turn;
+        await WaitUntil(() => !Normalized(renderer.Text(id)).Contains("You said"));
+
+        await host.Voice.OnVoiceState("paused", null, 0);
+        await renderer.Dispatcher.InvokeAsync(host.Refresh);
+        Assert.Equal("Resume voice", renderer.Attributes(id, "voice-input__mic")!["aria-label"]);
+        Assert.Null(renderer.Attributes(id, "voice-input__meter--speaker"));
+
+        await host.Voice.OnVoiceState("disconnected", "Voice is unavailable right now.", 4503);
+        await renderer.Dispatcher.InvokeAsync(host.Refresh);
+        Assert.Equal("Reconnect voice", renderer.Attributes(id, "voice-input__mic")!["aria-label"]);
+        Assert.Equal("alert", renderer.Attributes(id, "voice-input__bubble--error")!["role"]);
+        Assert.Contains("Voice is unavailable right now.", Normalized(renderer.Text(id)));
+
+    }
+
+    /// <summary>
+    /// The kit facts the input layout relies on (0.1.0-preview.1.26466.103): LeadingActions renders as a
+    /// child of .sc-ai-input next to the text and keeps Send, which agentic.css then orders after the text;
+    /// TrailingActions replaces Send, so the voice controls can't go there.
+    /// </summary>
+    [Fact]
+    public async Task LeadingActionsKeepSendAndTrailingActionsReplaceIt()
+    {
+        using var agent = new UIAgent(new NoChatClient(), options => options.Thread = new StayConversationThread(Guid.NewGuid()));
+        var renderer = new PageRenderer();
+
+        var leading = renderer.Attach(new InputHost { Agent = agent, Slot = nameof(MessageInput.LeadingActions) });
+        await renderer.Dispatcher.InvokeAsync(() => renderer.RenderRoot(leading));
+        var elements = renderer.Elements(leading);
+        var marker = elements.FindIndex(line => line.Contains("actions-marker"));
+        Assert.True(marker > elements.FindIndex(line => line.Contains("class=sc-ai-input>")), string.Join("\n", elements));
+        Assert.True(marker < elements.FindIndex(line => line.Contains("sc-ai-input__body")), string.Join("\n", elements));
+        Assert.Contains(elements, line => line.Contains("sc-ai-input__send"));
+
+        var trailing = renderer.Attach(new InputHost { Agent = agent, Slot = nameof(MessageInput.TrailingActions) });
+        await renderer.Dispatcher.InvokeAsync(() => renderer.RenderRoot(trailing));
+        Assert.DoesNotContain(renderer.Elements(trailing), line => line.Contains("sc-ai-input__send"));
+    }
+
+    private sealed class InputHost : ComponentBase
+    {
+        public UIAgent Agent { get; set; } = default!;
+
+        public string Slot { get; set; } = nameof(MessageInput.LeadingActions);
+
+        protected override void BuildRenderTree(RenderTreeBuilder builder)
+        {
+            builder.OpenComponent<AgentBoundary>(0);
+            builder.AddComponentParameter(1, nameof(AgentBoundary.Agent), Agent);
+            builder.AddComponentParameter(2, nameof(AgentBoundary.ChildContent), (RenderFragment)(inner =>
+            {
+                inner.OpenComponent<MessageInput>(0);
+                inner.AddComponentParameter(1, Slot, (RenderFragment)(actions =>
+                {
+                    actions.OpenElement(0, "span");
+                    actions.AddAttribute(1, "class", "actions-marker");
+                    actions.CloseElement();
+                }));
+                inner.CloseComponent();
+            }));
+            builder.CloseComponent();
+        }
+    }
+
+    private sealed class VoiceInputHost : ComponentBase
+    {
+        public AgenticVoiceController? Voice { get; set; }
+
+        public bool CanStart { get; set; }
+
+        public void Refresh() => StateHasChanged();
+
+        protected override void BuildRenderTree(RenderTreeBuilder builder)
+        {
+            // As on the page: the status row above the input, then the input's voice buttons.
+            builder.OpenComponent<VoiceStatus>(0);
+            builder.AddComponentParameter(1, nameof(VoiceStatus.Voice), Voice);
+            builder.CloseComponent();
+            builder.OpenComponent<VoiceInputControls>(2);
+            builder.AddComponentParameter(3, nameof(VoiceInputControls.Voice), Voice);
+            builder.AddComponentParameter(4, nameof(VoiceInputControls.CanStart), CanStart);
+            builder.CloseComponent();
+        }
+    }
+
+    private sealed class SilentVoice : IVoiceInterop
+    {
+        public Task StartAsync(string credential, string? voiceSessionId, DotNetObjectReference<AgenticVoiceController> callbacks) => Task.CompletedTask;
+        public Task ResumeAsync() => Task.CompletedTask;
+        public Task<bool?> SetMutedAsync(bool muted) => Task.FromResult<bool?>(muted);
+        public Task<bool?> SetSpeakerMutedAsync(bool muted) => Task.FromResult<bool?>(muted);
+        public Task StopAsync() => Task.CompletedTask;
+    }
+
     /// <summary>Yields one text delta per <see cref="Step"/> release, as the AG-UI client delivers them.</summary>
     private sealed class SteppedChatClient(string[] parts) : IChatClient
     {
@@ -609,6 +744,36 @@ public sealed class AgenticPageRenderTests
                         output.Add(new string(' ', depth * 2) + "[" + frame.ComponentType.Name + "]");
                         Walk(frame.ComponentId, depth + 1);
                     }
+                }
+            }
+        }
+
+        /// <summary>All attributes of the first element with class <paramref name="className"/>, or null.</summary>
+        public Dictionary<string, object?>? Attributes(int id, string className) => AllAttributes(id, className).FirstOrDefault();
+
+        /// <summary>The attributes of every element with class <paramref name="className"/>, in render order.</summary>
+        public List<Dictionary<string, object?>> AllAttributes(int id, string className)
+        {
+            var output = new List<Dictionary<string, object?>>();
+            Walk(id);
+            return output;
+
+            void Walk(int componentId)
+            {
+                var frames = GetCurrentRenderTreeFrames(componentId);
+                for (var index = 0; index < frames.Count; index++)
+                {
+                    var frame = frames.Array[index];
+                    if (frame.FrameType == RenderTreeFrameType.Component) Walk(frame.ComponentId);
+                    if (frame.FrameType != RenderTreeFrameType.Element) continue;
+
+                    var attributes = new Dictionary<string, object?>(StringComparer.Ordinal);
+                    for (var a = index + 1; a < frames.Count && frames.Array[a].FrameType == RenderTreeFrameType.Attribute; a++)
+                    {
+                        attributes[frames.Array[a].AttributeName] = frames.Array[a].AttributeValue;
+                    }
+
+                    if (attributes.GetValueOrDefault("class") is string value && value.Split(' ').Contains(className)) output.Add(attributes);
                 }
             }
         }

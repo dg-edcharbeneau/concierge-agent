@@ -132,4 +132,10 @@ public sealed class ConciergePersistenceOptions
     public int FlushIntervalSeconds { get; set; } = 30;
 
     public int FlushBatchSize { get; set; } = DefaultFlushBatchSize;
+
+    /// <summary>
+    /// How long an idle stay waits before it continues as new while ride-feed polls are waiting, which
+    /// releases polls abandoned by closed tabs and restarted Web instances (ADR 0015). 0 turns it off.
+    /// </summary>
+    public int IdleRolloverSeconds { get; set; } = 900;
 }

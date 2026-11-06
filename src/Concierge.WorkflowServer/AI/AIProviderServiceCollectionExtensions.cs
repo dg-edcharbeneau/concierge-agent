@@ -340,7 +340,9 @@ internal sealed class BoundedChatClient(
             await ConciergeAITelemetry.WaitForSlotAsync(gate, "chat", timeoutSource.Token);
             try
             {
-                return await InnerClient.GetResponseAsync(messages, options, timeoutSource.Token);
+                var response = await InnerClient.GetResponseAsync(messages, options, timeoutSource.Token);
+                ModelProviderErrorException.ThrowIfError(response.Messages.SelectMany(message => message.Contents));
+                return response;
             }
             finally
             {
@@ -390,6 +392,9 @@ internal sealed class BoundedChatClient(
                     throw ActivityCallBudget.Exceeded("chat", bound, exception);
                 }
 
+                // A provider fault can arrive as an error item in a successful stream; as a failure,
+                // the durable activity's retry policy gets a chance at it.
+                ModelProviderErrorException.ThrowIfError(updates.Current.Contents);
                 yield return updates.Current;
             }
         }
@@ -570,4 +575,33 @@ public static class EmbeddingGeneratorBoundExtensions
     public static IEmbeddingGenerator<string, Embedding<float>> ForIngestion(
         this IEmbeddingGenerator<string, Embedding<float>> generator) =>
         generator.GetService<BoundedEmbeddingGenerator>()?.Ingestion ?? generator;
+}
+
+/// <summary>
+/// The provider answered with an error item instead of a reply, for example Azure's front end resetting
+/// the upstream connection ("upstream connect error ... connection termination", 2026-11-06, ADR 0015).
+/// Returned as content, the durable activity would succeed with no answer and the turn would fail as an
+/// empty response; thrown, Temporal retries the call and exhausted retries get the workflow's
+/// actionable model-failure reply.
+/// </summary>
+internal sealed class ModelProviderErrorException(string message) : Exception(message)
+{
+    private const int MaxDetailLength = 200;
+
+    public static void ThrowIfError(IEnumerable<AIContent> contents)
+    {
+        if (contents.OfType<ErrorContent>().FirstOrDefault() is not { } error)
+        {
+            return;
+        }
+
+        var detail = string.IsNullOrWhiteSpace(error.Message) ? "(no message)" : error.Message.Trim();
+        if (detail.Length > MaxDetailLength)
+        {
+            detail = detail[..MaxDetailLength];
+        }
+
+        throw new ModelProviderErrorException(
+            $"The model provider returned an error instead of a reply{(error.ErrorCode is { Length: > 0 } code ? $" ({code})" : "")}: {detail}");
+    }
 }

@@ -295,6 +295,7 @@ a new stay workflow. Existing stay workflows retain their original policy.
 | --- | --- | --- | --- |
 | `Concierge:Persistence:FlushIntervalSeconds` | `30` | Seconds | Integer `1–600`; maximum interval before a transcript batch is persisted. |
 | `Concierge:Persistence:FlushBatchSize` | `5` | Turns | Integer `1–100`; transcript batch size. |
+| `Concierge:Persistence:IdleRolloverSeconds` | `900` | Seconds | `0` (off) or integer `60–86400`. While a stay is idle and ride-feed polls are waiting, it continues as new once per interval. That releases polls left by closed tabs and restarted Web instances, which otherwise count against Temporal's in-flight Update limit until the stay ends. |
 
 Web validates these at startup. AppHost does not read or forward this policy.
 Ending a chat flushes pending transcript turns; the policy is passed when a new

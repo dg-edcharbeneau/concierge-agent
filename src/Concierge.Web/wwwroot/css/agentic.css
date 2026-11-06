@@ -213,3 +213,185 @@
     font-size: 13px;
     overflow-wrap: anywhere;
 }
+
+/* ---------- Voice in the message input (after the AgenticUI sample's VoiceControls) ---------- */
+/* Rendered as LeadingActions (TrailingActions would replace Send) and shown between the text and Send. */
+.sc-ai-input > .voice-input {
+    order: 1;
+}
+
+.sc-ai-input > .sc-ai-input__send {
+    order: 2;
+}
+
+.voice-input {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    flex-shrink: 0;
+    /* The kit bottom-aligns the input row (Send included); match it so the buttons stay level. */
+    align-self: flex-end;
+}
+
+.voice-input__button {
+    width: 2.25rem;
+    height: 2.25rem;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 50%;
+    background: var(--surface-background);
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.voice-input__button:hover:not(:disabled) {
+    background: var(--panel-background);
+    color: var(--text-primary);
+}
+
+.voice-input__button:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+
+.voice-input__button:disabled {
+    opacity: .5;
+    cursor: default;
+}
+
+.voice-input__button svg {
+    width: 1.15rem;
+    height: 1.15rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.voice-input__button--muted {
+    opacity: .7;
+}
+
+/* A live session: the mic is filled with the accent colour. */
+.voice-input:is([data-state="listening"], [data-state="thinking"], [data-state="speaking"]) .voice-input__mic,
+.voice-input:is([data-state="listening"], [data-state="thinking"], [data-state="speaking"]) .voice-input__mic:hover:not(:disabled) {
+    background: var(--primary-action-background);
+    border-color: var(--primary-action-background);
+    color: var(--primary-action-text);
+}
+
+/* Level rings: --level (0..1) comes from voice.js on every animation frame. The mic ring follows the
+   guest's voice and the speaker ring the concierge's. */
+.voice-input__meter {
+    --level: 0;
+    display: flex;
+    border-radius: 50%;
+    box-shadow: 0 0 0 calc(var(--level) * .55rem) color-mix(in srgb, var(--accent-color) 30%, transparent);
+    transition: box-shadow 60ms linear;
+}
+
+.voice-input__meter--speaker {
+    box-shadow: 0 0 0 calc(var(--level) * .55rem) color-mix(in srgb, var(--accent-color) 22%, transparent),
+        0 0 0 calc(var(--level) * .9rem) color-mix(in srgb, var(--accent-color) 10%, transparent);
+}
+
+/* Above the input's top-right corner: the voice state, and to its left what the guest just said. It
+   floats over the footer's top edge, so starting voice doesn't move the input. */
+.page-shell .sc-ai-chat-page__input-container {
+    position: relative;
+}
+
+.voice-status-row {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 6px);
+    left: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    gap: .5rem;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.voice-input__status {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: .35rem;
+    padding: .15rem .6rem;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--surface-background);
+    color: var(--text-secondary);
+    font-size: .8125rem;
+    white-space: nowrap;
+}
+
+.voice-input__dot {
+    width: .5rem;
+    height: .5rem;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+.voice-status-row:is([data-state="connecting"], [data-state="listening"], [data-state="thinking"]) .voice-input__dot {
+    background: var(--accent-color);
+    animation: voice-input-pulse 1.6s ease-out infinite;
+}
+
+.voice-status-row[data-state="thinking"] .voice-input__dot {
+    animation-duration: .8s;
+}
+
+.voice-status-row[data-state="speaking"] .voice-input__dot {
+    background: var(--accent-color);
+}
+
+.voice-status-row[data-state="disconnected"] .voice-input__dot {
+    background: var(--error-text);
+}
+
+/* What the guest just said, or a failure: left of the status, in the same row above the input. */
+.voice-input__bubble {
+    min-width: 0;
+    max-width: min(36rem, 100%);
+    padding: .3rem .7rem;
+    border-radius: 8px;
+    background: var(--surface-background);
+    border: 1px solid var(--border-color);
+    box-shadow: 0 2px 8px rgb(0 0 0 / .08);
+    color: var(--text-secondary);
+    font-size: .8125rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.voice-input__bubble--error {
+    color: var(--error-text);
+    background: var(--error-background);
+    border-color: var(--error-border);
+    white-space: normal;
+}
+
+@keyframes voice-input-pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-color) 50%, transparent); }
+    100% { box-shadow: 0 0 0 .35rem color-mix(in srgb, var(--accent-color) 0%, transparent); }
+}
+
+/* Reduced motion: no pulse, and the rings show activity by colour, not by growing. */
+@media (prefers-reduced-motion: reduce) {
+    .voice-input__dot { animation: none !important; }
+    .voice-input__meter,
+    .voice-input__meter--speaker {
+        transition: none;
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) calc(var(--level) * 60%), transparent);
+    }
+}

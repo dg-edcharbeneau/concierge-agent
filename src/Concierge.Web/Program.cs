@@ -54,6 +54,9 @@ builder.Services.AddOptions<ConciergePersistenceOptions>()
     .Validate(
         options => options.FlushBatchSize is >= 1 and <= ConciergePersistenceOptions.MaxFlushBatchSize,
         $"{ConciergePersistenceOptions.SectionName}:FlushBatchSize must be between 1 and {ConciergePersistenceOptions.MaxFlushBatchSize}.")
+    .Validate(
+        options => options.IdleRolloverSeconds is 0 or (>= 60 and <= 86400),
+        $"{ConciergePersistenceOptions.SectionName}:IdleRolloverSeconds must be 0 (off) or between 60 and 86400.")
     .ValidateOnStart();
 
 builder.Services.AddOptions<DeepgramVoiceOptions>()

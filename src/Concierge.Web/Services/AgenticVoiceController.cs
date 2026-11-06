@@ -46,6 +46,9 @@ public sealed class AgenticVoiceController(
 
     public bool Muted { get; private set; }
 
+    /// <summary>Spoken replies are silenced; the guest still sees them. Kept across reconnects.</summary>
+    public bool SpeakerMuted { get; private set; }
+
     public bool IdleWarning { get; private set; }
 
     /// <summary>"farewell" or "idle_timeout" once voice ended the chat.</summary>
@@ -114,6 +117,24 @@ public sealed class AgenticVoiceController(
     }
 
     public Task ResumeAsync() => voice.ResumeAsync();
+
+    /// <summary>
+    /// The input's mic button: starts nothing (the page starts voice with the guest's credential), ends
+    /// a live session, resumes a paused one, and reconnects a dropped one.
+    /// </summary>
+    public Task MicActionAsync() => !Mode
+        ? Task.CompletedTask
+        : Active ? EndVoiceAsync()
+        : State == "paused" ? ResumeAsync()
+        : ConnectAsync();
+
+    public async Task ToggleSpeakerAsync()
+    {
+        if (await voice.SetSpeakerMutedAsync(!SpeakerMuted) is { } muted)
+        {
+            SpeakerMuted = muted;
+        }
+    }
 
     public async Task ToggleMuteAsync()
     {
@@ -369,6 +390,9 @@ public interface IVoiceInterop
     /// <summary>The new muted state, or null when no voice is running.</summary>
     Task<bool?> SetMutedAsync(bool muted);
 
+    /// <summary>Silences or restores spoken replies; null when the browser can't be reached.</summary>
+    Task<bool?> SetSpeakerMutedAsync(bool muted);
+
     Task StopAsync();
 }
 
@@ -405,6 +429,18 @@ public sealed class JSVoiceInterop(IJSRuntime js) : IVoiceInterop
         try
         {
             return await js.InvokeAsync<bool>("conciergeVoice.setMuted", muted);
+        }
+        catch (Exception exception) when (exception is JSDisconnectedException or JSException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<bool?> SetSpeakerMutedAsync(bool muted)
+    {
+        try
+        {
+            return await js.InvokeAsync<bool>("conciergeVoice.setSpeakerMuted", muted);
         }
         catch (Exception exception) when (exception is JSDisconnectedException or JSException or InvalidOperationException)
         {

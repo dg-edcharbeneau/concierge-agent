@@ -113,6 +113,10 @@ public sealed class ConciergeStayWorkflow
     private readonly DateTimeOffset eligibilityDeadlineUtc;
     private readonly TimeSpan flushInterval;
     private readonly int flushBatchSize;
+    // Zero for stays started before the idle rollover existed: their commands stay exactly as before.
+    private readonly TimeSpan idleRollover;
+    private DateTimeOffset runStartedUtc;
+    private bool rolloverStarted;
     private bool hasEarlierRuns;
     private ConciergeVerifiedGuest? verifiedGuest;
     private ConciergeRideProposal? pendingRideProposal;
@@ -143,6 +147,7 @@ public sealed class ConciergeStayWorkflow
         flushInterval = TimeSpan.FromSeconds(Math.Max(1, input.TranscriptFlushIntervalSeconds));
         flushBatchSize = Math.Clamp(
             input.TranscriptFlushBatchSize, 1, ConciergePersistenceOptions.MaxFlushBatchSize);
+        idleRollover = TimeSpan.FromSeconds(Math.Max(0, input.IdleRolloverSeconds));
         nextSequence = input.NextSequence;
         rideStream = new WorkflowStream(input.RideStreamState);
         rideReadOffset = Math.Max(0, input.RideReadOffset);
@@ -189,6 +194,7 @@ public sealed class ConciergeStayWorkflow
     [WorkflowRun]
     public async Task RunAsync(ConciergeStayWorkflowInput input)
     {
+        runStartedUtc = Workflow.UtcNow;
         var persistedNextSequence = await Workflow.ExecuteActivityAsync(
             (ConciergeTranscriptActivities activities) =>
                 activities.ReadNextSequenceAsync(new ReadNextTranscriptSequenceRequest(stayId)),
@@ -201,11 +207,11 @@ public sealed class ConciergeStayWorkflow
 
         while (Workflow.UtcNow < eligibilityDeadlineUtc)
         {
-            if (pendingPersistence.Count == 0 && !Workflow.ContinueAsNewSuggested)
+            if (pendingPersistence.Count == 0 && !Workflow.ContinueAsNewSuggested && !rolloverStarted && !RolloverDue())
             {
                 await Workflow.WaitConditionAsync(
                     () => pendingPersistence.Count > 0 || Workflow.ContinueAsNewSuggested,
-                    RemainingUntilDeadline());
+                    IdleWaitTimeout());
                 continue;
             }
 
@@ -215,6 +221,7 @@ public sealed class ConciergeStayWorkflow
                 // when the batch-size threshold is reached or Continue-As-New is suggested.
                 bool FlushDue() =>
                     Workflow.ContinueAsNewSuggested
+                    || rolloverStarted
                     || pendingPersistence.Count >= flushBatchSize;
 
                 await Workflow.WaitConditionAsync(
@@ -228,9 +235,17 @@ public sealed class ConciergeStayWorkflow
                 }
             }
 
-            if (Workflow.ContinueAsNewSuggested && pendingPersistence.Count == 0)
+            if ((Workflow.ContinueAsNewSuggested || rolloverStarted || RolloverDue()) && pendingPersistence.Count == 0)
             {
-                // Continue between turns, only after every admitted handler and flush finishes.
+                // Continue between turns, only after every admitted handler and flush finishes. Once
+                // pollers are detached the stream rejects new polls, so an idle rollover that has
+                // started must finish even if a turn arrives meanwhile (ADR 0015).
+                if (!Workflow.ContinueAsNewSuggested)
+                {
+                    // Only the idle rollover gets here without a suggestion; stays with it off never do.
+                    rolloverStarted = true;
+                }
+
                 rideStream.DetachPollers();
 
                 await Workflow.WaitConditionAsync(() => Workflow.AllHandlersFinished);
@@ -257,7 +272,8 @@ public sealed class ConciergeStayWorkflow
                         nearbyPlaces,
                         placeClarification,
                         voiceRevisions.Values.ToArray(),
-                        voiceRevisionCheckpoint);
+                        voiceRevisionCheckpoint,
+                        (int)idleRollover.TotalSeconds);
                     throw Workflow.CreateContinueAsNewException(
                         (ConciergeStayWorkflow workflow) => workflow.RunAsync(
                             continueInput));
@@ -273,6 +289,31 @@ public sealed class ConciergeStayWorkflow
         {
             await Workflow.DelayAsync(flushInterval);
         }
+    }
+
+    /// <summary>
+    /// Ride-feed polls are Updates that stay in flight until the stay continues as new, and a subscriber
+    /// that goes away (a closed tab, a restarted Web) never completes its poll. Temporal caps in-flight
+    /// Updates per workflow, so an idle stay that still has waiting handlers (with no turn running, those
+    /// are feed polls) rolls over once per interval; live subscribers follow the new run (ADR 0015).
+    /// </summary>
+    private bool RolloverDue() =>
+        idleRollover > TimeSpan.Zero
+        && Workflow.UtcNow - runStartedUtc >= idleRollover
+        && activeAttempt is null
+        && pendingPersistence.Count == 0
+        && !Workflow.AllHandlersFinished;
+
+    /// <summary>The idle wait: until the deadline, or with the rollover on, until it's next worth checking.</summary>
+    private TimeSpan IdleWaitTimeout()
+    {
+        if (idleRollover <= TimeSpan.Zero)
+        {
+            return RemainingUntilDeadline();
+        }
+
+        var untilDue = runStartedUtc + idleRollover - Workflow.UtcNow;
+        return Min(RemainingUntilDeadline(), untilDue > TimeSpan.Zero ? untilDue : idleRollover);
     }
 
     [WorkflowSignal(ConciergeStayWorkflowIds.TruncateRideActivityStreamSignal)]

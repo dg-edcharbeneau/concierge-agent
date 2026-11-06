@@ -14,6 +14,11 @@ var rides = postgres.AddDatabase("rides");
 var temporal = builder.AddTemporalDevContainer("temporal", options =>
 {
     options.Namespace = "default";
+    // Each ride-feed subscriber holds one Workflow Streams poll Update, and an abandoned poll (closed
+    // tab, restarted Web) stays in flight until the stay continues-as-new. Temporal's default of 10
+    // in-flight Updates per workflow refuses every turn once 10 accumulate. Workflow Streams targets
+    // "tens of subscribers", so allow that; the stay's periodic continue-as-new bounds the rest.
+    options.DynamicConfigValues.Add("history.maxInFlightUpdates=50");
 })
 .WithDataVolume("concierge-temporal-data");
 

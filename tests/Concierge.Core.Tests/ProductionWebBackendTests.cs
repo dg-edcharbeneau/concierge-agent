@@ -78,6 +78,7 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
                 {
                     ["Concierge:Persistence:FlushIntervalSeconds"] = "17",
                     ["Concierge:Persistence:FlushBatchSize"] = "3",
+                    ["Concierge:Persistence:IdleRolloverSeconds"] = "120",
                 })));
         using var http = factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         using var verified = await http.PostAsJsonAsync(
@@ -98,6 +99,34 @@ public sealed class ProductionWebBackendTests(PostgreSqlFixture postgreSql)
         Assert.Equal(stayId, input.StayId);
         Assert.Equal(17, input.TranscriptFlushIntervalSeconds);
         Assert.Equal(3, input.TranscriptFlushBatchSize);
+        Assert.Equal(120, input.IdleRolloverSeconds);
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(60, true)]
+    [InlineData(86400, true)]
+    [InlineData(59, false)]
+    [InlineData(86401, false)]
+    [InlineData(-1, false)]
+    public void IdleRolloverIsOffOrBetweenAMinuteAndADay(int seconds, bool valid)
+    {
+        using var factory = new WebApplicationFactory<ConciergeService>().WithWebHostBuilder(builder =>
+        {
+            builder.UseEnvironment("Development");
+            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
+                new Dictionary<string, string?> { ["Concierge:Persistence:IdleRolloverSeconds"] = seconds.ToString() }));
+        });
+
+        if (!valid)
+        {
+            var failure = Assert.Throws<OptionsValidationException>(() => factory.CreateClient());
+            Assert.Contains("IdleRolloverSeconds must be 0 (off) or between 60 and 86400", failure.Message);
+            return;
+        }
+
+        using var http = factory.CreateClient();
+        Assert.Equal(seconds, factory.Services.GetRequiredService<IOptions<ConciergePersistenceOptions>>().Value.IdleRolloverSeconds);
     }
 
     /// <summary>Worker results retain their deadline and authorize subsequent Web turns.</summary>
