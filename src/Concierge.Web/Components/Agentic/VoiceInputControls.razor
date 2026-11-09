@@ -13,9 +13,16 @@
         <button type="button" class="voice-input__button voice-input__mic"
                 title="@MicLabel" aria-label="@MicLabel" aria-pressed="@(Voice?.Active == true)"
                 disabled="@MicDisabled" @onclick="OnMic">
-            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <svg class="voice-input__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" />
                 <path d="M19 11a7 7 0 0 1-14 0M12 18v3" />
+            </svg>
+            @* Shown instead of the mic by agentic.css while voice is live and the button is hovered or
+               focused: pressing it now turns the mic off. *@
+            <svg class="voice-input__icon voice-input__icon--off" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" />
+                <path d="M19 11a7 7 0 0 1-14 0M12 18v3" />
+                <path d="m4 4 16 16" />
             </svg>
         </button>
     </span>
@@ -25,18 +32,21 @@
         var label = active.SpeakerMuted ? "Speak replies aloud" : "Mute spoken replies";
         <span class="voice-input__meter voice-input__meter--speaker" @ref="speakerMeter">
             <button type="button"
-                    class="voice-input__button @(active.SpeakerMuted ? "voice-input__button--muted" : null)"
+                    class="voice-input__button voice-input__speaker @(active.SpeakerMuted ? "voice-input__button--muted" : null)"
                     title="@label" aria-label="@label" aria-pressed="@active.SpeakerMuted" @onclick="OnSpeaker">
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                    <path d="M4 9v6h4l5 4V5L8 9H4Z" />
-                    @if (active.SpeakerMuted)
-                    {
-                        <path d="m17 9 5 6m0-6-5 6" />
-                    }
-                    else
-                    {
+                @* The same slash as the mic: shown while muted, and on hover or focus as a preview of muting. *@
+                @if (!active.SpeakerMuted)
+                {
+                    <svg class="voice-input__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M4 9v6h4l5 4V5L8 9H4Z" />
                         <path d="M16.5 8.5a5 5 0 0 1 0 7" />
-                    }
+                    </svg>
+                }
+                <svg class="voice-input__icon @(active.SpeakerMuted ? null : "voice-input__icon--off")" viewBox="0 0 24 24"
+                     aria-hidden="true" focusable="false">
+                    <path d="M4 9v6h4l5 4V5L8 9H4Z" />
+                    <path d="M16.5 8.5a5 5 0 0 1 0 7" />
+                    <path d="m4 4 16 16" />
                 </svg>
             </button>
         </span>

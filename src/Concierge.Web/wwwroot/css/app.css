@@ -54,6 +54,7 @@
  * Deepgram 2026 brand kit: Fuchsia #e042ff, LED #7f39ff, Glass #00b2ff (the kit's primary UI button
  * color), Off-black #1d1d1d, Off-white #fcfaf8, Light Gray #c4c4c4, Clay #eb2a2e. Work Sans for text,
  * Azeret Mono for CTAs. Fuchsia is under 4.5:1 on light surfaces, so light mode accents use LED.
+ * Dark mode's primary action is Fuchsia (black text 6.4:1); light mode keeps Glass.
  */
 :root[data-brand="deepgram"] {
     --font-body: "Work Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -70,9 +71,23 @@
     --text-muted: light-dark(#5f5f5f, #a3a3a3);
     --border-color: light-dark(#e2dfda, #3a3a3a);
     --accent-color: light-dark(#7f39ff, #e042ff);
-    --primary-action-background: light-dark(#00b2ff, #00b2ff);
-    --primary-action-hover: light-dark(#33c1ff, #33c1ff);
+    --primary-action-background: light-dark(#00b2ff, #e042ff);
+    --primary-action-hover: light-dark(#33c1ff, #e66bff);
     --primary-action-text: light-dark(#000000, #000000);
+    /*
+     * The /agentic mic is Glass while idle, an invitation to talk that reads apart from Fuchsia actions
+     * (black icon 8.8:1), and plain surface with a Glass border during a session, when the level ring
+     * and status pill show the state. A muted speaker gets a Bakelite border.
+     */
+    --voice-idle-background: #00b2ff;
+    --voice-idle-border: #00b2ff;
+    --voice-idle-text: #000000;
+    --voice-idle-hover: #33c1ff;
+    --voice-idle-hover-text: #000000;
+    --voice-active-background: var(--surface-background);
+    --voice-active-border: #00b2ff;
+    --voice-muted-border: #fa8100;
+    --voice-active-text: var(--text-secondary);
     --suggestion-background: light-dark(#fbe6ff, #3a1442);
     --suggestion-border: light-dark(#f2c2ff, #6b2a7a);
     --suggestion-text: light-dark(#5a1f8a, #fcfaf8);

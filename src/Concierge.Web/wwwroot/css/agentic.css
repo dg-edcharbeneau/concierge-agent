@@ -276,14 +276,44 @@
 
 .voice-input__button--muted {
     opacity: .7;
+    /* A theme can mark a muted speaker with its own border (Deepgram: Bakelite). */
+    border-color: var(--voice-muted-border, var(--border-color));
 }
 
-/* A live session: the mic is filled with the accent colour. */
+/* The idle mic. A theme can set --voice-idle-* (Deepgram: Glass); else the neutral button above. */
+.voice-input__mic {
+    background: var(--voice-idle-background, var(--surface-background));
+    border-color: var(--voice-idle-border, var(--border-color));
+    color: var(--voice-idle-text, var(--text-secondary));
+}
+
+.voice-input__mic:hover:not(:disabled) {
+    background: var(--voice-idle-hover, var(--panel-background));
+    color: var(--voice-idle-hover-text, var(--text-primary));
+}
+
+/* A live session's mic. A theme can set --voice-active-* (Deepgram: plain surface); else the primary action. */
 .voice-input:is([data-state="listening"], [data-state="thinking"], [data-state="speaking"]) .voice-input__mic,
 .voice-input:is([data-state="listening"], [data-state="thinking"], [data-state="speaking"]) .voice-input__mic:hover:not(:disabled) {
-    background: var(--primary-action-background);
-    border-color: var(--primary-action-background);
-    color: var(--primary-action-text);
+    background: var(--voice-active-background, var(--primary-action-background));
+    border-color: var(--voice-active-border, var(--voice-active-background, var(--primary-action-background)));
+    color: var(--voice-active-text, var(--primary-action-text));
+}
+
+/* While voice is live, hovering or focusing the mic shows the slashed mic: pressing it turns voice off. */
+.voice-input__icon--off {
+    display: none;
+}
+
+/* The speaker the same way while it's on; a muted speaker always shows the slash. */
+.voice-input:is([data-state="listening"], [data-state="thinking"], [data-state="speaking"]) .voice-input__mic:is(:hover, :focus-visible) .voice-input__icon,
+.voice-input__speaker:not(.voice-input__button--muted):is(:hover, :focus-visible) .voice-input__icon {
+    display: none;
+}
+
+.voice-input:is([data-state="listening"], [data-state="thinking"], [data-state="speaking"]) .voice-input__mic:is(:hover, :focus-visible) .voice-input__icon--off,
+.voice-input__speaker:not(.voice-input__button--muted):is(:hover, :focus-visible) .voice-input__icon--off {
+    display: block;
 }
 
 /* Level rings: --level (0..1) comes from voice.js on every animation frame. The mic ring follows the
