@@ -73,7 +73,6 @@ function fixture() {
                 <div class="activity-layout">
                     <section class="chat-panel" aria-label="Hotel concierge chat">
                         <button class="questions-heading" type="button" aria-expanded="false" aria-controls="suggested-question-content">
-                            <span class="wave-icon questions-wave-icon" aria-hidden="true">${icon}</span>
                             <span>How can we help?</span><svg class="accordion-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
                         </button>
                         <section id="suggested-question-content" class="suggestions" aria-label="Suggested questions" hidden>
