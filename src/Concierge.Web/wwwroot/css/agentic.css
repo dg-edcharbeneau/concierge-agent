@@ -114,21 +114,6 @@
     opacity: .55;
 }
 
-/* In the conversation heading, clear of the header's mobile voice grid. */
-.conversation-heading .agentic-preview-badge {
-    margin-left: auto;
-}
-
-.agentic-preview-badge {
-    padding: 2px 8px;
-    color: var(--text-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: .04em;
-}
-
 /* Ride cards (ADR 0015): under the concierge bubble, in the app tokens so every theme follows. */
 .ride-card-row {
     display: flex;

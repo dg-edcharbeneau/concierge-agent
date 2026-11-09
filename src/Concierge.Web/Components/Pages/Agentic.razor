@@ -1,3 +1,5 @@
+@page "/"
+@* The original preview address keeps working. *@
 @page "/agentic"
 @rendermode InteractiveServer
 @using Concierge.Web.Agentic
@@ -5,10 +7,10 @@
 @using Concierge.Web.Components.Shared
 @using Microsoft.AspNetCore.Components.AI
 
-@* PROTOTYPE (ADR 0015): the guest chat over AG-UI with Microsoft.AspNetCore.Components.AI, in Home's
-   shell and styles. Voice lives in the message input, as in the AgenticUI sample. *@
+@* The guest chat (ADR 0015): AG-UI with Microsoft.AspNetCore.Components.AI, in the app's shell and
+   styles. Voice lives in the message input, as in the AgenticUI sample. *@
 
-<PageTitle>Hotel ZGY Concierge · AG-UI preview</PageTitle>
+<PageTitle>Hotel ZGY Concierge</PageTitle>
 <HeadContent>
     <link rel="stylesheet" href="_content/Microsoft.AspNetCore.Components.AI/ai-chat.css" />
     <link rel="stylesheet" href="css/agentic.css" />
@@ -156,7 +158,6 @@
                     <section class="chat-panel" aria-label="Hotel concierge chat">
                         <div class="conversation-heading">
                             <span>YOUR STAY CONVERSATION</span>
-                            <span class="agentic-preview-badge" title="This page talks to the concierge over AG-UI">AG-UI preview</span>
                         </div>
                         @* ChatPage's parts, composed by hand: the history restore has to run inside the
                            AgentBoundary and before MessageList first draws (see RestoreConversation).
