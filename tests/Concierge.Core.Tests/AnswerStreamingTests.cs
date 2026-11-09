@@ -5,7 +5,11 @@ using Concierge.Contracts;
 using Concierge.Web.Agentic;
 using Concierge.Web.Services;
 using Concierge.WorkflowServer.AI;
+using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 
@@ -201,6 +205,122 @@ public sealed class AnswerStreamingTests
         quiet.Fail(new ConciergeApiException("unauthorized", "Authenticate again to continue.", 401));
         await second;
         Assert.Equal("Authenticate again to continue.", Assert.Single(only).Text);
+    }
+
+    /// <summary>
+    /// Development: an unexpected failure is kept for the page (the AG-UI host only sends generic text)
+    /// and still fails the run; the next run clears it. Concierge API failures are answers, not failures.
+    /// </summary>
+    [Fact]
+    public async Task AnUnexpectedFailureIsRecordedForTheCredentialAndTheNextRunClearsIt()
+    {
+        var failures = new AgenticRunFailures();
+        var broken = new FakeTurns();
+        using var client = new StayWorkflowChatClient(broken, "credential", failures: failures);
+        var run = Collect(client.GetStreamingResponseAsync([new(ChatRole.User, "Pool?")]), out _);
+        await broken.Submitted.Task;
+        broken.Fail(new InvalidOperationException("Temporal is unreachable."));
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => run);
+        Assert.Equal("Temporal is unreachable.", thrown.Message);
+        Assert.StartsWith("System.InvalidOperationException: Temporal is unreachable.", failures.Latest("credential"));
+        Assert.Null(failures.Latest("another-credential"));
+
+        var rejected = new FakeTurns();
+        using var answered = new StayWorkflowChatClient(rejected, "credential", failures: failures);
+        var second = Collect(answered.GetStreamingResponseAsync([new(ChatRole.User, "Pool?")]), out var only);
+        await rejected.Submitted.Task;
+        rejected.Fail(new ConciergeApiException("unavailable", "The concierge is unavailable. Try again.", 503));
+        await second;
+
+        Assert.Equal("The concierge is unavailable. Try again.", Assert.Single(only).Text);
+        Assert.Null(failures.Latest("credential"));
+    }
+
+    /// <summary>
+    /// Through the real AG-UI host: the guest's client gets only the host's generic error (as ErrorContent,
+    /// raised by RunErrorChatClient), and the Development store holds the server exception the page shows.
+    /// </summary>
+    [Fact]
+    public async Task OverAgUiTheClientGetsGenericTextAndTheStoreHoldsTheServerException()
+    {
+        var turns = new FakeTurns();
+        var builder = Microsoft.AspNetCore.Builder.WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Logging.ClearProviders();
+        builder.Services.AddAGUIServer();
+        builder.Services.AddSingleton<IConciergeService>(turns);
+        builder.Services.AddSingleton<AgenticRunFailures>();
+        await using var app = builder.Build();
+        app.MapAGUIServer(AgenticConcierge.EndpointPath, AgenticConcierge.CreateAgent);
+        await app.StartAsync();
+
+        using var http = new HttpClient { BaseAddress = new Uri(app.Urls.First()), Timeout = TimeSpan.FromSeconds(30) };
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "guest-credential");
+        // The page's wiring (AgenticLoopback): the run's ErrorContent becomes an exception.
+        using var agui = new RunErrorChatClient(
+            new AGUI.Client.AGUIChatClient(new AGUI.Client.AGUIChatClientOptions(http, AgenticConcierge.EndpointPath)));
+        var run = agui.GetResponseAsync([new ChatMessage(ChatRole.User, "Pool?")]);
+        await turns.Submitted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        turns.Fail(new InvalidOperationException("Temporal is unreachable."));
+
+        var thrown = await Assert.ThrowsAsync<AgenticRunFailedException>(() => run);
+        Assert.Equal(
+            "The concierge's AG-UI run failed (StreamingError): An error occurred while streaming the agent response.",
+            thrown.Message);
+        Assert.StartsWith("System.InvalidOperationException: Temporal is unreachable.",
+            app.Services.GetRequiredService<AgenticRunFailures>().Latest("guest-credential"));
+    }
+
+    /// <summary>
+    /// A reply that reports a failure (the API's "unavailable", a model-failure fallback) carries the
+    /// cause as an error-details call in Development, and nothing extra otherwise.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AFailureReplyCarriesItsCauseOnlyInDevelopment(bool development)
+    {
+        var failures = development ? new AgenticRunFailures() : null;
+
+        var rejected = new FakeTurns();
+        using var rejecting = new StayWorkflowChatClient(rejected, "credential", failures: failures);
+        var first = Collect(rejecting.GetStreamingResponseAsync([new(ChatRole.User, "Pool?")]), out var rejectedUpdates);
+        await rejected.Submitted.Task;
+        rejected.Fail(new ConciergeApiException("unavailable", "The concierge is temporarily unavailable. Please try again.", 503,
+            new InvalidOperationException("Temporal is unreachable.")));
+        await first;
+
+        var fallback = new FakeTurns();
+        using var answering = new StayWorkflowChatClient(fallback, "credential", failures: failures);
+        var second = Collect(answering.GetStreamingResponseAsync([new(ChatRole.User, "Pool?")]), out var fallbackUpdates);
+        var turnId = await fallback.Submitted.Task;
+        fallback.Complete(new ConciergeTurnResult(turnId, "I couldn't reach the concierge service just now.", 0,
+            FailureDetail: "ActivityFailureException: Activity task failed\ncaused by ApplicationFailureException: upstream reset"));
+        await second;
+
+        Assert.Equal("The concierge is temporarily unavailable. Please try again.", string.Concat(rejectedUpdates.Select(u => u.Text)));
+        Assert.Equal("I couldn't reach the concierge service just now.", string.Concat(fallbackUpdates.Select(u => u.Text)));
+        var rejectedDetails = Details(rejectedUpdates);
+        var fallbackDetails = Details(fallbackUpdates);
+        if (development)
+        {
+            Assert.Contains("System.InvalidOperationException: Temporal is unreachable.", rejectedDetails);
+            Assert.Equal("ActivityFailureException: Activity task failed\ncaused by ApplicationFailureException: upstream reset", fallbackDetails);
+        }
+        else
+        {
+            Assert.Null(rejectedDetails);
+            Assert.Null(fallbackDetails);
+        }
+    }
+
+    private static string? Details(List<ChatResponseUpdate> updates)
+    {
+        var contents = updates.SelectMany(update => update.Contents).ToList();
+        return contents.OfType<FunctionCallContent>().SingleOrDefault(call => call.Name == AgenticConcierge.ErrorDetailsTool) is { } call
+            ? contents.OfType<FunctionResultContent>().Single(result => result.CallId == call.CallId).Result as string
+            : null;
     }
 
     private static ChatOptions Marked(string turnId) =>

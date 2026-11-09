@@ -250,6 +250,141 @@ public sealed class AgenticPageRenderTests
     }
 
     /// <summary>Streamed text deltas with one message ID grow one concierge bubble (ADR 0015 streaming).</summary>
+    /// <summary>
+    /// A failed run shows the generic card. In Development the page passes the server's recorded
+    /// exception, and the card expands to it plus the page's own; otherwise there is no expander.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AFailedRunShowsErrorDetailsOnlyWhenThePageSuppliesThem(bool development)
+    {
+        var (renderer, id, host) = await RenderComposedAsync([], new FailingChatClient("loopback refused"));
+        if (development)
+        {
+            host.FailureDetails = () => "System.InvalidOperationException: server boom";
+            await renderer.Dispatcher.InvokeAsync(host.Refresh);
+        }
+
+        await renderer.Dispatcher.InvokeAsync(async () =>
+        {
+            try
+            {
+                await host.Restored!.SendMessageAsync("Pool?", CancellationToken.None);
+            }
+            catch (InvalidOperationException)
+            {
+                // Whether the kit rethrows doesn't matter here; the card is what the guest sees.
+            }
+        });
+        await WaitUntil(() => Normalized(renderer.Text(id)).Contains("We couldn’t send that message."));
+
+        var text = string.Join("\n", renderer.Text(id));
+        if (development)
+        {
+            Assert.Contains("Error details (development)", text);
+            Assert.Contains("Server:\nSystem.InvalidOperationException: server boom", text);
+            Assert.Contains("Page:\n", text);
+            Assert.Contains("loopback refused", text);
+            Assert.Contains(renderer.Elements(id), line => line.Contains("class=turn-error__details"));
+        }
+        else
+        {
+            Assert.DoesNotContain("Error details", text);
+            Assert.DoesNotContain("loopback refused", text);
+        }
+    }
+
+    /// <summary>
+    /// The AG-UI client reports a server failure as an ErrorContent item, which the kit ignores. Through
+    /// RunErrorChatClient (the page's wiring) it is the send-error card instead of a silent no-reply.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AServerFailureShowsTheSendErrorCardOnlyThroughRunErrorChatClient(bool wrapped)
+    {
+        IChatClient chat = wrapped ? new RunErrorChatClient(new ErrorContentChatClient()) : new ErrorContentChatClient();
+        var (renderer, id, host) = await RenderComposedAsync([], chat);
+        await renderer.Dispatcher.InvokeAsync(async () =>
+        {
+            try
+            {
+                await host.Restored!.SendMessageAsync("Pool?", CancellationToken.None);
+            }
+            catch (AgenticRunFailedException)
+            {
+                // Whether the kit rethrows doesn't matter here; the card is what the guest sees.
+            }
+        });
+
+        if (wrapped)
+        {
+            await WaitUntil(() => Normalized(renderer.Text(id)).Contains("We couldn’t send that message."));
+            Assert.Equal(ConversationStatus.Error, host.Restored!.Status);
+            Assert.Equal(
+                "The concierge's AG-UI run failed (StreamingError): An error occurred while streaming the agent response.",
+                Assert.IsType<AgenticRunFailedException>(host.Restored.Error).Message);
+        }
+        else
+        {
+            // The kit's behaviour that the wrapper exists for: no card, no reply.
+            await Task.Delay(200);
+            Assert.DoesNotContain("We couldn’t send that message.", Normalized(renderer.Text(id)));
+            Assert.NotEqual(ConversationStatus.Error, host.Restored!.Status);
+        }
+    }
+
+    private sealed class ErrorContentChatClient : IChatClient
+    {
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            yield return new ChatResponseUpdate(ChatRole.Assistant, [new ErrorContent("An error occurred while streaming the agent response.") { ErrorCode = "StreamingError" }]) { MessageId = "m", ResponseId = "r" };
+        }
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
+    /// <summary>Development: a failure reply's details call draws a collapsed expander under the reply.</summary>
+    [Fact]
+    public async Task AnErrorDetailsCallDrawsAnExpanderUnderTheReply()
+    {
+        var (renderer, id, host) = await RenderComposedAsync([], new DetailsChatClient());
+        await renderer.Dispatcher.InvokeAsync(() => host.Restored!.SendMessageAsync("Pool?", CancellationToken.None));
+        await WaitUntil(() => Normalized(renderer.Text(id)).Contains("Error details (development)"));
+
+        var text = string.Join("\n", renderer.Text(id));
+        Assert.Contains("The concierge is temporarily unavailable.", text);
+        Assert.Contains("System.InvalidOperationException: Temporal is unreachable.", text);
+        Assert.Contains(renderer.Elements(id), line => line.Contains("class=agentic-error-details-row"));
+    }
+
+    private sealed class DetailsChatClient : IChatClient
+    {
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            var (call, result) = AgenticConcierge.ErrorDetailsContents("agui:1", "System.InvalidOperationException: Temporal is unreachable.");
+            await Task.Yield();
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "The concierge is temporarily unavailable.") { MessageId = "agui:1", ResponseId = "run-1" };
+            yield return new ChatResponseUpdate(ChatRole.Assistant, [call]) { MessageId = "agui:1", ResponseId = "run-1" };
+            yield return new ChatResponseUpdate(ChatRole.Tool, [result]) { MessageId = call.CallId, ResponseId = "run-1" };
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
     [Fact]
     public async Task StreamedDeltasGrowOneConciergeBubble()
     {
@@ -481,6 +616,30 @@ public sealed class AgenticPageRenderTests
         }
     }
 
+    private sealed class FailingChatClient(string message) : IChatClient
+    {
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            throw new InvalidOperationException(message);
+#pragma warning disable CS0162 // An iterator needs a yield.
+            yield break;
+#pragma warning restore CS0162
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
     /// <summary>Replies the way AGUIChatClient delivers a ride card (spike, ADR 0015).</summary>
     private sealed class CardChatClient(string reply, ConciergeRideCard card) : IChatClient
     {
@@ -542,6 +701,8 @@ public sealed class AgenticPageRenderTests
 
         public string? PendingDeviceQuestion { get; set; }
 
+        public Func<string?>? FailureDetails { get; set; }
+
         public int ListKey { get; set; }
 
         public AgentContext? Restored { get; private set; }
@@ -587,6 +748,18 @@ public sealed class AgenticPageRenderTests
                         }));
                     list.CloseComponent();
 
+                    list.OpenComponent<BlockRenderer<FunctionInvocationContentBlock>>(8);
+                    list.AddComponentParameter(9, nameof(BlockRenderer<FunctionInvocationContentBlock>.When),
+                        (Func<FunctionInvocationContentBlock, bool>)(tool => tool.ToolName == AgenticConcierge.ErrorDetailsTool));
+                    list.AddComponentParameter(10, nameof(BlockRenderer<FunctionInvocationContentBlock>.ChildContent),
+                        (RenderFragment<FunctionInvocationContentBlock>)(tool => details =>
+                        {
+                            details.OpenComponent<ErrorDetails>(0);
+                            details.AddComponentParameter(1, nameof(ErrorDetails.Block), tool);
+                            details.CloseComponent();
+                        }));
+                    list.CloseComponent();
+
                     list.OpenComponent<BlockRenderer<FunctionInvocationContentBlock>>(5);
                     list.AddComponentParameter(6, nameof(BlockRenderer<FunctionInvocationContentBlock>.When),
                         (Func<FunctionInvocationContentBlock, bool>)(tool => tool.ToolName == AgenticConcierge.AnswerCorrectionTool));
@@ -611,6 +784,7 @@ public sealed class AgenticPageRenderTests
                     footer.OpenComponent<ChatFooter>(0);
                     footer.AddComponentParameter(1, nameof(ChatFooter.Context), context);
                     footer.AddComponentParameter(2, nameof(ChatFooter.DeviceQuestion), PendingDeviceQuestion);
+                    footer.AddComponentParameter(3, nameof(ChatFooter.FailureDetails), FailureDetails);
                     footer.CloseComponent();
                 }));
                 inner.CloseComponent();

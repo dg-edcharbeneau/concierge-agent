@@ -177,6 +177,10 @@
                                                 <RideCard Block="tool" />
                                             </BlockRenderer>
                                             <BlockRenderer TBlock="FunctionInvocationContentBlock" Context="tool"
+                                                           When="@(tool => tool.ToolName == AgenticConcierge.ErrorDetailsTool)">
+                                                <ErrorDetails Block="tool" />
+                                            </BlockRenderer>
+                                            <BlockRenderer TBlock="FunctionInvocationContentBlock" Context="tool"
                                                            When="@(tool => tool.ToolName == AgenticConcierge.AnswerCorrectionTool)">
                                                 <AnswerCorrection Block="tool" Corrected="OnAnswerCorrectedAsync" />
                                             </BlockRenderer>
@@ -185,7 +189,7 @@
                                             <SuggestionChips />
                                         </EmptyContent>
                                         <Footer Context="footerContext">
-                                            <ChatFooter Context="footerContext" DeviceQuestion="@deviceQuestion" />
+                                            <ChatFooter Context="footerContext" DeviceQuestion="@deviceQuestion" FailureDetails="FailureDetails" />
                                         </Footer>
                                     </MessageList>
                                     <button class="new-message-button" type="button" hidden>New message ↓</button>

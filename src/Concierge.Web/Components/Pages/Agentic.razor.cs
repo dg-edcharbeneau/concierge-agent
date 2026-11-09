@@ -26,6 +26,7 @@ public sealed partial class Agentic : IAsyncDisposable
     [Inject] private Voice.VoiceSessionRegistry VoiceSessions { get; set; } = default!;
     [Inject] private IJSRuntime JavaScript { get; set; } = default!;
     [Inject] private ILogger<Agentic> Logger { get; set; } = default!;
+    [Inject] private IServiceProvider Services { get; set; } = default!;
 
     /// <summary>What the page keeps in sessionStorage (its own key; see agentic.js).</summary>
     internal sealed record StoredSession(string Credential, Guid StayId, Guid SessionId, DateTimeOffset ExpiresAtUtc);
@@ -38,6 +39,11 @@ public sealed partial class Agentic : IAsyncDisposable
     private bool isVerifying;
 
     private StoredSession? session;
+
+    /// <summary>Development only (null otherwise): the failed run's server exception for the error card.</summary>
+    private Func<string?>? FailureDetails => Services.GetService<AgenticRunFailures>() is { } failures
+        ? () => session is { } current ? failures.Latest(current.Credential) : null
+        : null;
     private StayConversationThread? thread;
     private UIAgent? agent;
     private IChatClient? chatClient;

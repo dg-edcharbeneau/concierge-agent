@@ -825,9 +825,9 @@ public sealed class ConciergeService(
                     "reset_incomplete",
                     failure.Message,
                     StatusCodes.Status503ServiceUnavailable),
-                _ => Unavailable(),
+                _ => Unavailable(exception),
             }
-            : Unavailable();
+            : Unavailable(exception);
     }
 
     private enum SessionOperation
@@ -843,9 +843,11 @@ public sealed class ConciergeService(
     private static ConciergeApiException Unauthorized() =>
         new("unauthorized", "Authenticate again to continue.", StatusCodes.Status401Unauthorized);
 
-    private static ConciergeApiException Unavailable() =>
+    // The cause rides along in memory only (Development diagnostics); the API sends code and message.
+    private static ConciergeApiException Unavailable(Exception? cause = null) =>
         new(
             "unavailable",
             "The concierge is temporarily unavailable. Please try again.",
-            StatusCodes.Status503ServiceUnavailable);
+            StatusCodes.Status503ServiceUnavailable,
+            cause);
 }

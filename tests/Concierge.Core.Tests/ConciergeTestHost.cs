@@ -104,7 +104,8 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         bool timeSkipping = false,
         Action<TemporalWorkerOptions>? configureWorker = null,
         Func<IServiceProvider, IChatClient, IChatClient>? wrapChat = null,
-        bool streamAnswers = false)
+        bool streamAnswers = false,
+        bool agenticDiagnostics = false)
     {
         var database = await postgreSql.CreateDatabaseAsync();
         var dataSource = NpgsqlDataSource.Create(database.ConnectionString);
@@ -142,6 +143,11 @@ internal sealed class ConciergeTestHost : IAsyncDisposable
         builder.Services.AddSingleton<Concierge.Web.Voice.VoiceSessionRegistry>();
         builder.Services.AddSingleton<StayTranscriptNotifier>();
         builder.Services.AddAGUIServer();
+        if (agenticDiagnostics)
+        {
+            // Program.cs registers this in Development only.
+            builder.Services.AddSingleton<AgenticRunFailures>();
+        }
         builder.Services.AddScoped<IConciergeService, ConciergeService>();
         IChatClient boundedChat = new BoundedChatClient(chatClient, TimeSpan.FromMinutes(2), maxConcurrency: 4);
         if (streamAnswers)
