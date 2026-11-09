@@ -14,10 +14,15 @@ public sealed record ConciergeTurnRequest(string TurnId, string UserMessage, str
 
 public sealed record ConciergeApiError(string Code, string Message);
 
+/// <summary>
+/// A failure with a guest-facing <see cref="Exception.Message"/>. The API sends only the code and message;
+/// <paramref name="innerException"/> is the real cause, kept in memory for Development diagnostics.
+/// </summary>
 public sealed class ConciergeApiException(
     string code,
     string message,
-    int statusCode) : Exception(message)
+    int statusCode,
+    Exception? innerException = null) : Exception(message, innerException)
 {
     public string Code { get; } = code;
 

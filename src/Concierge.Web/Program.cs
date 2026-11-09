@@ -79,6 +79,11 @@ builder.Services.AddScoped<IConciergeService, ConciergeService>();
 // PROTOTYPE (ADR 0014 phase 2): the stay workflow as an AG-UI agent, used by the /agentic page.
 builder.Services.AddAGUIServer();
 builder.Services.AddSingleton<AgenticLoopback>();
+if (builder.Environment.IsDevelopment())
+{
+    // /agentic shows a failed run's exception; outside Development the guest sees only the generic card.
+    builder.Services.AddSingleton<AgenticRunFailures>();
+}
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
