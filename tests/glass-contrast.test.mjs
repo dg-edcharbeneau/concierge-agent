@@ -3,27 +3,20 @@
 // Without PLAYWRIGHT_MODULE, uses an already installed "playwright" package.
 //
 // Text sits directly on the tinted glass over the hotel photo, so its contrast depends on the
-// rendered pixels, not just the tokens. For every brand and mode this renders the real app.css and
+// rendered pixels, not just the tokens. For every brand and mode this renders the page's stylesheets and
 // photo, hides everything inside each glass container, screenshots the bare glass, and checks every
 // text color used on that glass against the darkest and lightest pixel anywhere in the container.
-// Checking the whole container covers text at any scroll position. Keep the markup aligned with
-// Home.razor, FocusCard.razor and RideActivityPanel.razor.
-import { readFileSync } from "node:fs";
+// Checking the whole container covers text at any scroll position. The markup is the guest chat
+// page's (tests/agentic-page.mjs).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { chatMain, header, pageHtml, routeAssets, show, turn, verifyMain } from "./agentic-page.mjs";
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE
     ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href
     : "playwright");
-const wwwroot = new URL("../src/Concierge.Web/wwwroot/", import.meta.url);
-const scopedCss = readFileSync(new URL(
-    "../src/Concierge.Web/obj/Debug/net11.0/scopedcss/bundle/Concierge.Web.styles.css",
-    import.meta.url), "utf8");
-const scope = scopedCss.match(/\.ride-activity-drawer\[(b-[\w]+)\]/)?.[1];
-assert.ok(scope, "Build Concierge.Web first to generate the actual drawer scoped CSS");
 
-const ORIGIN = "https://concierge.test";
 const THEMES = [["temporal", "light"], ["temporal", "dark"], ["deepgram", "light"], ["deepgram", "dark"]];
 // The largest screens show the most photo behind the panels and set the limits; the phone covers
 // the focus card, the only glass panel on the photo at that width besides the header.
@@ -32,83 +25,21 @@ const PHONE = [[390, 844]];
 const CONTAINERS = [".site-header", ".focus-card", ".chat-panel", ".ride-activity-drawer"];
 const TOKENS = ["text-primary", "text-secondary", "text-muted"];
 
-const header = `
-    <header class="site-header voice-site-header">
-        <a class="hotel-brand" href="/"><strong>Hotel ZGY</strong><span>/ Miami</span></a>
-        <div class="header-actions voice-header-actions">
-            <div class="voice-header-controls has-voice-mode" role="group" aria-label="Chat controls">
-                <button class="end-chat-button voice-end-chat-button" type="button"><span>End chat</span></button>
-            </div>
-        </div>
-    </header>`;
+const turns = [
+    turn({ date: "Nov 8", guest: "Book a ride to Wayan Miami tomorrow at 10am",
+        reply: "<p>Your ride to Wayan Miami is booked for tomorrow at 10:00 a.m.</p>", ride: true }),
+    turn({ date: "Nov 9", guest: "What are the pool hours?",
+        reply: "<p>The Hotel ZGY pool is open from 8:00 a.m. to 8:00 p.m.</p>" }),
+];
 
-const verify = `
-    <main class="main-content focus-main">
-        <section class="focus-card">
-            <h1>Verify your stay</h1>
-            <p class="focus-card-intro">Enter your last name and room number to continue.</p>
-            <form class="verification-form">
-                <label for="last-name">Last name</label><input id="last-name" type="text" placeholder="Last name">
-                <label for="room-number">Room number</label><input id="room-number" type="text" placeholder="Room number">
-                <p class="field-hint">Enter the room number exactly as provided.</p>
-                <button class="primary-button focus-card-action" type="button">Verify and continue</button>
-            </form>
-        </section>
-    </main>`;
-
-const message = (guest, text) => `
-    <div class="message-row ${guest ? "guest-row" : "concierge-row"}">
-        <div class="message-content">
-            <div class="message-meta"><strong>${guest ? "GUEST" : "CONCIERGE"}</strong><time>9:13 PM</time></div>
-            <div class="message-bubble ${guest ? "guest-bubble" : "concierge-bubble"}">${text}</div>
-        </div>
-    </div>`;
-
-const drawer = `
-    <aside class="ride-activity-drawer is-open" aria-labelledby="ride-activity-title">
-        <header class="ride-activity-header">
-            <div><h2 id="ride-activity-title">Activity</h2>
-                <p class="ride-activity-subtitle">Updates for your stay · Miami time (ET)</p></div>
-        </header>
-        <div class="ride-activity-content">
-            <div class="ride-activity-empty" role="status"><h3>No activity yet</h3>
-                <p>Ride updates will appear here when you book a ride with the concierge.</p></div>
-        </div>
-        <footer class="ride-activity-footer"><p>To change or cancel a ride, ask the concierge.</p></footer>
-    </aside>`.replace(/<([a-z][\w-]*)(?=[\s>])/g, `<$1 ${scope}`);
-
-const chat = `
-    <main class="main-content activity-main-content">
-        <div class="activity-layout activity-layout-open">
-            <section class="chat-panel" aria-label="Hotel concierge chat">
-                <button class="questions-heading" type="button" aria-expanded="true"><span>How can we help?</span></button>
-                <section class="suggestions" aria-label="Suggested questions">
-                    <label for="suggestion-select">Suggested question</label>
-                    <select id="suggestion-select"><option>Choose a suggested question…</option></select>
-                    <div class="suggestion-footer"><p>Choose a question, then send it.</p>
-                        <button class="suggestion-send" type="button">Send suggestion</button></div>
-                </section>
-                <div class="conversation-heading"><span>YOUR STAY CONVERSATION</span></div>
-                <div class="transcript-wrap"><div class="transcript">
-                    <div class="date-separator"><span>Nov 8</span></div>
-                    ${message(true, "What are the pool hours?")}
-                    ${message(false, "The Hotel ZGY pool is open from 8:00 a.m. to 8:00 p.m.")}
-                </div></div>
-                <form class="composer">
-                    <label class="message-label" for="message-draft">MESSAGE</label>
-                    <div class="compose-box"><textarea id="message-draft" rows="3"></textarea>
-                        <div class="compose-footer"><span class="composer-hint">Enter to send</span>
-                            <button class="primary-button send-button" type="button">Send</button></div></div>
-                </form>
-            </section>${drawer}
-        </div>
-    </main>`;
-
-const fixture = (brand, mode, body) => `<!doctype html>
-    <html lang="en" data-brand="${brand}" data-theme="${mode}"><head><meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="/css/app.css"><style>${scopedCss}</style></head>
-    <body><div class="page-shell">${header}${body}</div></body></html>`;
+// The verify card; the chat with history, paused voice and the activity drawer open; and a new stay,
+// whose suggestion heading sits on the glass.
+const STATES = [
+    ["verify", header({ signedIn: false }) + verifyMain, [...DESKTOP, ...PHONE]],
+    ["chat", header({ signedIn: true, activityOpen: true })
+        + chatMain({ turns, activityOpen: true, voice: "paused" }), DESKTOP],
+    ["new stay", header({ signedIn: true }) + chatMain({}), DESKTOP],
+];
 
 // Text with no painted layer between it and its glass container, plus every text token as it
 // resolves on that container (timestamps, hints and labels can appear anywhere on the glass).
@@ -199,12 +130,7 @@ test("text on the tinted glass meets AA over the hotel photo in every brand and 
     const browser = await chromium.launch({ headless: true });
     try {
         const context = await browser.newContext();
-        await context.route(`${ORIGIN}/**`, route => {
-            const path = new URL(route.request().url()).pathname;
-            if (path === "/css/app.css") return route.fulfill({ path: new URL("css/app.css", wwwroot).pathname, contentType: "text/css" });
-            if (path.startsWith("/images/")) return route.fulfill({ path: new URL(path.slice(1), wwwroot).pathname, contentType: "image/jpeg" });
-            return route.fulfill({ status: 404 });
-        });
+        await routeAssets(context);
         const page = await context.newPage();
         const canvasPage = await context.newPage();
         await canvasPage.setContent("<!doctype html><title>pixels</title>");
@@ -212,12 +138,10 @@ test("text on the tinted glass meets AA over the hotel photo in every brand and 
         let measured = 0;
 
         for (const [brand, mode] of THEMES) {
-            for (const [state, body, viewports] of [["verify", verify, [...DESKTOP, ...PHONE]], ["chat", chat, DESKTOP]]) {
+            for (const [state, body, viewports] of STATES) {
                 for (const [width, height] of viewports) {
                     await page.setViewportSize({ width, height });
-                    await page.route(`${ORIGIN}/`, route => route.fulfill({ body: fixture(brand, mode, body), contentType: "text/html" }));
-                    await page.goto(`${ORIGIN}/`, { waitUntil: "networkidle" });
-                    await page.unroute(`${ORIGIN}/`);
+                    await show(page, pageHtml({ brand, mode, body }));
                     // The photo must actually load; a missing image would make the glass look safer than it is.
                     const photoLoaded = await page.evaluate(async () => {
                         const url = getComputedStyle(document.querySelector(".page-shell")).backgroundImage.match(/url\("([^"]+)"\)/)?.[1];
