@@ -11,7 +11,7 @@ using Microsoft.JSInterop;
 namespace Concierge.Web.Components.Pages;
 
 /// <summary>
-/// PROTOTYPE (ADR 0015): the AG-UI page. The chat is a Components.AI <see cref="UIAgent"/> whose
+/// The guest chat page, at / and /agentic (ADR 0015). The chat is a Components.AI <see cref="UIAgent"/> whose
 /// <see cref="IChatClient"/> is an AG-UI client of this app's own <c>/agui/concierge</c> endpoint; the
 /// stay workflow stays the source of truth. Turns other clients add (the room device) appear live.
 /// </summary>
@@ -194,7 +194,7 @@ public sealed partial class Agentic : IAsyncDisposable
             RefreshFromHistoryAsync, OnSessionExpiredAsync, OnVoiceEndedChatAsync);
     }
 
-    /// <summary>As Home: not while the page's own turn runs or the chat is ending or starting over.</summary>
+    /// <summary>Not while the page's own turn runs or the chat is ending or starting over.</summary>
     private bool CanStartVoice =>
         session is not null && voice is { Mode: false } && !runInFlight
         && !isEnding && !isResetting && !showEndConfirmation && !showResetConfirmation;

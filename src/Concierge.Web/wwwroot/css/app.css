@@ -75,7 +75,7 @@
     --primary-action-hover: light-dark(#33c1ff, #e66bff);
     --primary-action-text: light-dark(#000000, #000000);
     /*
-     * The /agentic mic is Glass while idle, an invitation to talk that reads apart from Fuchsia actions
+     * The chat page's mic is Glass while idle, an invitation to talk that reads apart from Fuchsia actions
      * (black icon 8.8:1), and plain surface with a Glass border during a session, when the level ring
      * and status pill show the state. A muted speaker gets a Bakelite border.
      */
@@ -187,26 +187,6 @@ a:focus-visible {
 
 .header-actions.voice-header-actions {
     gap: 12px;
-}
-
-.voice-status {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 8px;
-    color: var(--suggestion-text);
-    padding: 6px 12px;
-    background: var(--suggestion-background);
-    border: 1px solid var(--suggestion-border);
-    border-radius: 999px;
-    font-size: 12px;
-    letter-spacing: .06em;
-    text-transform: uppercase;
-    white-space: nowrap;
-}
-
-.voice-status strong {
-    font-weight: 700;
 }
 
 .voice-header-controls {
@@ -448,8 +428,7 @@ a:focus-visible {
         backdrop-filter: var(--glass-blur);
     }
 
-    .page-shell .chat-panel :is(.questions-heading, .suggestions, .conversation-heading,
-        .transcript-wrap, .composer, .agentic-transcript, .sc-ai-chat-page__footer),
+    .page-shell .chat-panel :is(.conversation-heading, .agentic-transcript, .sc-ai-chat-page__footer),
     .page-shell .ride-activity-drawer .ride-activity-footer {
         background: transparent;
     }
@@ -458,7 +437,7 @@ a:focus-visible {
         color: var(--glass-label);
     }
 
-    /* /agentic: the Components.AI kit paints .sc-ai-chat-page with this; its input keeps the surface. */
+    /* The Components.AI kit paints .sc-ai-chat-page with this; its input keeps the surface. */
     .page-shell .chat-panel .sc-ai-root {
         --sc-ai-color-bg: transparent;
     }
@@ -513,108 +492,12 @@ a:focus-visible {
     margin: 28px 24px 34px;
 }
 
-.questions-heading {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 16px;
-    min-height: 64px;
-    padding: 0 28px;
-    color: var(--text-primary);
-    text-align: left;
-    background: var(--surface-background);
-    border: 0;
-    border-bottom: 1px solid var(--border-color);
-    font-size: 21px;
-    font-weight: 620;
-    letter-spacing: -.035em;
-}
-
-/* The label takes the free space so the chevron sits at the right edge. */
-.questions-heading > span {
-    flex: 1 1 auto;
-}
-
-.accordion-chevron {
-    width: 23px;
-    height: 23px;
-    flex: 0 0 auto;
-    fill: none;
-    stroke: var(--text-secondary);
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-width: 2;
-    transition: transform 140ms ease;
-}
-
-.accordion-chevron.is-expanded {
-    transform: rotate(180deg);
-}
-
-.suggestions {
-    display: grid;
-    flex: 0 0 auto;
-    gap: 8px;
-    padding: 17px 28px 18px;
-    background: var(--surface-background);
-    border-bottom: 1px solid var(--border-color);
-}
-
-.suggestions[hidden] {
-    display: none;
-}
-
-.suggestions label,
 .verification-form label {
     color: var(--text-primary);
     font-size: 14px;
     font-weight: 600;
 }
 
-.suggestions select {
-    width: 100%;
-    min-height: 46px;
-    padding: 0 14px;
-    color: var(--text-primary);
-    background: var(--input-background);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    font-size: 14px;
-}
-
-.suggestions select:invalid {
-    color: var(--text-muted);
-}
-
-.suggestion-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-}
-
-.suggestion-footer p {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 12px;
-}
-
-.suggestion-send {
-    min-height: 40px;
-    padding: 0 17px;
-    color: var(--suggestion-text);
-    background: var(--suggestion-background);
-    border: 1px solid var(--suggestion-border);
-    border-radius: 10px;
-    font-size: 13px;
-    font-weight: 620;
-}
-
-.suggestion-send:hover:not(:disabled) {
-    filter: brightness(.97);
-}
-
-.suggestion-send:disabled,
 .primary-button:disabled,
 .secondary-button:disabled,
 .voice-control-button:disabled,
@@ -636,26 +519,6 @@ a:focus-visible {
     font-size: 14px;
     font-weight: 650;
     letter-spacing: .055em;
-}
-
-.transcript-wrap {
-    position: relative;
-    display: flex;
-    flex: 1 1 auto;
-    min-height: 90px;
-    overflow: hidden;
-    background: var(--transcript-background);
-}
-
-.transcript {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 20px 22px 24px;
-    scroll-behavior: smooth;
-    scrollbar-color: var(--border-color) transparent;
-    scrollbar-width: thin;
 }
 
 .date-separator {
@@ -908,22 +771,6 @@ a:focus-visible {
     margin: 3px 0 0;
 }
 
-.retry-button {
-    min-height: 38px;
-    flex: 0 0 auto;
-    padding: 0 15px;
-    color: var(--error-text);
-    background: var(--surface-background);
-    border: 1px solid var(--error-border);
-    border-radius: 9px;
-    font-size: 13px;
-    font-weight: 620;
-}
-
-.retry-button:hover {
-    filter: brightness(.97);
-}
-
 .session-expired {
     display: flex;
     flex: 0 0 auto;
@@ -963,95 +810,6 @@ a:focus-visible {
     font-size: 12px;
 }
 
-.sign-in-again-button {
-    min-height: 42px;
-    flex: 0 0 auto;
-    padding: 0 17px;
-    color: var(--primary-action-text);
-    background: var(--primary-action-background);
-    border: 0;
-    border-radius: 10px;
-    font-size: 13px;
-    font-weight: 600;
-}
-
-.sign-in-again-button span {
-    padding-left: 7px;
-}
-
-.composer {
-    display: flex;
-    flex: 0 0 auto;
-    flex-direction: column;
-    gap: 9px;
-    padding: 13px 18px 16px;
-    background: var(--composer-background);
-    border-top: 1px solid var(--border-color);
-}
-
-.message-label {
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 650;
-    letter-spacing: .05em;
-}
-
-.compose-box {
-    display: flex;
-    min-height: 126px;
-    flex-direction: column;
-    justify-content: space-between;
-    padding: 11px 12px 10px 14px;
-    background: var(--input-background);
-    border: 1px solid var(--border-color);
-    border-radius: 14px;
-    box-shadow: 0 2px 5px rgb(var(--shadow-tint) / 5%);
-}
-
-.compose-box:focus-within {
-    border-color: var(--accent-color);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 15%, transparent);
-}
-
-.compose-box textarea {
-    width: 100%;
-    min-height: 54px;
-    max-height: 92px;
-    flex: 1 1 auto;
-    resize: none;
-    padding: 3px 1px 8px;
-    color: var(--text-primary);
-    background: transparent;
-    border: 0;
-    outline: 0;
-    font-size: 15px;
-    line-height: 1.45;
-}
-
-.compose-box textarea:focus-visible {
-    outline: 0;
-}
-
-.compose-box textarea::placeholder {
-    color: var(--text-muted);
-}
-
-.compose-box textarea:disabled {
-    cursor: not-allowed;
-}
-
-.compose-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-}
-
-.composer-hint {
-    color: var(--text-muted);
-    font-size: 12px;
-}
-
 .primary-button {
     display: inline-flex;
     min-height: 42px;
@@ -1069,13 +827,8 @@ a:focus-visible {
 
 /* Deepgram sets CTAs in Azeret Mono; for Temporal --font-action is the body font. */
 .primary-button,
-.sign-in-again-button,
 .new-message-button {
     font-family: var(--font-action);
-}
-
-.compose-footer .send-button {
-    margin-left: auto;
 }
 
 .primary-button:hover:not(:disabled) {
@@ -1274,15 +1027,6 @@ a:focus-visible {
         font-size: 11px;
     }
 
-    .voice-site-header .voice-status {
-        grid-row: 1;
-        grid-column: 2;
-        justify-self: end;
-        gap: 6px;
-        padding: 4px 10px;
-        font-size: 10px;
-    }
-
     /* Stitch rules off the brand row from the action row. */
     .voice-site-header::after {
         content: "";
@@ -1292,11 +1036,6 @@ a:focus-visible {
         height: 1px;
         margin: 0 0 -6px;
         background: var(--border-color);
-    }
-
-    .voice-site-header .voice-indicator {
-        width: 7px;
-        height: 7px;
     }
 
     .voice-site-header .voice-header-controls {
@@ -1310,10 +1049,6 @@ a:focus-visible {
         border: 0;
         border-radius: 0;
         box-shadow: none;
-    }
-
-    .voice-site-header .voice-header-controls.has-voice-mode {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     .voice-site-header .voice-control-button,
@@ -1454,58 +1189,11 @@ a:focus-visible {
         box-shadow: none;
     }
 
-    .questions-heading {
-        min-height: 64px;
-        gap: 10px;
-        margin: 14px 16px;
-        padding: 0 14px;
-        border: 1px solid var(--border-color);
-        border-radius: 12px;
-        font-size: 17px;
-    }
-
-    .suggestions {
-        gap: 8px;
-        margin: -14px 16px 14px;
-        padding: 14px 16px;
-        border: 1px solid var(--border-color);
-        border-radius: 0 0 18px 18px;
-    }
-
-    .suggestions label {
-        font-size: 13px;
-    }
-
-    .suggestions select {
-        min-height: 43px;
-        font-size: 13px;
-    }
-
-    .suggestion-footer {
-        align-items: flex-end;
-    }
-
-    .suggestion-footer p {
-        max-width: 48%;
-        font-size: 11px;
-    }
-
-    .suggestion-send {
-        min-height: 38px;
-        padding: 0 12px;
-        font-size: 12px;
-        white-space: nowrap;
-    }
-
     .conversation-heading {
         min-height: 39px;
         padding: 0 16px;
         border: 0;
         font-size: 13px;
-    }
-
-    .transcript {
-        padding: 15px 16px 20px;
     }
 
     .message-content {
@@ -1557,66 +1245,6 @@ a:focus-visible {
 
     .expired-copy small {
         font-size: 12px;
-    }
-
-    .sign-in-again-button {
-        width: 100%;
-        min-height: 44px;
-    }
-
-    .composer {
-        gap: 7px;
-        padding: 10px 16px max(12px, env(safe-area-inset-bottom));
-    }
-
-    .message-label {
-        font-size: 12px;
-    }
-
-    .compose-box {
-        min-height: 64px;
-        flex-direction: row;
-        align-items: flex-end;
-        gap: 8px;
-        padding: 8px 8px 8px 12px;
-        border-radius: 12px;
-    }
-
-    .compose-box textarea {
-        width: 0;
-        height: 44px;
-        min-height: 44px;
-        max-height: 68px;
-        padding: 10px 0;
-        font-size: 16px;
-    }
-
-    .compose-footer {
-        flex: 0 0 auto;
-    }
-
-    .compose-footer .send-button {
-        width: 44px;
-        min-height: 44px;
-        padding: 0;
-        border-radius: 8px;
-    }
-
-    .send-button > span {
-        display: none;
-    }
-
-    .composer:has(.composer-hint) .compose-box {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
-    .composer:has(.composer-hint) textarea {
-        width: 100%;
-    }
-
-    .composer:has(.composer-hint) .compose-footer {
-        flex: 0 0 auto;
     }
 
     .primary-button {
@@ -1674,40 +1302,4 @@ a:focus-visible {
         animation-iteration-count: 1 !important;
         transition-duration: .01ms !important;
     }
-}
-
-.voice-indicator {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--text-muted);
-}
-
-.voice-listening .voice-indicator,
-.voice-speaking .voice-indicator,
-.voice-thinking .voice-indicator,
-.voice-connecting .voice-indicator {
-    background: var(--accent-color);
-    animation: voice-pulse 1.2s ease-in-out infinite;
-}
-
-.voice-speaking .voice-indicator {
-    animation-duration: 0.6s;
-}
-
-.voice-disconnected .voice-indicator {
-    background: var(--error-text);
-}
-
-.voice-status.is-muted .voice-indicator {
-    background: var(--text-muted);
-    animation: none;
-}
-
-@keyframes voice-pulse {
-    50% { opacity: 0.35; transform: scale(0.8); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .voice-indicator { animation: none !important; }
 }

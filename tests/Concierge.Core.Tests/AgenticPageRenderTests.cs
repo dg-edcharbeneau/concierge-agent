@@ -16,7 +16,7 @@ using Microsoft.JSInterop;
 
 namespace Concierge.Core.Tests;
 
-/// <summary>PROTOTYPE (ADR 0015): the stay history must actually render inside ChatPage.</summary>
+/// <summary>ADR 0015: the stay history must actually render inside ChatPage.</summary>
 public sealed class AgenticPageRenderTests
 {
     [Fact]

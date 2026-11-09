@@ -1,6 +1,6 @@
 namespace Concierge.Web.Services;
 
-/// <summary>Guest-facing constants shared by the Home page and the AG-UI prototype page.</summary>
+/// <summary>Guest-facing constants for the guest chat page and its components.</summary>
 public static class ConciergeGuestUi
 {
     /// <summary>Hotel ZGY's clock: transcript times and day separators use it, whatever the browser's zone.</summary>

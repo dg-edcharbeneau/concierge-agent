@@ -4,9 +4,9 @@
 @using Microsoft.AspNetCore.Components.AI
 @using Microsoft.Extensions.AI
 
-@* One message in Home's markup and styles, used through a BlockRenderer<RichContentBlock> inside
-   MessageList. Concierge answers go through Home's AssistantResponse (Markdig + HtmlSanitizer), so the
-   AG-UI page renders Markdown exactly as Home does; the stock MessageList shows it raw. *@
+@* One message in the app's transcript markup and styles (app.css), used through a
+   BlockRenderer<RichContentBlock> inside MessageList. Concierge answers go through AssistantResponse
+   (Markdig + HtmlSanitizer), because the stock MessageList shows Markdown raw. *@
 
 @if (startsNewDay)
 {

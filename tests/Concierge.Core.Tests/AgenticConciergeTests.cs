@@ -12,7 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Concierge.Core.Tests;
 
-/// <summary>PROTOTYPE (ADR 0014 phase 2): the stay workflow behind an AG-UI endpoint.</summary>
+/// <summary>ADR 0014 phase 2: the stay workflow behind an AG-UI endpoint.</summary>
 public sealed class AgenticConciergeTests(PostgreSqlFixture postgreSql) : IClassFixture<PostgreSqlFixture>
 {
     [Fact]

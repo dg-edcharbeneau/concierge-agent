@@ -6,7 +6,7 @@ namespace Concierge.Web.Agentic;
 
 /// <summary>
 /// Development only (registered in Program.cs under IsDevelopment): the exception behind the last
-/// failed AG-UI run for a guest credential, so /agentic can show it. The AG-UI host sends every server
+/// failed AG-UI run for a guest credential, so the chat page can show it. The AG-UI host sends every server
 /// failure to the client as the same generic RUN_ERROR text, and page and endpoint share this process.
 /// Keys are credential hashes so the store never holds a credential.
 /// </summary>

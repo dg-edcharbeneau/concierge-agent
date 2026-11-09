@@ -161,7 +161,7 @@
                         </div>
                         @* ChatPage's parts, composed by hand: the history restore has to run inside the
                            AgentBoundary and before MessageList first draws (see RestoreConversation).
-                           sc-ai-root holds the kit's theme (agentic.css maps it to Home's tokens). *@
+                           sc-ai-root holds the kit's theme (agentic.css maps it to app.css tokens). *@
                         <AgentBoundary @key="agentGeneration" Agent="agent">
                             <div class="@AgenticConcierge.ChatRootClass">
                                 <RestoreConversation BusyChanged="OnBusyChangedAsync" Restored="OnRestored" />

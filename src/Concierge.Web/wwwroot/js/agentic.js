@@ -1,7 +1,7 @@
-// PROTOTYPE (ADR 0015): browser helpers for the AG-UI page (/agentic).
+// Browser helpers for the guest chat page (Agentic.razor, ADR 0015).
 (function () {
-    // Its own key: Home's "hotel-zgy-concierge" entry carries Home's pending turn and draft, which this
-    // page does not have and must not overwrite.
+    // Not "hotel-zgy-concierge": that was the removed Home page's key, and browsers that used Home may
+    // still hold an entry there in Home's format.
     const sessionKey = "hotel-zgy-agentic";
     const nearBottomPx = 72;
     const followers = new WeakMap();

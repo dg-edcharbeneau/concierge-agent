@@ -12,9 +12,8 @@ using Microsoft.Extensions.AI;
 namespace Concierge.Web.Agentic;
 
 /// <summary>
-/// PROTOTYPE (ADR 0014, phase 2). Exposes the stay workflow as an AG-UI agent and lets a Blazor page use
-/// it through <c>Microsoft.AspNetCore.Components.AI</c>. Text chat only; Home, voice and rides are
-/// untouched. The packages are prerelease.
+/// Exposes the stay workflow as an AG-UI agent, which the guest chat page uses through
+/// <c>Microsoft.AspNetCore.Components.AI</c> (ADR 0014 phase 2, ADR 0015). The packages are prerelease.
 /// </summary>
 public static class AgenticConcierge
 {

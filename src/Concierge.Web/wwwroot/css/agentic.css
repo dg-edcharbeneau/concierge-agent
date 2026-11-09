@@ -1,9 +1,9 @@
 /*
- * PROTOTYPE (ADR 0015): the AG-UI page (/agentic) in Home's look.
+ * The guest chat page (Agentic.razor, ADR 0015): the Components.AI kit in the app's look.
  *
- * The Components.AI kit declares its theme on .sc-ai-root with no dark mode of its own. These rules map
- * its variables onto app.css tokens, which already follow data-brand, data-theme and the OS scheme, so the
- * kit follows Home's theme picker. ai-chat.css loads after app.css, hence the .page-shell prefix.
+ * The kit declares its theme on .sc-ai-root with no dark mode of its own. These rules map its variables
+ * onto app.css tokens, which already follow data-brand, data-theme and the OS scheme, so the kit follows
+ * the theme picker. ai-chat.css loads after app.css, hence the .page-shell prefix.
  */
 .page-shell .sc-ai-root {
     --sc-ai-font-family: inherit;
@@ -27,14 +27,14 @@
     --sc-ai-max-width: 100%;
 }
 
-/* Inside Home's chat panel instead of a full-viewport page. */
+/* Inside the chat panel instead of a full-viewport page. */
 .page-shell .sc-ai-chat-page {
     flex: 1 1 auto;
     height: auto;
     min-height: 0;
 }
 
-/* The scroll area is Home's .transcript; the kit's list only stacks the rows (StayMessage markup). */
+/* The scroll area; the kit's list only stacks the rows (StayMessage markup). */
 .page-shell .agentic-transcript {
     position: relative;
     flex: 1 1 auto;
@@ -57,7 +57,7 @@
     padding: 0;
 }
 
-/* The composer row in Home's composer band. */
+/* The input row, in the composer band at the foot of the chat panel. */
 .page-shell .sc-ai-chat-page__footer {
     padding: 13px 18px 16px;
     background: var(--composer-background);
@@ -68,7 +68,7 @@
     display: none;
 }
 
-/* Starter questions: Home's suggestion colours as one-tap chips. */
+/* Starter questions as one-tap chips in the suggestion colours. */
 .agentic-suggestions {
     display: grid;
     gap: 12px;

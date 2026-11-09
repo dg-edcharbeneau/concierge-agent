@@ -4,10 +4,9 @@ using Microsoft.JSInterop;
 namespace Concierge.Web.Services;
 
 /// <summary>
-/// Browser voice for the AG-UI page, UI-free (ADR 0015). The same behaviour as Home's inline voice code
-/// (Home.razor.cs): <c>voice.js</c> owns the microphone, playback and relay socket and reports back
-/// through the four <see cref="JSInvokableAttribute"/> callbacks; the server-side
-/// <see cref="VoiceSessionRegistry"/> reports turns and relay closure. Home keeps its own copy for now.
+/// Browser voice for the guest chat page, UI-free (ADR 0015): <c>voice.js</c> owns the microphone,
+/// playback and relay socket and reports back through the four <see cref="JSInvokableAttribute"/>
+/// callbacks; the server-side <see cref="VoiceSessionRegistry"/> reports turns and relay closure.
 /// </summary>
 /// <remarks>
 /// Voice turns carry the page's own chat session, so the transcript notifier skips them; the registry's
