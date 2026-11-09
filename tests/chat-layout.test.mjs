@@ -64,7 +64,7 @@ function fixture() {
                         <button class="end-chat-button voice-end-chat-button" type="button" aria-label="End chat">${icon}<span>End chat</span></button>
                         <label class="theme-picker compact-theme-picker"><span class="visually-hidden">Theme</span>
                             <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/></svg>
-                            <select aria-label="Color theme"><option>System</option><option>Light</option><option>Dark</option></select>
+                            <select aria-label="Color theme"><optgroup label="Temporal"><option>Temporal · Light</option><option>Temporal · Dark</option><option selected>Temporal · System</option></optgroup><optgroup label="Deepgram"><option>Deepgram · Light</option><option>Deepgram · Dark</option><option>Deepgram · System</option></optgroup></select>
                         </label>
                     </div>
                 </div>

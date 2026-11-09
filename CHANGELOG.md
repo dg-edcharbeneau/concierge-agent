@@ -6,6 +6,11 @@ All notable project changes are documented here.
 
 ### Added
 
+- Brand themes. The theme picker is one grouped list: Temporal and Deepgram, each with Light, Dark and System.
+  - Temporal (UV #444CE7 on Space Black or Off White) replaces the generic purple and is the default. A Light, Dark or System choice saved before brands existed keeps its mode under Temporal.
+  - Deepgram uses Glass buttons, Fuchsia (dark) or LED (light) accents, Work Sans and Azeret Mono, loaded from Google Fonts.
+  - `js/theme.js` applies the saved theme from `<head>` before the first paint. That removes the flash of the light theme on load and also themes the error and 404 pages.
+  - Colors are `light-dark()` tokens, one block per brand. A test checks AA contrast for every brand in both modes.
 - The "Your stay conversation" page updates live when another session adds a turn to the same stay, for example a room device using `POST /api/concierge/turns` or a second browser tab, and empties when another session uses Start over. `ConciergeService` raises an in-process `StayTranscriptNotifier` event after the stay workflow accepts a turn, interrupt or reset. Pages then re-read history in the background, without touching the busy state, a visible error, suggestions or scroll position unless the transcript changed.
 - Opt-in `RemoteAccess:PublicTunnel` AppHost setting. It adds Web's HTTPS endpoint as an anonymous port on the `think-tunnel` dev tunnel, so off-machine clients can reach the guest HTTP API. The setting defaults to off, and the remote-client contract is documented in `docs/configuration.md` under "Remote API clients".
 - **Start over** button in the chat header. After a confirmation step it deletes the signed-in stay's transcript, conversation memory, ride offers, and rides, and keeps the guest signed in. It is backed by `POST /api/concierge/reset`, the `ResetStay` stay-workflow update, and a RideService `POST /stays/{stayId}/rides/purge` endpoint, which terminates the stay's booking workflows and deletes their rows.

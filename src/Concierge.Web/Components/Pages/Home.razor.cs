@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using Concierge.Contracts;
+using Concierge.Web.Components.Shared;
 using Concierge.Web.Services;
 using Concierge.Web.Voice;
 using Microsoft.AspNetCore.Components;
@@ -61,7 +62,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private int sessionVersion => model.Version;
     private string lastName = string.Empty;
     private string roomNumber = string.Empty;
-    private string theme = "system";
+    private string theme = ThemeChoice.Default;
     private string selectedSuggestion = string.Empty;
     private string? verificationError;
     private bool ready;
@@ -185,7 +186,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
         {
             var (themeLoaded, storedTheme) = await TryInvokeAsync<string>("conciergeChat.loadTheme");
             if (!themeLoaded || !IsCurrentSession(currentVersion)) return;
-            theme = storedTheme!;
+            theme = ThemeChoice.Normalize(storedTheme);
             if (!await TryInvokeVoidAsync("conciergeChat.applyTheme", theme)
                 || !IsCurrentSession(currentVersion)) return;
             var (sessionLoaded, storedSession) = await TryInvokeAsync<ChatSessionState?>("conciergeChat.loadSession");
@@ -247,7 +248,7 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private async Task ChangeThemeAsync(ChangeEventArgs args)
     {
-        theme = args.Value?.ToString() is "light" or "dark" ? args.Value!.ToString()! : "system";
+        theme = ThemeChoice.Normalize(args.Value?.ToString());
         await TryInvokeVoidAsync("conciergeChat.applyTheme", theme);
     }
 

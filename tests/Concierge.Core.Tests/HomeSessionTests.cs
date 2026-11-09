@@ -847,9 +847,10 @@ public sealed class HomeSessionTests
         Assert.Equal(themePicker.Index, themeSelect.ParentIndex);
         Assert.False(themeSelect.Attributes.ContainsKey("disabled"));
         var options = elements
-            .Where(element => element.Tag == "option" && element.ParentIndex == themeSelect.Index)
+            .Where(element => element.Tag == "option"
+                && element.Index > themeSelect.Index && element.Index < themeSelect.EndIndex)
             .Select(element => element.Attributes.GetValueOrDefault("value"));
-        Assert.Equal(["system", "light", "dark"], options);
+        Assert.Equal(["temporal-light", "temporal-dark", "temporal-system", "deepgram-light", "deepgram-dark", "deepgram-system"], options);
     }
 
     [Fact]
@@ -882,7 +883,7 @@ public sealed class HomeSessionTests
         Assert.Contains(verificationHarness.RenderedContent().Markup, markup =>
             markup.Contains("class=\"theme-icon\"", StringComparison.Ordinal));
         Assert.Equal(
-            ["system", "light", "dark"],
+            ["temporal-light", "temporal-dark", "temporal-system", "deepgram-light", "deepgram-dark", "deepgram-system"],
             verificationElements
                 .Where(element => element.Tag == "option"
                     && element.Index > verificationSelect.Index && element.Index < verificationSelect.EndIndex)
@@ -951,7 +952,7 @@ public sealed class HomeSessionTests
         Assert.Contains(harness.RenderedContent().Markup, markup =>
             markup.Contains("class=\"theme-icon\"", StringComparison.Ordinal));
         Assert.Equal(
-            ["system", "light", "dark"],
+            ["temporal-light", "temporal-dark", "temporal-system", "deepgram-light", "deepgram-dark", "deepgram-system"],
             elements
                 .Where(element => element.Tag == "option"
                     && element.Index > select.Index && element.Index < select.EndIndex)

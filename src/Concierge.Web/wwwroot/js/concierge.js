@@ -1,6 +1,5 @@
 (() => {
     const sessionKey = "hotel-zgy-concierge";
-    const themeKey = "hotel-zgy-theme";
     let transcriptListener;
 
     document.addEventListener("keydown", (event) => {
@@ -39,20 +38,13 @@
             sessionStorage.removeItem(sessionKey);
         },
 
+        // theme.js owns the theme rules; these names stay because both pages call them over interop.
         loadTheme() {
-            const theme = localStorage.getItem(themeKey);
-            return theme === "light" || theme === "dark" ? theme : "system";
+            return window.conciergeTheme.load();
         },
 
         applyTheme(theme) {
-            if (theme === "system") {
-                document.documentElement.removeAttribute("data-theme");
-                localStorage.setItem(themeKey, "system");
-                return;
-            }
-
-            document.documentElement.dataset.theme = theme;
-            localStorage.setItem(themeKey, theme);
+            window.conciergeTheme.apply(theme);
         },
 
         isNearBottom(element) {

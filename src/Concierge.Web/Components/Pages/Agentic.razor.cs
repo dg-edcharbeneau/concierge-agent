@@ -1,5 +1,6 @@
 using Concierge.Contracts;
 using Concierge.Web.Agentic;
+using Concierge.Web.Components.Shared;
 using Concierge.Web.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.AI;
@@ -30,7 +31,7 @@ public sealed partial class Agentic : IAsyncDisposable
     internal sealed record StoredSession(string Credential, Guid StayId, Guid SessionId, DateTimeOffset ExpiresAtUtc);
 
     private bool ready;
-    private string theme = "system";
+    private string theme = ThemeChoice.Default;
     private string lastName = string.Empty;
     private string roomNumber = string.Empty;
     private string? verificationError;
@@ -70,7 +71,7 @@ public sealed partial class Agentic : IAsyncDisposable
     {
         if (firstRender)
         {
-            theme = await TryInvokeAsync<string>("conciergeChat.loadTheme") ?? "system";
+            theme = ThemeChoice.Normalize(await TryInvokeAsync<string>("conciergeChat.loadTheme"));
             await TryInvokeVoidAsync("conciergeChat.applyTheme", theme);
             var stored = await TryInvokeAsync<StoredSession>("conciergeAgentic.loadSession");
             if (stored is not null && stored.ExpiresAtUtc > DateTimeOffset.UtcNow && !string.IsNullOrEmpty(stored.Credential))
@@ -362,7 +363,7 @@ public sealed partial class Agentic : IAsyncDisposable
 
     private async Task ChangeThemeAsync(ChangeEventArgs args)
     {
-        theme = args.Value?.ToString() is "light" or "dark" ? args.Value.ToString()! : "system";
+        theme = ThemeChoice.Normalize(args.Value?.ToString());
         await TryInvokeVoidAsync("conciergeChat.applyTheme", theme);
     }
 

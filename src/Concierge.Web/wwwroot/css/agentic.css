@@ -2,8 +2,8 @@
  * PROTOTYPE (ADR 0015): the AG-UI page (/agentic) in Home's look.
  *
  * The Components.AI kit declares its theme on .sc-ai-root with no dark mode of its own. These rules map
- * its variables onto app.css tokens, which already follow data-theme and prefers-color-scheme, so the
- * kit flips with Home's theme picker. ai-chat.css loads after app.css, hence the .page-shell prefix.
+ * its variables onto app.css tokens, which already follow data-brand, data-theme and the OS scheme, so the
+ * kit follows Home's theme picker. ai-chat.css loads after app.css, hence the .page-shell prefix.
  */
 .page-shell .sc-ai-root {
     --sc-ai-font-family: inherit;
