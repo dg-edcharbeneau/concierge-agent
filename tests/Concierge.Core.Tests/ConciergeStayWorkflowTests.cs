@@ -941,6 +941,12 @@ public sealed class ConciergeStayWorkflowTests(PostgreSqlFixture postgreSql)
 
         Assert.Equal("I couldn't reach the concierge service just now. Please try again in a moment.", result.AssistantMessage);
         Assert.Equal(3, host.ChatClient.Requests.Count);
+        // The failure behind the fallback, for Development pages; an exact retry gets only the answer.
+        Assert.Contains("ModelProviderErrorException", result.FailureDetail);
+        Assert.Contains("upstream connect error or disconnect/reset before headers", result.FailureDetail);
+        var retried = await handle.ExecuteUpdateAsync(wf => wf.SubmitTurnAsync(Turn(stayId, "exhausted", "Breakfast?", "web")));
+        Assert.Equal(result.AssistantMessage, retried.AssistantMessage);
+        Assert.Null(retried.FailureDetail);
     }
 
     private static ChatResponse ProviderError() =>

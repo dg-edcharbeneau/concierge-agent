@@ -227,7 +227,7 @@ as a phone or a hardware companion, need the opt-in API tunnel. Set this in
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `RemoteAccess:PublicTunnel` | `false` | When `true`, AppHost adds an anonymous dev tunnel, `api-tunnel`, to Web's HTTPS endpoint. Its public URL is shown on the `api-tunnel` resource in the Aspire dashboard. |
+| `RemoteAccess:PublicTunnel` | `false` | When `true`, AppHost adds Web's HTTPS endpoint as an anonymous port on the existing `think-tunnel` dev tunnel. Its public URL is shown on the `think-tunnel-web-https` resource in the Aspire dashboard. |
 
 The tunnel exposes the guest UI and the guest HTTP API:
 

@@ -24,7 +24,10 @@ namespace Concierge.Web.Agentic;
 /// </para>
 /// </remarks>
 public sealed class StayWorkflowChatClient(
-    IConciergeService concierge, string credential, AnswerStreamListener? answerStream = null) : IChatClient
+    IConciergeService concierge,
+    string credential,
+    AnswerStreamListener? answerStream = null,
+    AgenticRunFailures? failures = null) : IChatClient
 {
     /// <summary>Channel sent with each turn. "web" selects the written answer style.</summary>
     public const string Channel = "web";
@@ -43,10 +46,50 @@ public sealed class StayWorkflowChatClient(
         return updates.ToChatResponse();
     }
 
-    public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+    public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        failures is null
+            ? StreamTurnAsync(messages, cancellationToken)
+            : RecordingFailuresAsync(failures, StreamTurnAsync(messages, cancellationToken), cancellationToken);
+
+    /// <summary>
+    /// Development only: keeps the exception that is about to fail the run, which the AG-UI host
+    /// replaces with generic text. Concierge API failures never get here; they are answered as text.
+    /// </summary>
+    private async IAsyncEnumerable<ChatResponseUpdate> RecordingFailuresAsync(
+        AgenticRunFailures store,
+        IAsyncEnumerable<ChatResponseUpdate> updates,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        store.Clear(credential);
+        await using var enumerator = updates.GetAsyncEnumerator(cancellationToken);
+        while (true)
+        {
+            ChatResponseUpdate current;
+            try
+            {
+                if (!await enumerator.MoveNextAsync())
+                {
+                    yield break;
+                }
+
+                current = enumerator.Current;
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                store.Record(credential, exception);
+                throw;
+            }
+
+            yield return current;
+        }
+    }
+
+    private async IAsyncEnumerable<ChatResponseUpdate> StreamTurnAsync(
+        IEnumerable<ChatMessage> messages,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         string text;
         ConciergeApiException? invalid = null;
@@ -62,7 +105,7 @@ public sealed class StayWorkflowChatClient(
 
         if (invalid is not null)
         {
-            yield return Rejected(invalid);
+            yield return Rejected(invalid, "agui:invalid");
             yield break;
         }
 
@@ -98,8 +141,8 @@ public sealed class StayWorkflowChatClient(
         {
             // It is not a stay turn: the workflow never committed it.
             yield return sent.Text.Length == 0
-                ? Rejected(failure)
-                : Update(turnId, AnswerCorrection(turnId, failure.Message));
+                ? Rejected(failure, turnId)
+                : Update(turnId, [.. AnswerCorrection(turnId, failure.Message), .. ErrorDetails(turnId, failure.InnerException?.ToString())]);
             yield break;
         }
 
@@ -115,6 +158,8 @@ public sealed class StayWorkflowChatClient(
         {
             contents.AddRange(AnswerCorrection(turnId, result.AssistantMessage));
         }
+
+        contents.AddRange(ErrorDetails(turnId, result.FailureDetail));
 
         if (result.RideCard is { } card)
         {
@@ -170,8 +215,22 @@ public sealed class StayWorkflowChatClient(
     /// observed in AgenticConciergeTests). As text, the guest sees the concierge's own actionable message
     /// ("Authenticate again to continue.", the message-size limit, ...).
     /// </summary>
-    private static ChatResponseUpdate Rejected(ConciergeApiException exception) =>
-        new(ChatRole.Assistant, exception.Message);
+    private ChatResponseUpdate Rejected(ConciergeApiException exception, string turnId) =>
+        ErrorDetails(turnId, exception.InnerException?.ToString()) is { Count: > 0 } details
+            ? Update(turnId, [new TextContent(exception.Message), .. details])
+            : new(ChatRole.Assistant, exception.Message);
+
+    /// <summary>Development only (when the failure store is registered): the failure behind a reply.</summary>
+    private List<AIContent> ErrorDetails(string turnId, string? details)
+    {
+        if (failures is null || string.IsNullOrWhiteSpace(details))
+        {
+            return [];
+        }
+
+        var (call, result) = AgenticConcierge.ErrorDetailsContents(turnId, details);
+        return [call, result];
+    }
 
     private static List<AIContent> AnswerCorrection(string turnId, string answer)
     {

@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Concierge.Core.Tests;
 
-/// <summary>PROTOTYPE (ADR 0015): the UI-free ride feed the AG-UI page binds to RideActivityPanel.</summary>
+/// <summary>ADR 0015: the UI-free ride feed the AG-UI page binds to RideActivityPanel.</summary>
 public sealed class RideActivityTrackerTests
 {
     private static readonly DateTimeOffset Now = new(2026, 11, 5, 15, 0, 0, TimeSpan.Zero);

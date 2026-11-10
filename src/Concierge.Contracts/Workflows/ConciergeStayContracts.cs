@@ -142,12 +142,17 @@ public sealed record ConciergeTranscriptTurn(
     bool Superseded = false,
     ConciergeRideCard? RideCard = null);
 
+/// <param name="FailureDetail">
+/// When the answer is a fallback for a failed model call, the failure behind it, for Development
+/// diagnostics on the AG-UI page. Not persisted, not kept for retries, and removed from the public API.
+/// </param>
 public sealed record ConciergeTurnResult(
     string TurnId,
     string AssistantMessage,
     long Sequence,
     ConciergeEndChatFunctionCall? EndChatFunctionCall = null,
-    ConciergeRideCard? RideCard = null);
+    ConciergeRideCard? RideCard = null,
+    string? FailureDetail = null);
 
 /// <summary>
 /// Structured ride data a turn's tool result produced, for clients that draw a card beside the answer

@@ -12,7 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Concierge.Core.Tests;
 
-/// <summary>PROTOTYPE (ADR 0014 phase 2): the stay workflow behind an AG-UI endpoint.</summary>
+/// <summary>ADR 0014 phase 2: the stay workflow behind an AG-UI endpoint.</summary>
 public sealed class AgenticConciergeTests(PostgreSqlFixture postgreSql) : IClassFixture<PostgreSqlFixture>
 {
     [Fact]
@@ -182,6 +182,54 @@ public sealed class AgenticConciergeTests(PostgreSqlFixture postgreSql) : IClass
         }
 
         return (updates, clock.Elapsed);
+    }
+
+    /// <summary>
+    /// A model failure on every attempt: in Development the AG-UI page gets the fallback reply and the
+    /// failure behind it as an error-details call; the public turns API never carries the detail, and
+    /// without the Development store neither does AG-UI.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AModelFailureCarriesItsDetailsOnlyToTheDevelopmentAgUiPage(bool development)
+    {
+        await using var host = await ConciergeTestHost.StartAsync(postgreSql, agenticDiagnostics: development);
+        var today = ConciergeTestHost.HotelToday;
+        await host.SeedStayAsync("Rivera", "412", today, today.AddDays(2));
+        var session = await VerifyAsync(host, "Rivera", "412");
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            host.ChatClient.ScriptedResponses.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant,
+                [new ErrorContent("upstream connect error or disconnect/reset before headers")])));
+        }
+
+        using var http = new HttpClient { BaseAddress = host.Http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", session.Credential);
+        using var agui = new AGUIChatClient(new AGUIChatClientOptions(http, AgenticConcierge.EndpointPath));
+        var response = await agui.GetResponseAsync([new ChatMessage(ChatRole.User, "Breakfast?")]);
+
+        Assert.Equal("I couldn't reach the concierge service just now. Please try again in a moment.", response.Text);
+        var details = response.Messages.SelectMany(message => message.Contents).OfType<FunctionCallContent>()
+            .Where(call => call.Name == AgenticConcierge.ErrorDetailsTool).ToList();
+        if (development)
+        {
+            var call = Assert.Single(details);
+            var result = Assert.Single(response.Messages.SelectMany(message => message.Contents).OfType<FunctionResultContent>(),
+                item => item.CallId == call.CallId);
+            Assert.Contains("upstream connect error or disconnect/reset before headers", result.Result?.ToString());
+        }
+        else
+        {
+            Assert.Empty(details);
+        }
+
+        using var turn = await http.PostAsync("/api/concierge/turns",
+            JsonContent.Create(new ConciergeTurnRequest("api:1", "Lunch?", "web")));
+        var body = await turn.Content.ReadAsStringAsync();
+        Assert.True(turn.IsSuccessStatusCode, body);
+        Assert.Contains("I couldn't reach the concierge service just now.", body);
+        Assert.DoesNotContain("upstream connect error", body);
     }
 
     [Fact]

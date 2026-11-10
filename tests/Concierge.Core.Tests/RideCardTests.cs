@@ -7,7 +7,7 @@ using Microsoft.Extensions.AI;
 
 namespace Concierge.Core.Tests;
 
-/// <summary>PROTOTYPE (ADR 0015): ride card mapping, storage and the AG-UI carrier.</summary>
+/// <summary>ADR 0015: ride card mapping, storage and the AG-UI carrier.</summary>
 public sealed class RideCardTests
 {
     private static readonly DateTimeOffset Pickup = new(2026, 11, 6, 14, 0, 0, TimeSpan.Zero);

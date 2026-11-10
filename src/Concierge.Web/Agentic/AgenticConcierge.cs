@@ -12,9 +12,8 @@ using Microsoft.Extensions.AI;
 namespace Concierge.Web.Agentic;
 
 /// <summary>
-/// PROTOTYPE (ADR 0014, phase 2). Exposes the stay workflow as an AG-UI agent and lets a Blazor page use
-/// it through <c>Microsoft.AspNetCore.Components.AI</c>. Text chat only; Home, voice and rides are
-/// untouched. The packages are prerelease.
+/// Exposes the stay workflow as an AG-UI agent, which the guest chat page uses through
+/// <c>Microsoft.AspNetCore.Components.AI</c> (ADR 0014 phase 2, ADR 0015). The packages are prerelease.
 /// </summary>
 public static class AgenticConcierge
 {
@@ -57,6 +56,23 @@ public static class AgenticConcierge
         return (
             new FunctionCallContent(callId, AnswerCorrectionTool, new Dictionary<string, object?>()) { InformationalOnly = true },
             new FunctionResultContent(callId, answer));
+    }
+
+    /// <summary>
+    /// Development only: the real failure behind a reply that reports one ("The concierge is temporarily
+    /// unavailable", a model-failure fallback). Informational; drawn as an expander under the reply and
+    /// never part of a restored thread.
+    /// </summary>
+    public const string ErrorDetailsTool = "concierge_error_details";
+
+    /// <summary>The details call for a turn, with the failure text as the result.</summary>
+    public static (FunctionCallContent Call, FunctionResultContent Result) ErrorDetailsContents(
+        string turnId, string details)
+    {
+        var callId = $"{turnId}:error-details";
+        return (
+            new FunctionCallContent(callId, ErrorDetailsTool, new Dictionary<string, object?>()) { InformationalOnly = true },
+            new FunctionResultContent(callId, details));
     }
 
     /// <summary>Shared by the server that writes a card's result and the component that reads it.</summary>
@@ -110,7 +126,12 @@ public static class AgenticConcierge
 
         var concierge = context.RequestServices.GetRequiredService<IConciergeService>();
         return new ChatClientAgent(
-            new StayWorkflowChatClient(concierge, header.Parameter, context.RequestServices.GetService<AnswerStreamListener>()),
+            new StayWorkflowChatClient(
+                concierge,
+                header.Parameter,
+                context.RequestServices.GetService<AnswerStreamListener>(),
+                // Registered only in Development.
+                context.RequestServices.GetService<AgenticRunFailures>()),
             instructions: null,
             name: AgentName,
             description: "Hotel ZGY concierge for one verified stay.");
@@ -287,7 +308,7 @@ public sealed class AgenticLoopback(IServer server, IConfiguration configuration
     {
         http = new HttpClient { BaseAddress = BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", credential);
-        return new AGUIChatClient(new AGUIChatClientOptions(http, AgenticConcierge.EndpointPath));
+        return new RunErrorChatClient(new AGUIChatClient(new AGUIChatClientOptions(http, AgenticConcierge.EndpointPath)));
     }
 
     private Uri Resolve()
@@ -308,5 +329,46 @@ public sealed class AgenticLoopback(IServer server, IConfiguration configuration
 
         throw new InvalidOperationException(
             "The agentic page found no UI listener address to call its AG-UI endpoint; check ASPNETCORE_URLS.");
+    }
+}
+
+/// <summary>
+/// The AG-UI client reports a failed run (RUN_ERROR) as an <see cref="ErrorContent"/> item and then
+/// completes normally. The Components.AI kit ignores that item, so the page would show no reply and no
+/// error. Raising it puts the conversation in the kit's Error state: the send-error card and Retry.
+/// </summary>
+public sealed class RunErrorChatClient(IChatClient inner) : DelegatingChatClient(inner)
+{
+    public override async Task<ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        var response = await base.GetResponseAsync(messages, options, cancellationToken);
+        AgenticRunFailedException.ThrowIfError(response.Messages.SelectMany(message => message.Contents));
+        return response;
+    }
+
+    public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await foreach (var update in base.GetStreamingResponseAsync(messages, options, cancellationToken))
+        {
+            AgenticRunFailedException.ThrowIfError(update.Contents);
+            yield return update;
+        }
+    }
+}
+
+/// <summary>A run the AG-UI endpoint reported as failed. Its message is the host's (generic) text.</summary>
+public sealed class AgenticRunFailedException(string message) : Exception(message)
+{
+    public static void ThrowIfError(IEnumerable<AIContent> contents)
+    {
+        if (contents.OfType<ErrorContent>().FirstOrDefault() is { } error)
+        {
+            var code = error.ErrorCode is { Length: > 0 } value ? $" ({value})" : "";
+            throw new AgenticRunFailedException($"The concierge's AG-UI run failed{code}: {error.Message}");
+        }
     }
 }

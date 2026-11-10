@@ -5,10 +5,8 @@ namespace Concierge.Web.Services;
 
 /// <summary>
 /// The guest's ride activity, UI-free: a snapshot, then the live stream from its end offset, plus the
-/// open/mark-as-read flow and the unread badge. Same behaviour as Home's ride feed (Home.razor.cs), with
-/// a generation counter in place of Home's session version: work from before the last Start/Reset/Stop
-/// is dropped. Built for the AG-UI page; Home keeps its own copy for now. (Not RideActivityFeed: that
-/// name is the stream contract in Concierge.Contracts.)
+/// open/mark-as-read flow and the unread badge. A generation counter drops work from before the last
+/// Start/Reset/Stop. (Not RideActivityFeed: that name is the stream contract in Concierge.Contracts.)
 /// </summary>
 /// <param name="dispatch">Runs a callback on the component's renderer (ComponentBase.InvokeAsync).</param>
 /// <param name="changed">Requests a re-render; called on the dispatcher.</param>

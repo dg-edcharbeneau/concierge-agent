@@ -644,8 +644,10 @@ public sealed class ConciergeStayWorkflow
             }
             TrimRecentTurnsToStorageBudget();
 
-            var result = new ConciergeTurnResult(turn.TurnId, answer, turn.Sequence, endChatCall, turn.RideCard);
-            acceptedTurns.Add(turn.TurnId, new AcceptedTurn(fingerprint, result));
+            var result = new ConciergeTurnResult(
+                turn.TurnId, answer, turn.Sequence, endChatCall, turn.RideCard, actionResult.FailureDetail);
+            // An exact retry gets the answer, not the diagnostic, which also stays out of Continue-As-New.
+            acceptedTurns.Add(turn.TurnId, new AcceptedTurn(fingerprint, result with { FailureDetail = null }));
             runTurns.Add(turn);
             if (attempt.SideEffectDispatched && request.VoiceUtterance is { } actionUtterance)
             {
@@ -775,7 +777,7 @@ public sealed class ConciergeStayWorkflow
         }
         catch (ActivityFailureException exception)
         {
-            return new(ModelFailureReply(exception, "answer"), null);
+            return new(ModelFailureReply(exception, "answer"), null, FailureDetail: FailureDetail(exception));
         }
 
         while (true)
@@ -854,7 +856,7 @@ public sealed class ConciergeStayWorkflow
                 }
                 catch (ActivityFailureException exception)
                 {
-                    return new(ModelFailureReply(exception, "answer"), null);
+                    return new(ModelFailureReply(exception, "answer"), null, FailureDetail: FailureDetail(exception));
                 }
 
                 continue;
@@ -1262,7 +1264,7 @@ public sealed class ConciergeStayWorkflow
             }
             catch (ActivityFailureException exception)
             {
-                return new(ModelFailureReply(exception, call.Name), null);
+                return new(ModelFailureReply(exception, call.Name), null, FailureDetail: FailureDetail(exception));
             }
         }
     }
@@ -1672,6 +1674,25 @@ public sealed class ConciergeStayWorkflow
                 ? "I couldn't reach the concierge service to finish that just now. Check your rides before trying again, in case the request went through."
                 : "I couldn't reach the concierge service just now. Please try again in a moment.";
 
+    private const int MaxFailureDetailLength = 4_000;
+
+    /// <summary>
+    /// The model call's failure chain (type, Temporal error type, message) behind a fallback reply. Built
+    /// from history, so it replays identically; only Development pages show it.
+    /// </summary>
+    private static string FailureDetail(Exception exception)
+    {
+        var lines = new List<string>();
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            var errorType = current is ApplicationFailureException { ErrorType: { Length: > 0 } type } ? $" ({type})" : "";
+            lines.Add($"{(lines.Count == 0 ? "" : "caused by ")}{current.GetType().Name}{errorType}: {current.Message}");
+        }
+
+        var detail = string.Join("\n", lines);
+        return detail.Length > MaxFailureDetailLength ? detail[..MaxFailureDetailLength] : detail;
+    }
+
     private const string UnsafeActionReply =
         "I couldn't safely process that action request. Please clarify what you would like me to do.";
 
@@ -1779,7 +1800,8 @@ public sealed class ConciergeStayWorkflow
         string AssistantMessage,
         ConciergeEndChatFunctionCall? EndChatFunctionCall,
         long? ConfirmedRequestSequence = null,
-        ConciergeRideCard? RideCard = null)
+        ConciergeRideCard? RideCard = null,
+        string? FailureDetail = null)
     {
         public string Answer => AssistantMessage;
     }

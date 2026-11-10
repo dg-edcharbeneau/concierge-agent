@@ -1,5 +1,6 @@
 using Concierge.Contracts;
 using Concierge.Web.Agentic;
+using Concierge.Web.Components.Shared;
 using Concierge.Web.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.AI;
@@ -10,7 +11,7 @@ using Microsoft.JSInterop;
 namespace Concierge.Web.Components.Pages;
 
 /// <summary>
-/// PROTOTYPE (ADR 0015): the AG-UI page. The chat is a Components.AI <see cref="UIAgent"/> whose
+/// The guest chat page, at / and /agentic (ADR 0015). The chat is a Components.AI <see cref="UIAgent"/> whose
 /// <see cref="IChatClient"/> is an AG-UI client of this app's own <c>/agui/concierge</c> endpoint; the
 /// stay workflow stays the source of truth. Turns other clients add (the room device) appear live.
 /// </summary>
@@ -25,18 +26,24 @@ public sealed partial class Agentic : IAsyncDisposable
     [Inject] private Voice.VoiceSessionRegistry VoiceSessions { get; set; } = default!;
     [Inject] private IJSRuntime JavaScript { get; set; } = default!;
     [Inject] private ILogger<Agentic> Logger { get; set; } = default!;
+    [Inject] private IServiceProvider Services { get; set; } = default!;
 
     /// <summary>What the page keeps in sessionStorage (its own key; see agentic.js).</summary>
     internal sealed record StoredSession(string Credential, Guid StayId, Guid SessionId, DateTimeOffset ExpiresAtUtc);
 
     private bool ready;
-    private string theme = "system";
+    private string theme = ThemeChoice.Default;
     private string lastName = string.Empty;
     private string roomNumber = string.Empty;
     private string? verificationError;
     private bool isVerifying;
 
     private StoredSession? session;
+
+    /// <summary>Development only (null otherwise): the failed run's server exception for the error card.</summary>
+    private Func<string?>? FailureDetails => Services.GetService<AgenticRunFailures>() is { } failures
+        ? () => session is { } current ? failures.Latest(current.Credential) : null
+        : null;
     private StayConversationThread? thread;
     private UIAgent? agent;
     private IChatClient? chatClient;
@@ -70,7 +77,7 @@ public sealed partial class Agentic : IAsyncDisposable
     {
         if (firstRender)
         {
-            theme = await TryInvokeAsync<string>("conciergeChat.loadTheme") ?? "system";
+            theme = ThemeChoice.Normalize(await TryInvokeAsync<string>("conciergeChat.loadTheme"));
             await TryInvokeVoidAsync("conciergeChat.applyTheme", theme);
             var stored = await TryInvokeAsync<StoredSession>("conciergeAgentic.loadSession");
             if (stored is not null && stored.ExpiresAtUtc > DateTimeOffset.UtcNow && !string.IsNullOrEmpty(stored.Credential))
@@ -187,7 +194,7 @@ public sealed partial class Agentic : IAsyncDisposable
             RefreshFromHistoryAsync, OnSessionExpiredAsync, OnVoiceEndedChatAsync);
     }
 
-    /// <summary>As Home: not while the page's own turn runs or the chat is ending or starting over.</summary>
+    /// <summary>Not while the page's own turn runs or the chat is ending or starting over.</summary>
     private bool CanStartVoice =>
         session is not null && voice is { Mode: false } && !runInFlight
         && !isEnding && !isResetting && !showEndConfirmation && !showResetConfirmation;
@@ -362,7 +369,7 @@ public sealed partial class Agentic : IAsyncDisposable
 
     private async Task ChangeThemeAsync(ChangeEventArgs args)
     {
-        theme = args.Value?.ToString() is "light" or "dark" ? args.Value.ToString()! : "system";
+        theme = ThemeChoice.Normalize(args.Value?.ToString());
         await TryInvokeVoidAsync("conciergeChat.applyTheme", theme);
     }
 
