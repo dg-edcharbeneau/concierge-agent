@@ -24,8 +24,9 @@ public sealed class SetupActivities(
 
     /// <summary>
     /// Inserts the fictional guests and stays, updating existing rows only when
-    /// <see cref="SeedDemoDataRequest.OverwriteExisting"/> is set. Fails without retry if a stay ID or
-    /// external key would be reassigned.
+    /// <see cref="SeedDemoDataRequest.OverwriteExisting"/> is set. Without it, an existing stay keeps its
+    /// guest and room but gets a fresh date window once it reaches its checkout day.
+    /// Fails without retry if a stay ID or external key would be reassigned.
     /// </summary>
     [Activity(nameof(SeedFictionalStaysAsync))]
     public async Task<SeedDemoDataResult> SeedFictionalStaysAsync(SeedDemoDataRequest request)
@@ -82,12 +83,20 @@ public sealed class SetupActivities(
                     (((CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 8)::timestamp
                         AT TIME ZONE 'America/New_York'))
                 ON CONFLICT (external_stay_key) DO UPDATE
-                SET guest_id = EXCLUDED.guest_id,
-                    room_number = EXCLUDED.room_number,
+                SET guest_id = CASE WHEN $5 THEN EXCLUDED.guest_id ELSE stays.guest_id END,
+                    room_number = CASE WHEN $5 THEN EXCLUDED.room_number ELSE stays.room_number END,
                     check_in_utc = EXCLUDED.check_in_utc,
                     check_out_utc = EXCLUDED.check_out_utc,
                     eligibility_ends_at_utc = EXCLUDED.eligibility_ends_at_utc
-                WHERE $5;
+                -- The database volume outlives the 8-day window, so a restart a week later would
+                -- otherwise reject every demo login. Roll the window once the stay reaches its
+                -- checkout day (login closes by tonight's local midnight); earlier, keep the dates
+                -- so a stay in progress is not moved under its running workflow.
+                WHERE $5
+                   OR stays.check_in_utc > CURRENT_TIMESTAMP
+                   OR stays.eligibility_ends_at_utc <=
+                       (((CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 1)::timestamp
+                           AT TIME ZONE 'America/New_York');
                 """,
                 connection,
                 transaction);

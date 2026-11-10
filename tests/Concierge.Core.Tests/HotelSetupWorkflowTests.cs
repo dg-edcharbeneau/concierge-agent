@@ -325,6 +325,48 @@ public sealed class HotelSetupWorkflowTests(PostgreSqlFixture postgres)
     }
 
     [Fact]
+    public async Task SetupWithoutOverwriteRollsExpiredAndCheckoutDayStaysForwardAndKeepsOpenOnes()
+    {
+        await using var fixture = await SetupFixture.StartAsync(postgres, [MinimalPolicies]);
+        await fixture.RunSetupAsync();
+        // Stay rows must sit on hotel-local midnights (ck_stays_local_day_eligibility).
+        static string LocalDay(int offset) =>
+            $"(((CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + {offset})::timestamp "
+            + "AT TIME ZONE 'America/New_York')";
+        await fixture.ExecuteAsync(
+            $"""
+            UPDATE stays SET
+                check_in_utc = {LocalDay(-9)},
+                check_out_utc = {LocalDay(-1)},
+                eligibility_ends_at_utc = {LocalDay(0)}
+            WHERE external_stay_key = 'zgy-demo-rm-412';
+            UPDATE stays SET
+                check_in_utc = {LocalDay(-7)},
+                check_out_utc = {LocalDay(0)},
+                eligibility_ends_at_utc = {LocalDay(1)}
+            WHERE external_stay_key = 'zgy-demo-rm-0812';
+            """);
+        const string windowSql =
+            "SELECT check_in_utc::text || ' ' || eligibility_ends_at_utc::text FROM stays WHERE external_stay_key = $1;";
+        var openWindow = await fixture.ScalarAsync<string>(windowSql, "zgy-demo-rm-112");
+        fixture.FirstStay.RoomNumber = "999";
+
+        await fixture.RunSetupAsync(OverwriteExistingSeedRecords: false);
+
+        var loginOpenPastTonightSql =
+            $"""
+            SELECT check_in_utc <= CURRENT_TIMESTAMP
+               AND eligibility_ends_at_utc > {LocalDay(1)}
+            FROM stays WHERE external_stay_key = $1;
+            """;
+        Assert.True(await fixture.ScalarAsync<bool>(loginOpenPastTonightSql, "zgy-demo-rm-412"));
+        Assert.True(await fixture.ScalarAsync<bool>(loginOpenPastTonightSql, "zgy-demo-rm-0812"));
+        Assert.Equal(openWindow, await fixture.ScalarAsync<string>(windowSql, "zgy-demo-rm-112"));
+        Assert.Equal("412", await fixture.ScalarAsync<string>(
+            "SELECT room_number FROM stays WHERE external_stay_key = 'zgy-demo-rm-412';"));
+    }
+
+    [Fact]
     public async Task ChangedStayIdForExistingExternalKeyFailsSetupWithoutWritingSeedChanges()
     {
         await using var fixture = await SetupFixture.StartAsync(postgres, [MinimalPolicies]);
