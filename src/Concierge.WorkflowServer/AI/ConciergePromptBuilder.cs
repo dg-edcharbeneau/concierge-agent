@@ -183,7 +183,7 @@ internal static class ConciergePromptBuilder
         foreach (var previous in recentTurns.Reverse())
         {
             selectedRecent.Insert(0, previous);
-            if (EstimatePromptTokens(BuildMessagesWithRecent(messages, selectedRecent))
+            if (EstimatePromptTokens(BuildMessagesWithRecent(messages, selectedRecent, evidenceMessage))
                 > budget.PromptLimit)
             {
                 selectedRecent.RemoveAt(0);
@@ -191,7 +191,7 @@ internal static class ConciergePromptBuilder
             }
         }
 
-        var completeMessages = BuildMessagesWithRecent(messages, selectedRecent);
+        var completeMessages = BuildMessagesWithRecent(messages, selectedRecent, evidenceMessage);
         EnsureAnswerBudget(completeMessages, budget);
         return new PromptBuildResult(
             completeMessages,
@@ -303,15 +303,20 @@ internal static class ConciergePromptBuilder
         return added > 0 ? evidenceBuilder.ToString() : EvidenceDidNotFit;
     }
 
+    /// <summary>
+    /// Places earlier turns ahead of <paramref name="firstPerTurnMessage"/> (the evidence), so everything
+    /// before it is stable across turns and each request starts with the previous request's prefix.
+    /// Azure OpenAI only reuses its prompt cache when the leading 1,024+ tokens match exactly.
+    /// </summary>
     private static List<ChatMessage> BuildMessagesWithRecent(
         IReadOnlyList<ChatMessage> coreMessages,
-        IReadOnlyList<ConciergeTranscriptTurn> selectedRecent)
+        IReadOnlyList<ConciergeTranscriptTurn> selectedRecent,
+        ChatMessage firstPerTurnMessage)
     {
         var messages = new List<ChatMessage>(coreMessages.Count + selectedRecent.Count * 2);
-        var currentUserInserted = false;
         foreach (var message in coreMessages)
         {
-            if (!currentUserInserted && message.Role == ChatRole.User)
+            if (ReferenceEquals(message, firstPerTurnMessage))
             {
                 foreach (var previous in selectedRecent)
                 {
@@ -319,8 +324,6 @@ internal static class ConciergePromptBuilder
                     messages.Add(new ChatMessage(
                         ChatRole.Assistant, StripWeatherImageMarkdown(previous.AssistantMessage)));
                 }
-
-                currentUserInserted = true;
             }
 
             messages.Add(message);

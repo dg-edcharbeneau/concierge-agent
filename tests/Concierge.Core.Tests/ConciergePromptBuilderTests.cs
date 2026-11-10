@@ -150,19 +150,55 @@ public sealed class ConciergePromptBuilderTests
             new[]
             {
                 ChatRole.System,
+                ChatRole.User,
+                ChatRole.Assistant,
+                ChatRole.User,
+                ChatRole.Assistant,
                 ChatRole.System,
-                ChatRole.User,
-                ChatRole.Assistant,
-                ChatRole.User,
-                ChatRole.Assistant,
                 ChatRole.User,
             },
             prompt.Messages.Select(message => message.Role));
-        Assert.Equal("First answer.", prompt.Messages[3].Text);
-        Assert.Contains(
-            prompt.Messages,
-            message => message.Text?.Contains("No current hotel evidence was found.", StringComparison.Ordinal)
-                == true);
+        Assert.Equal("First answer.", prompt.Messages[2].Text);
+        Assert.Contains("No current hotel evidence was found.", prompt.Messages[5].Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConsecutiveTurnsShareEverythingBeforeTheEvidenceAsAPromptPrefix()
+    {
+        // Azure OpenAI reuses cached input only for an identical leading prefix, so the previous
+        // request's stable part (instructions, guest, history) must open the next request unchanged.
+        var guest = new ConciergeVerifiedGuest(
+            Guid.NewGuid(), "Taylor", "Morgan", "812", Guid.NewGuid(),
+            new DateOnly(2026, 11, 17), new DateOnly(2026, 11, 9));
+        var budget = new ConciergePromptBuilder.PromptBudget(
+            ConciergePromptBuilder.ActionWorkingContextBudgetTokens, 0, ActionTools: true);
+        ConciergeTranscriptTurn first = new(
+            "t-1", 0, "web", "When does the pool open?", "The pool opens at 8:00 a.m.", DateTimeOffset.UnixEpoch);
+        ConciergeTranscriptTurn second = new(
+            "t-2", 1, "web", "What time is checkout?", "Checkout is at 11:00 a.m.", DateTimeOffset.UnixEpoch);
+
+        var earlier = ConciergePromptBuilder.BuildMemoryTurn(
+            "What time is checkout?", Retrieval("Checkout is 11:00 a.m."), [], budget, guest, [first]);
+        var later = ConciergePromptBuilder.BuildMemoryTurn(
+            "Is breakfast included?", Retrieval("Breakfast is served from 7:00 a.m."), [], budget, guest,
+            [first, second]);
+
+        var earlierStable = earlier.Messages.TakeWhile(message => !IsEvidence(message)).ToArray();
+        Assert.Equal(
+            earlierStable.Select(message => (message.Role, message.Text)),
+            later.Messages.Take(earlierStable.Length).Select(message => (message.Role, message.Text)));
+        Assert.Equal(
+            ["What time is checkout?", "Checkout is at 11:00 a.m."],
+            later.Messages.Skip(earlierStable.Length).Take(2).Select(message => message.Text));
+        Assert.True(IsEvidence(later.Messages[earlierStable.Length + 2]));
+        Assert.Equal("Is breakfast included?", later.Messages[^1].Text);
+
+        static HotelRetrievalResult Retrieval(string passage) =>
+            new(HotelRetrievalPath.Hybrid,
+                [new HotelRetrievalEvidence("c", "k", "s", "t", "t", null, passage, "v", "h", "ready", "{}", "{}", 1, 1, 1, 1)]);
+
+        static bool IsEvidence(ChatMessage message) =>
+            message.Text?.StartsWith("Current Hotel ZGY evidence", StringComparison.Ordinal) == true;
     }
 
     [Fact]
