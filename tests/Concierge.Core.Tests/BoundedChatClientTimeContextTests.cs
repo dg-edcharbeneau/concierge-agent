@@ -9,7 +9,7 @@ public sealed class BoundedChatClientTimeContextTests
     private static readonly TimeZoneInfo Hotel = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
     [Fact]
-    public async Task ActionTurnsReceiveHotelLocalNowAfterTheStaticSystemPrompts()
+    public async Task ActionTurnsReceiveHotelLocalNowJustBeforeTheCurrentGuestMessage()
     {
         var inner = new CapturingChatClient();
         using var client = new BoundedChatClient(
@@ -23,17 +23,23 @@ public sealed class BoundedChatClientTimeContextTests
             [
                 new ChatMessage(ChatRole.System, "base"),
                 new ChatMessage(ChatRole.System, "actions"),
+                new ChatMessage(ChatRole.User, "Pool hours?"),
+                new ChatMessage(ChatRole.Assistant, "8 a.m. to 8 p.m."),
+                new ChatMessage(ChatRole.System, "evidence"),
                 new ChatMessage(ChatRole.User, "Book a ride tomorrow at 10 am."),
             ],
             ActionOptions());
 
+        // The clock changes every minute; ahead of the history it would end the cacheable prefix.
         var sent = Assert.Single(inner.Requests);
-        Assert.Equal(["base", "actions"], sent.Take(2).Select(message => message.Text));
-        Assert.Equal(ChatRole.System, sent[2].Role);
+        Assert.Equal(
+            ["base", "actions", "Pool hours?", "8 a.m. to 8 p.m.", "evidence"],
+            sent.Take(5).Select(message => message.Text));
+        Assert.Equal(ChatRole.System, sent[5].Role);
         Assert.Equal(
             "Hotel-local now: Tuesday 2026-10-20 06:05 (UTC-04:00). Resolve relative dates and times in hotel-local time and send pickupAt with that UTC offset.",
-            sent[2].Text);
-        Assert.Equal(ChatRole.User, sent[3].Role);
+            sent[5].Text);
+        Assert.Equal("Book a ride tomorrow at 10 am.", sent[6].Text);
     }
 
     [Fact]

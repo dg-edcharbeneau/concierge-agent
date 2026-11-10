@@ -408,7 +408,8 @@ internal sealed class BoundedChatClient(
     /// Gives action turns the hotel-local clock so relative ride times ("tomorrow at 10 am") resolve
     /// to the right date and offset. Added here rather than in the workflow because wall-clock time
     /// is nondeterministic; the model activity result records whatever the model produced.
-    /// Inserted after the static system prompts to keep the cacheable prefix stable.
+    /// Inserted just before the current guest message: it changes every minute, so anywhere earlier
+    /// it would end the prompt prefix Azure OpenAI can reuse from cache.
     /// </summary>
     internal IEnumerable<ChatMessage> AddHotelTimeContext(IEnumerable<ChatMessage> messages, ChatOptions? options)
     {
@@ -425,8 +426,8 @@ internal sealed class BoundedChatClient(
                 System.Globalization.CultureInfo.InvariantCulture,
                 $"Hotel-local now: {now:dddd yyyy-MM-dd HH:mm} (UTC{now:zzz}). Resolve relative dates and times in hotel-local time and send pickupAt with that UTC offset."));
         var list = messages.ToList();
-        var firstNonSystem = list.FindIndex(message => message.Role != ChatRole.System);
-        list.Insert(firstNonSystem < 0 ? list.Count : firstNonSystem, context);
+        var currentUser = list.FindLastIndex(message => message.Role == ChatRole.User);
+        list.Insert(currentUser < 0 ? list.Count : currentUser, context);
         return list;
     }
 
