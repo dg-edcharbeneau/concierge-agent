@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 456" width="1100" height="456" role="img" aria-labelledby="voice-title voice-desc">
+  <title id="voice-title">Concierge Agent voice flow</title>
+  <desc id="voice-desc">Voice pipeline. The browser streams 16 kHz mic audio to the voice relay in Concierge.Web, which forwards it to Deepgram's Voice Agent. Deepgram sends the transcript through the dev tunnel to the Think endpoint, which submits it as a SubmitTurn Update to the guest's stay workflow in Temporal. The workflow runs the AI model, hotel knowledge search, places and weather lookups, and rides as activities. Answer text streams back to the Think endpoint, then to Deepgram, which speaks it as 24 kHz audio through the relay to the browser.</desc>
+  <style>
+    :root {
+      --surface: #FFFFFF; --line: #CDD1DE; --fg: #14151A; --muted: #545A6C; --edge: #3F4454;
+      --uv: #444CE7; --on-uv: #FFFFFF; --glass: #00B2FF; --on-glass: #06121A; --glass-wash: #DCF3FF;
+      --hot: #7F39FF; --on-hot: #FFFFFF;
+      --font-body: "Work Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+      --font-mono: "Azeret Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --surface: #1A1B21; --line: #2F313B; --fg: #F1F2F6; --muted: #A3A8B6; --edge: #B9BDCA;
+        --glass-wash: #0A2838; --hot: #E042FF; --on-hot: #14151A;
+      }
+    }
+    .bg { fill: var(--surface); stroke: var(--line); stroke-width: 1; }
+    .n { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+    .n-dg { fill: var(--glass); }
+    .n-dg-soft { fill: var(--glass-wash); stroke: var(--glass); stroke-width: 1.5; }
+    .n-tp { fill: var(--uv); }
+    .e { fill: none; stroke: var(--edge); stroke-width: 1.6; }
+    .e-back { fill: none; stroke: var(--edge); stroke-width: 1.6; stroke-dasharray: 5 4; }
+    .ahf { fill: var(--edge); }
+    .t { fill: var(--fg); font-family: var(--font-body); font-size: 14px; font-weight: 700; }
+    .t-on-glass { fill: var(--on-glass); }
+    .t-on-uv { fill: var(--on-uv); }
+    .s { fill: var(--muted); font-family: var(--font-mono); font-size: 10px; }
+    .s-on-glass { fill: var(--on-glass); }
+    .s-on-uv { fill: var(--on-uv); opacity: 0.88; }
+    .lbl { fill: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
+    .zl { fill: var(--muted); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.12em; }
+    .tunnel { fill: var(--surface); stroke: var(--edge); stroke-width: 1.2; }
+    .tt { fill: var(--fg); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; }
+    .bdg { fill: var(--hot); }
+    .bdt { fill: var(--on-hot); font-family: var(--font-body); font-size: 11.5px; font-weight: 800; }
+    .lg { fill: var(--fg); font-family: var(--font-body); font-size: 13px; font-weight: 600; }
+    .lg-dim { fill: var(--muted); font-weight: 400; }
+  </style>
+
+  <rect class="bg" x="0.5" y="0.5" width="1099" height="455" rx="18"/>
+
+  <!-- Legend -->
+  <g aria-label="Legend">
+    <rect class="n-dg" x="24" y="22" width="16" height="16" rx="4"/>
+    <text class="lg" x="48" y="35">Deepgram<tspan class="lg-dim"> speech in, speech out</tspan></text>
+    <rect class="n-dg-soft" x="290.75" y="22.75" width="14.5" height="14.5" rx="4"/>
+    <text class="lg" x="314" y="35">Voice code in Concierge.Web<tspan class="lg-dim"> relay and Think endpoint</tspan></text>
+    <rect class="n-tp" x="690" y="22" width="16" height="16" rx="4"/>
+    <text class="lg" x="714" y="35">Temporal<tspan class="lg-dim"> the guest's stay workflow</tspan></text>
+
+    <circle class="bdg" cx="32" cy="58" r="8"/>
+    <text class="lg" x="48" y="63">Steps<tspan class="lg-dim"> one spoken turn</tspan></text>
+    <path class="e" d="M262,58 H300" marker-end="url(#vah)"/>
+    <text class="lg" x="314" y="63">Solid arrows<tspan class="lg-dim"> carry the question</tspan></text>
+    <path class="e-back" d="M638,58 H676" marker-end="url(#vah)"/>
+    <text class="lg" x="690" y="63">Dashed arrows<tspan class="lg-dim"> carry the answer back</tspan></text>
+  </g>
+
+  <!-- Diagram -->
+  <g transform="translate(20 88)">
+        <defs>
+          <marker id="vah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="ahf"/>
+          </marker>
+        </defs>
+
+        <!-- Column labels -->
+        <text class="zl" x="85" y="46" text-anchor="middle">GUEST</text>
+        <text class="zl" x="307" y="46" text-anchor="middle">CONCIERGE.WEB</text>
+        <text class="zl" x="529" y="46" text-anchor="middle">DEEPGRAM CLOUD</text>
+        <text class="zl" x="751" y="46" text-anchor="middle">CONCIERGE.WEB</text>
+        <text class="zl" x="973" y="46" text-anchor="middle">TEMPORAL</text>
+
+        <!-- Pipeline nodes -->
+        <rect class="n" x="20" y="60" width="130" height="150" rx="12"/>
+        <text class="t" x="85" y="130" text-anchor="middle">Browser</text>
+        <text class="s" x="85" y="149" text-anchor="middle">mic + speaker</text>
+        <text class="s" x="85" y="163" text-anchor="middle">worklets</text>
+
+        <rect class="n-dg-soft" x="242" y="60" width="130" height="150" rx="12"/>
+        <text class="t" x="307" y="130" text-anchor="middle">Voice relay</text>
+        <text class="s" x="307" y="149" text-anchor="middle">WebSocket bridge</text>
+        <text class="s" x="307" y="163" text-anchor="middle">paces playback</text>
+
+        <rect class="n-dg" x="464" y="60" width="130" height="150" rx="12"/>
+        <text class="t t-on-glass" x="529" y="130" text-anchor="middle">Voice Agent</text>
+        <text class="s s-on-glass" x="529" y="149" text-anchor="middle">Flux listen</text>
+        <text class="s s-on-glass" x="529" y="163" text-anchor="middle">Flux speak</text>
+
+        <rect class="n-dg-soft" x="686" y="60" width="130" height="150" rx="12"/>
+        <text class="t" x="751" y="130" text-anchor="middle">Think endpoint</text>
+        <text class="s" x="751" y="149" text-anchor="middle">/v1/chat/</text>
+        <text class="s" x="751" y="163" text-anchor="middle">completions</text>
+
+        <rect class="n-tp" x="908" y="60" width="130" height="150" rx="12"/>
+        <text class="t t-on-uv" x="973" y="130" text-anchor="middle">Stay workflow</text>
+        <text class="s s-on-uv" x="973" y="149" text-anchor="middle">one per guest</text>
+        <text class="s s-on-uv" x="973" y="163" text-anchor="middle">same as chat</text>
+
+        <!-- Request lane (top, left to right) -->
+        <path class="e" d="M150,105 H242" marker-end="url(#vah)"/>
+        <text class="lbl" x="196" y="92" text-anchor="middle">mic 16 kHz</text>
+        <path class="e" d="M372,105 H464" marker-end="url(#vah)"/>
+        <text class="lbl" x="418" y="92" text-anchor="middle">audio</text>
+        <path class="e" d="M594,105 H686" marker-end="url(#vah)"/>
+        <text class="lbl" x="640" y="84" text-anchor="middle">transcript</text>
+        <path class="e" d="M816,105 H908" marker-end="url(#vah)"/>
+        <text class="lbl" x="862" y="92" text-anchor="middle">SubmitTurn</text>
+
+        <!-- Reply lane (bottom, right to left) -->
+        <path class="e-back" d="M908,165 H816" marker-end="url(#vah)"/>
+        <text class="lbl" x="862" y="186" text-anchor="middle">answer text</text>
+        <path class="e-back" d="M686,165 H594" marker-end="url(#vah)"/>
+        <text class="lbl" x="640" y="196" text-anchor="middle">text stream</text>
+        <path class="e-back" d="M464,165 H372" marker-end="url(#vah)"/>
+        <text class="lbl" x="418" y="186" text-anchor="middle">speech 24 kHz</text>
+        <path class="e-back" d="M242,165 H150" marker-end="url(#vah)"/>
+        <text class="lbl" x="196" y="186" text-anchor="middle">paced audio</text>
+
+        <!-- Dev tunnel gate between Deepgram and Think -->
+        <rect class="tunnel" x="629" y="92" width="22" height="86" rx="8"/>
+        <text class="tt" transform="translate(644 135) rotate(-90)" text-anchor="middle">DEV TUNNEL</text>
+
+        <!-- What a turn touches -->
+        <path class="e" d="M973,210 V246 H529 V276" marker-end="url(#vah)"/>
+        <path class="e" d="M677,246 V276" marker-end="url(#vah)"/>
+        <path class="e" d="M825,246 V276" marker-end="url(#vah)"/>
+        <path class="e" d="M973,246 V276" marker-end="url(#vah)"/>
+        <text class="lbl" x="965" y="236" text-anchor="end">runs as activities</text>
+        <text class="zl" x="440" y="304" text-anchor="end">WHAT A TURN CAN TOUCH</text>
+
+        <rect class="n" x="464" y="276" width="130" height="60" rx="10"/>
+        <text class="t" x="529" y="301" text-anchor="middle">AI model</text>
+        <text class="s" x="529" y="319" text-anchor="middle">Ollama or Foundry</text>
+
+        <rect class="n" x="612" y="276" width="130" height="60" rx="10"/>
+        <text class="t" x="677" y="301" text-anchor="middle">Hotel facts</text>
+        <text class="s" x="677" y="319" text-anchor="middle">pgvector search</text>
+
+        <rect class="n" x="760" y="276" width="130" height="60" rx="10"/>
+        <text class="t" x="825" y="298" text-anchor="middle">Places, weather</text>
+        <text class="s" x="825" y="314" text-anchor="middle">Geoapify</text>
+        <text class="s" x="825" y="327" text-anchor="middle">Open-Meteo</text>
+
+        <rect class="n" x="908" y="276" width="130" height="60" rx="10"/>
+        <text class="t" x="973" y="301" text-anchor="middle">Rides</text>
+        <text class="s" x="973" y="319" text-anchor="middle">ride service</text>
+
+        <!-- Step badges -->
+        <circle class="bdg" cx="168" cy="105" r="11"/><text class="bdt" x="168" y="109" text-anchor="middle">1</text>
+        <circle class="bdg" cx="390" cy="105" r="11"/><text class="bdt" x="390" y="109" text-anchor="middle">2</text>
+        <circle class="bdg" cx="611" cy="105" r="11"/><text class="bdt" x="611" y="109" text-anchor="middle">3</text>
+        <circle class="bdg" cx="834" cy="105" r="11"/><text class="bdt" x="834" y="109" text-anchor="middle">4</text>
+        <circle class="bdg" cx="890" cy="165" r="11"/><text class="bdt" x="890" y="169" text-anchor="middle">5</text>
+        <circle class="bdg" cx="224" cy="165" r="11"/><text class="bdt" x="224" y="169" text-anchor="middle">6</text>
+  </g>
+</svg>
